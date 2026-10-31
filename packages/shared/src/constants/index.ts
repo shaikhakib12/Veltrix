@@ -17,6 +17,31 @@ export const EVENT_CATEGORIES = [
   'SYSTEM',
 ] as const;
 
+export const SUPPORTED_EVENT_TYPES = [
+  'auth.login.failed',
+  'auth.login.success',
+  'auth.logout',
+  'auth.password.reset',
+  'auth.mfa.failed',
+  'network.connection',
+  'network.port.scan',
+  'network.dns.query',
+  'privilege.escalation',
+  'privilege.role.assumed',
+  'privilege.policy.mutation',
+  'api.request',
+  'api.request.burst',
+  'api.anomaly',
+  'data.access',
+  'data.access.bulk',
+  'data.exfiltration',
+  'system.process.spawn',
+  'system.service.stop',
+  'system.file.modify',
+  'admin.action',
+  'recon.account.probe',
+] as const;
+
 export const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
 
 export const INCIDENT_STATUSES = [

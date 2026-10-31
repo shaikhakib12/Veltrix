@@ -10,18 +10,25 @@ import type {
   AuditState,
 } from '@veltrix/shared';
 
+export interface EventQueryOptions {
+  limit?: number;
+  cursor?: string;
+  eventType?: string;
+  severity?: Severity;
+  sourceIp?: string;
+  username?: string;
+  sourceSystem?: string;
+  startTime?: string;
+  endTime?: string;
+}
+
 export interface StorageInterface {
   // --- Security Events Telemetry ---
   saveEvent(event: SecurityEvent): Promise<{ saved: boolean; isDuplicate: boolean }>;
   getEvents(
     orgId: string,
-    options?: {
-      limit?: number;
-      cursor?: string;
-      eventType?: string;
-      sourceIp?: string;
-    }
-  ): Promise<{ items: SecurityEvent[]; nextCursor?: string }>;
+    options?: EventQueryOptions
+  ): Promise<{ items: SecurityEvent[]; nextCursor?: string; total?: number }>;
   getEventById(orgId: string, eventId: string): Promise<SecurityEvent | null>;
 
   // --- Incidents Management ---

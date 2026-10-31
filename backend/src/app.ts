@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { PLATFORM_INFO, type ApiResponse, type ApiErrorResponse } from '@veltrix/shared';
 import { createAuthRouter } from './routes/auth.js';
+import { createEventsRouter } from './routes/events.js';
 import { authenticate } from './middleware/auth.js';
 import { enforceTenantIsolation } from './middleware/tenant.js';
 import { requireRole } from './middleware/rbac.js';
@@ -66,6 +67,9 @@ export function createApp() {
 
   // Authentication Routes (TASK-301)
   app.use('/api/v1/auth', createAuthRouter());
+
+  // Telemetry Ingestion & Query Routes (TASK-401, TASK-402)
+  app.use('/api/v1/events', createEventsRouter());
 
   // Multi-Tenant Isolation Verification Route (TASK-303)
   app.get(
