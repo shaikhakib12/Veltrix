@@ -348,8 +348,27 @@ export class MemoryStore implements StorageInterface {
     prevHash: string,
     data: Omit<AuditLog, 'prevHash' | 'currentHash'>
   ): string {
-    const payload = `${prevHash}|${data.logId}|${data.orgId}|${data.timestamp}|${data.action}|${data.actor.userId}|${JSON.stringify(data.details)}`;
+    const payload = `${prevHash}|${data.logId}|${data.orgId}|${data.timestamp}|${data.action}|${data.actor.userId}|${this.canonicalStringify(data.details)}`;
     return createHash('sha256').update(payload, 'utf8').digest('hex');
+  }
+
+  /**
+   * Recursive deterministic JSON serializer (RFC 8785 canonical representation)
+   * to guarantee cryptographic hash repeatability regardless of object key insertion order.
+   */
+  private canonicalStringify(obj: unknown): string {
+    if (obj === null || typeof obj !== 'object') {
+      return JSON.stringify(obj);
+    }
+    if (Array.isArray(obj)) {
+      return '[' + obj.map((item) => this.canonicalStringify(item)).join(',') + ']';
+    }
+    const record = obj as Record<string, unknown>;
+    const sortedKeys = Object.keys(record).sort();
+    const parts = sortedKeys.map(
+      (key) => `${JSON.stringify(key)}:${this.canonicalStringify(record[key])}`
+    );
+    return '{' + parts.join(',') + '}';
   }
 
   async clearAll(): Promise<void> {

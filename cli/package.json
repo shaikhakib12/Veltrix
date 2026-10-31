@@ -6,6 +6,11 @@
   "bin": {
     "veltrix": "./bin/veltrix.js"
   },
+  "preferGlobal": true,
+  "files": [
+    "bin",
+    "dist"
+  ],
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",

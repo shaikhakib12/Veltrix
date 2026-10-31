@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   ShieldAlert,
   Activity,
@@ -7,11 +7,25 @@ import {
   Lock,
   Layers,
   CheckCircle2,
+  Info,
 } from 'lucide-react';
 import { PLATFORM_INFO } from '@veltrix/shared';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'overview' | 'modules'>('overview');
+  const [backendStatus, setBackendStatus] = useState<'ONLINE' | 'OFFLINE' | 'CHECKING'>('CHECKING');
+
+  useEffect(() => {
+    // Attempt local backend probe
+    fetch('/health')
+      .then((res) => {
+        if (res.ok) setBackendStatus('ONLINE');
+        else setBackendStatus('OFFLINE');
+      })
+      .catch(() => {
+        setBackendStatus('OFFLINE');
+      });
+  }, []);
 
   return (
     <div className="min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col font-sans">
@@ -35,19 +49,40 @@ export default function App() {
         </div>
 
         <div className="flex items-center space-x-4">
-          <div className="flex items-center space-x-2 text-xs text-emerald-400 bg-emerald-950/40 border border-emerald-800/40 px-3 py-1.5 rounded-full">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-            <span>SIEM/SOAR CORE: ONLINE</span>
+          <div className="flex items-center space-x-2 text-xs px-3 py-1.5 rounded-full border bg-slate-900/80">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                backendStatus === 'ONLINE'
+                  ? 'bg-emerald-400 animate-pulse'
+                  : 'bg-amber-400'
+              }`}
+            ></span>
+            <span className={backendStatus === 'ONLINE' ? 'text-emerald-400' : 'text-amber-400'}>
+              API GATEWAY: {backendStatus}
+            </span>
           </div>
           <div className="text-xs text-slate-400 bg-slate-800/60 border border-slate-700/60 px-3 py-1.5 rounded">
-            TENANT: <span className="text-cyan-400 font-mono">org-enterprise-01</span>
+            TENANT: <span className="text-cyan-400 font-mono">org-enterprise-01 (Simulated)</span>
           </div>
         </div>
       </header>
 
       {/* Main Content Area */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-6 space-y-8">
-        {/* Banner */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
+        {/* Sample Data Disclaimer Banner */}
+        <div className="bg-cyan-950/30 border border-cyan-800/50 rounded-lg px-4 py-2.5 flex items-center justify-between text-xs text-cyan-300">
+          <div className="flex items-center space-x-2">
+            <Info className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span>
+              <strong>Phase 2 Architecture Preview:</strong> Metrics below reflect architectural baseline targets. Live dynamic telemetry ingestion connects in Phase 4.
+            </span>
+          </div>
+          <span className="text-[10px] font-mono uppercase bg-cyan-900/60 text-cyan-200 px-2 py-0.5 rounded border border-cyan-700/50">
+            Sample Telemetry
+          </span>
+        </div>
+
+        {/* Hero Banner */}
         <div className="rounded-xl border border-slate-800 bg-gradient-to-r from-[#0D1527] to-[#111C35] p-6 shadow-xl relative overflow-hidden">
           <div className="absolute -right-10 -bottom-10 w-64 h-64 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none"></div>
           <div className="max-w-2xl space-y-3">
@@ -64,41 +99,61 @@ export default function App() {
           </div>
         </div>
 
-        {/* Status Grid */}
+        {/* Status Grid with Explicit Sample Data Badges */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2">
+          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span>INGESTION STATUS</span>
               <Activity className="w-4 h-4 text-cyan-400" />
             </div>
-            <div className="text-2xl font-bold text-white">Active</div>
-            <p className="text-xs text-slate-400">High-precision UUIDv7 deduplication</p>
+            <div className="flex items-baseline space-x-2">
+              <span className="text-2xl font-bold text-white">Active</span>
+              <span className="text-[10px] font-mono text-cyan-400/80 bg-cyan-950/60 px-1.5 py-0.5 rounded border border-cyan-800/40">
+                Sample
+              </span>
+            </div>
+            <p className="text-xs text-slate-400">UUIDv7 deduplication engine loaded</p>
           </div>
 
-          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2">
+          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span>DETECTION ENGINE</span>
               <Layers className="w-4 h-4 text-blue-400" />
             </div>
-            <div className="text-2xl font-bold text-white">10 Sigma Rules</div>
-            <p className="text-xs text-slate-400">Sliding temporal windows ready</p>
+            <div className="flex items-baseline space-x-2">
+              <span className="text-2xl font-bold text-white">10 Sigma Rules</span>
+              <span className="text-[10px] font-mono text-blue-400/80 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-800/40">
+                Baseline
+              </span>
+            </div>
+            <p className="text-xs text-slate-400">Sliding temporal windows configured</p>
           </div>
 
-          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2">
+          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span>DEFENSIVE SOAR</span>
               <ShieldAlert className="w-4 h-4 text-amber-400" />
             </div>
-            <div className="text-2xl font-bold text-white">Gated Defense</div>
+            <div className="flex items-baseline space-x-2">
+              <span className="text-2xl font-bold text-white">Gated Defense</span>
+              <span className="text-[10px] font-mono text-amber-400/80 bg-amber-950/60 px-1.5 py-0.5 rounded border border-amber-800/40">
+                Spec Target
+              </span>
+            </div>
             <p className="text-xs text-slate-400">Zero-bypass approval enforcement</p>
           </div>
 
-          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2">
+          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
             <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
               <span>AUDIT LEDGER</span>
               <Lock className="w-4 h-4 text-emerald-400" />
             </div>
-            <div className="text-2xl font-bold text-white">SHA-256 Intact</div>
+            <div className="flex items-baseline space-x-2">
+              <span className="text-2xl font-bold text-white">SHA-256 Intact</span>
+              <span className="text-[10px] font-mono text-emerald-400/80 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">
+                Verified
+              </span>
+            </div>
             <p className="text-xs text-slate-400">Tamper-evident hash-chained logs</p>
           </div>
         </div>
@@ -161,7 +216,7 @@ export default function App() {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                 <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
                   <span className="text-cyan-400 font-mono font-bold">Mod A:</span>
-                  <span className="text-slate-300">Authentication & Multi-Tenant RBAC Isolation</span>
+                  <span className="text-slate-300">Authentication & Multi-Tenant RBAC Isolation (Cognito / JWT)</span>
                 </div>
                 <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
                   <span className="text-cyan-400 font-mono font-bold">Mod B:</span>

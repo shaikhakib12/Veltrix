@@ -1,5 +1,8 @@
 import { Command } from 'commander';
+import dotenv from 'dotenv';
 import { PLATFORM_INFO } from '@veltrix/shared';
+
+dotenv.config();
 
 export function createCli(): Command {
   const program = new Command();
@@ -7,7 +10,8 @@ export function createCli(): Command {
   program
     .name('veltrix')
     .description(`${PLATFORM_INFO.name} — ${PLATFORM_INFO.tagline}\nHigh-performance SOC terminal operator interface.`)
-    .version(PLATFORM_INFO.version);
+    .version(PLATFORM_INFO.version)
+    .showHelpAfterError('(run "veltrix --help" for available commands)');
 
   // Status Command
   program
@@ -15,23 +19,29 @@ export function createCli(): Command {
     .description('Check platform operational status and backend connectivity')
     .option('--json', 'Output raw JSON')
     .action(async (options) => {
-      const statusData = {
-        platform: PLATFORM_INFO.name,
-        version: PLATFORM_INFO.version,
-        tagline: PLATFORM_INFO.tagline,
-        status: 'READY',
-        mode: process.env.STORAGE_MODE || 'memory',
-        backendUrl: process.env.API_BASE_URL || 'http://localhost:4000/api/v1',
-      };
+      try {
+        const statusData = {
+          platform: PLATFORM_INFO.name,
+          version: PLATFORM_INFO.version,
+          tagline: PLATFORM_INFO.tagline,
+          status: 'READY',
+          mode: process.env.STORAGE_MODE || 'memory',
+          backendUrl: process.env.API_BASE_URL || 'http://localhost:4000/api/v1',
+        };
 
-      if (options.json) {
-        console.log(JSON.stringify(statusData, null, 2));
-      } else {
-        console.log(`\n========================================`);
-        console.log(`  ${statusData.platform} — ${statusData.tagline}`);
-        console.log(`  Version: ${statusData.version} | Mode: ${statusData.mode}`);
-        console.log(`  Status: ${statusData.status}`);
-        console.log(`========================================\n`);
+        if (options.json) {
+          console.log(JSON.stringify(statusData, null, 2));
+        } else {
+          console.log(`\n========================================`);
+          console.log(`  ${statusData.platform} — ${statusData.tagline}`);
+          console.log(`  Version: ${statusData.version} | Mode: ${statusData.mode}`);
+          console.log(`  Status: ${statusData.status}`);
+          console.log(`  API Target: ${statusData.backendUrl}`);
+          console.log(`========================================\n`);
+        }
+      } catch (err) {
+        console.error('[VELTRIX CLI Error]:', err instanceof Error ? err.message : String(err));
+        process.exit(1);
       }
     });
 
@@ -94,8 +104,18 @@ export function createCli(): Command {
   return program;
 }
 
+// Global exception safety
+process.on('unhandledRejection', (reason) => {
+  console.error('[VELTRIX CLI Unhandled Rejection]:', reason);
+  process.exit(1);
+});
+
 // Direct execution guard
-if (process.argv[1]?.endsWith('index.js') || process.argv[1]?.endsWith('index.ts') || process.argv[1]?.endsWith('veltrix.js')) {
+if (
+  process.argv[1]?.endsWith('index.js') ||
+  process.argv[1]?.endsWith('index.ts') ||
+  process.argv[1]?.endsWith('veltrix.js')
+) {
   const cli = createCli();
   cli.parse(process.argv);
 }
