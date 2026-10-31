@@ -8,6 +8,7 @@ import {
   type AuthUser,
   type AuthSession,
 } from '@veltrix/shared';
+import type { RefreshResult } from '../auth/auth-interface.js';
 import { getAuthProvider } from '../auth/index.js';
 import { authenticate } from '../middleware/auth.js';
 
@@ -128,7 +129,7 @@ export function createAuthRouter(): Router {
     }
   });
 
-  // POST /auth/refresh
+  // POST /auth/refresh (With Refresh Token Rotation)
   router.post('/refresh', async (req: Request, res: Response) => {
     const parseResult = AuthRefreshRequestSchema.safeParse(req.body);
     if (!parseResult.success) {
@@ -147,7 +148,7 @@ export function createAuthRouter(): Router {
     try {
       const authProvider = getAuthProvider();
       const tokens = await authProvider.refresh(parseResult.data.refreshToken);
-      const response: ApiResponse<{ accessToken: string; expiresIn: number }> = {
+      const response: ApiResponse<RefreshResult> = {
         success: true,
         data: tokens,
         meta: {
@@ -157,25 +158,30 @@ export function createAuthRouter(): Router {
       res.status(200).json(response);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      const isReuse = message === 'TOKEN_REVOKED_REUSE_DETECTED';
       const errorResponse: ApiErrorResponse = {
         success: false,
         error: {
-          code: 'UNAUTHORIZED_INVALID_REFRESH_TOKEN',
-          message: `Unable to refresh token: ${message}`,
+          code: isReuse ? 'UNAUTHORIZED_REFRESH_TOKEN_REUSE_DETECTED' : 'UNAUTHORIZED_INVALID_REFRESH_TOKEN',
+          message: isReuse
+            ? 'Refresh token reuse detected. Token family invalidated for security.'
+            : `Unable to refresh token: ${message}`,
         },
       };
       res.status(401).json(errorResponse);
     }
   });
 
-  // POST /auth/logout (Protected)
+  // POST /auth/logout (Protected, revokes access token and optional refresh token)
   router.post('/logout', authenticate, async (req: Request, res: Response) => {
     const authHeader = req.headers.authorization;
+    const refreshToken = (req.body?.refreshToken as string) || undefined;
+
     if (authHeader) {
       const token = authHeader.split(' ')[1];
       if (token) {
         const authProvider = getAuthProvider();
-        await authProvider.logout(token);
+        await authProvider.logout(token, refreshToken);
       }
     }
 

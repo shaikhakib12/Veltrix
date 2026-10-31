@@ -513,64 +513,80 @@ export class DynamoDBStore implements StorageInterface {
   // --- Cryptographic Audit Ledger (Two-Table Atomic TransactWriteItems) ---
 
   async appendAuditLog(
-    logData: Omit<AuditLog, 'prevHash' | 'currentHash'>
+    logData: Omit<AuditLog, 'prevHash' | 'currentHash'>,
+    maxRetries = 5
   ): Promise<AuditLog> {
     const orgId = logData.orgId;
-    const currentState = await this.getAuditState(orgId);
-    const prevHash = currentState ? currentState.lastVerifiedHash : DynamoDBStore.GENESIS_HASH;
+    let attempt = 0;
 
-    const currentHash = this.computeAuditHash(prevHash, logData);
+    while (true) {
+      attempt++;
+      const currentState = await this.getAuditState(orgId);
+      const prevHash = currentState ? currentState.lastVerifiedHash : DynamoDBStore.GENESIS_HASH;
+      const currentHash = this.computeAuditHash(prevHash, logData);
 
-    const fullLog: AuditLog = {
-      ...logData,
-      prevHash,
-      currentHash,
-    };
+      const fullLog: AuditLog = {
+        ...logData,
+        prevHash,
+        currentHash,
+      };
 
-    const pk = `ORG#${orgId}`;
-    const sk = `AUDIT#${logData.timestamp}#${logData.logId}`;
+      const pk = `ORG#${orgId}`;
+      const sk = `AUDIT#${logData.timestamp}#${logData.logId}`;
 
-    // Execute atomic 2-table update
-    const transactItems = [
-      {
-        Put: {
-          TableName: this.auditTable,
-          Item: {
-            PK: pk,
-            SK: sk,
-            GSI1_PK: `ORG#${orgId}#ACTOR#${logData.actor.userId}`,
-            GSI1_SK: logData.timestamp,
-            ...fullLog,
+      const transactItems = [
+        {
+          Put: {
+            TableName: this.auditTable,
+            Item: {
+              PK: pk,
+              SK: sk,
+              GSI1_PK: `ORG#${orgId}#ACTOR#${logData.actor.userId}`,
+              GSI1_SK: logData.timestamp,
+              ...fullLog,
+            },
+            ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
           },
-          ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
         },
-      },
-      {
-        Update: {
-          TableName: this.auditStateTable,
-          Key: {
-            PK: `ORG#${orgId}`,
-            SK: 'STATE',
-          },
-          UpdateExpression: 'SET lastVerifiedHash = :curr, updatedAt = :now',
-          ConditionExpression:
-            currentState
+        {
+          Update: {
+            TableName: this.auditStateTable,
+            Key: {
+              PK: `ORG#${orgId}`,
+              SK: 'STATE',
+            },
+            UpdateExpression: 'SET lastVerifiedHash = :curr, updatedAt = :now',
+            ConditionExpression: currentState
               ? 'lastVerifiedHash = :prev'
               : 'attribute_not_exists(PK) OR lastVerifiedHash = :prev',
-          ExpressionAttributeValues: {
-            ':curr': currentHash,
-            ':prev': prevHash,
-            ':now': new Date().toISOString(),
+            ExpressionAttributeValues: {
+              ':curr': currentHash,
+              ':prev': prevHash,
+              ':now': new Date().toISOString(),
+            },
           },
         },
-      },
-    ];
+      ];
 
-    await this.executeWithRetry(() =>
-      this.docClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
-    );
+      try {
+        await this.docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
+        return fullLog;
+      } catch (err: unknown) {
+        const errName = (err as { name?: string })?.name || '';
+        const isConflict =
+          errName === 'TransactionCanceledException' ||
+          errName === 'TransactionConflictException';
 
-    return fullLog;
+        if (isConflict && attempt < maxRetries) {
+          // Jittered backoff before re-reading state and re-hashing
+          const delayMs = Math.pow(2, attempt) * 40 + Math.random() * 30;
+          await new Promise((r) => setTimeout(r, delayMs));
+          continue;
+        }
+
+        throw err;
+      }
+    }
   }
 
   async getAuditLogs(orgId: string, limit = 100): Promise<AuditLog[]> {

@@ -1,6 +1,6 @@
-import { pbkdf2Sync, randomBytes } from 'node:crypto';
+import { pbkdf2Sync, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { AuthUser, AuthSession, TokenPayload } from '@veltrix/shared';
-import type { AuthProvider, RegisterParams, LoginParams } from './auth-interface.js';
+import type { AuthProvider, RegisterParams, LoginParams, RefreshResult } from './auth-interface.js';
 import { JwtService } from './jwt-service.js';
 
 interface StoredUser extends AuthUser {
@@ -11,6 +11,8 @@ interface StoredUser extends AuthUser {
 export class LocalAuthProvider implements AuthProvider {
   private users: Map<string, StoredUser> = new Map(); // key: email
   private usersById: Map<string, StoredUser> = new Map();
+  // Family ID -> Set of all tokens issued in this session family
+  private tokenFamilies: Map<string, Set<string>> = new Map();
   private jwtService: JwtService;
 
   constructor(jwtService?: JwtService) {
@@ -111,7 +113,14 @@ export class LocalAuthProvider implements AuthProvider {
     }
 
     const testHash = this.hashPassword(params.password, user.salt);
-    if (testHash !== user.passwordHash) {
+    const testHashBuffer = Buffer.from(testHash, 'hex');
+    const userHashBuffer = Buffer.from(user.passwordHash, 'hex');
+
+    // Constant-time timing-safe comparison to prevent timing side-channel attacks
+    if (
+      testHashBuffer.length !== userHashBuffer.length ||
+      !timingSafeEqual(testHashBuffer, userHashBuffer)
+    ) {
       throw new Error('INVALID_CREDENTIALS');
     }
 
@@ -128,10 +137,17 @@ export class LocalAuthProvider implements AuthProvider {
       orgId: user.orgId,
     });
 
-    const refreshToken = this.jwtService.signRefreshToken({
-      userId: user.userId,
-      orgId: user.orgId,
-    });
+    const familyId = `fam-${randomBytes(12).toString('hex')}`;
+    const refreshToken = this.jwtService.signRefreshToken(
+      {
+        userId: user.userId,
+        orgId: user.orgId,
+      },
+      { familyId }
+    );
+
+    // Track refresh token family for reuse detection
+    this.tokenFamilies.set(familyId, new Set([refreshToken]));
 
     const { passwordHash: _, salt: __, ...publicUser } = user;
 
@@ -146,7 +162,29 @@ export class LocalAuthProvider implements AuthProvider {
     };
   }
 
-  async refresh(refreshToken: string): Promise<{ accessToken: string; expiresIn: number }> {
+  /**
+   * Refresh Token Rotation (RTR) with Reuse Detection
+   * If a previously used / revoked refresh token is presented again,
+   * all tokens in that family are immediately revoked as a security breach indicator.
+   */
+  async refresh(refreshToken: string): Promise<RefreshResult> {
+    // 1. Check if token was already revoked
+    if (this.jwtService.isRevoked(refreshToken)) {
+      // Possible token theft / replay attack!
+      // Decode without verification to find familyId and revoke the entire family
+      try {
+        const payload = this.jwtService.verifyRefreshToken(refreshToken);
+        if (payload.familyId && this.tokenFamilies.has(payload.familyId)) {
+          for (const token of this.tokenFamilies.get(payload.familyId)!) {
+            this.jwtService.revokeToken(token);
+          }
+        }
+      } catch {
+        // Fall through
+      }
+      throw new Error('TOKEN_REVOKED_REUSE_DETECTED');
+    }
+
     const payload = this.jwtService.verifyRefreshToken(refreshToken);
     const user = this.usersById.get(payload.userId);
 
@@ -154,6 +192,10 @@ export class LocalAuthProvider implements AuthProvider {
       throw new Error('USER_NOT_FOUND');
     }
 
+    // 2. Rotate token: Immediately revoke the used refresh token
+    this.jwtService.revokeToken(refreshToken);
+
+    // 3. Issue a new access token
     const newAccessToken = this.jwtService.signAccessToken({
       userId: user.userId,
       email: user.email,
@@ -162,14 +204,44 @@ export class LocalAuthProvider implements AuthProvider {
       orgId: user.orgId,
     });
 
+    // 4. Issue a new refresh token within the same family
+    const familyId = payload.familyId || `fam-${randomBytes(12).toString('hex')}`;
+    const newRefreshToken = this.jwtService.signRefreshToken(
+      {
+        userId: user.userId,
+        orgId: user.orgId,
+      },
+      { familyId }
+    );
+
+    if (!this.tokenFamilies.has(familyId)) {
+      this.tokenFamilies.set(familyId, new Set());
+    }
+    this.tokenFamilies.get(familyId)!.add(newRefreshToken);
+
     return {
       accessToken: newAccessToken,
+      refreshToken: newRefreshToken,
       expiresIn: 3600,
     };
   }
 
-  async logout(accessToken: string): Promise<void> {
+  async logout(accessToken: string, refreshToken?: string): Promise<void> {
     this.jwtService.revokeToken(accessToken);
+    if (refreshToken) {
+      this.jwtService.revokeToken(refreshToken);
+      try {
+        const payload = this.jwtService.verifyRefreshToken(refreshToken);
+        if (payload.familyId && this.tokenFamilies.has(payload.familyId)) {
+          for (const token of this.tokenFamilies.get(payload.familyId)!) {
+            this.jwtService.revokeToken(token);
+          }
+          this.tokenFamilies.delete(payload.familyId);
+        }
+      } catch {
+        // Token might already be invalid
+      }
+    }
   }
 
   async verifyToken(token: string): Promise<TokenPayload> {

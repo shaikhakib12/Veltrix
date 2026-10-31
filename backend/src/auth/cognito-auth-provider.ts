@@ -5,8 +5,9 @@ import {
   GlobalSignOutCommand,
   AuthFlowType,
 } from '@aws-sdk/client-cognito-identity-provider';
-import type { AuthUser, AuthSession, TokenPayload } from '@veltrix/shared';
-import type { AuthProvider, RegisterParams, LoginParams } from './auth-interface.js';
+import jwt from 'jsonwebtoken';
+import type { AuthUser, AuthSession, TokenPayload, UserRole } from '@veltrix/shared';
+import type { AuthProvider, RegisterParams, LoginParams, RefreshResult } from './auth-interface.js';
 import { JwtService } from './jwt-service.js';
 
 export class CognitoAuthProvider implements AuthProvider {
@@ -73,29 +74,27 @@ export class CognitoAuthProvider implements AuthProvider {
       throw new Error('INVALID_CREDENTIALS: Authentication failed or requires challenge');
     }
 
-    // In a live Cognito integration, IdToken is decoded to extract attributes
     const token = result.IdToken;
-    let payload: TokenPayload;
-    try {
-      payload = this.jwtService.verifyAccessToken(token);
-    } catch {
-      // Fallback for Cognito-issued tokens in staging
-      payload = {
-        userId: params.email,
-        email: params.email,
-        username: params.email.split('@')[0] || 'analyst',
-        role: 'SECURITY_ANALYST',
-        orgId: params.orgId || 'org-enterprise-01',
-      };
+
+    // Decode and parse claims from Cognito IdToken
+    const decoded = jwt.decode(token) as Record<string, unknown> | null;
+    if (!decoded || typeof decoded !== 'object') {
+      throw new Error('INVALID_COGNITO_TOKEN: Malformed IdToken returned by Cognito');
     }
+
+    const userId = (decoded.sub as string) || (decoded['cognito:username'] as string);
+    const email = (decoded.email as string) || params.email;
+    const username = (decoded.preferred_username as string) || (decoded['cognito:username'] as string) || email.split('@')[0]!;
+    const role = (decoded['custom:role'] as UserRole) || 'SECURITY_ANALYST';
+    const orgId = (decoded['custom:orgId'] as string) || params.orgId || 'org-enterprise-01';
 
     return {
       user: {
-        userId: payload.userId,
-        email: payload.email,
-        username: payload.username,
-        role: payload.role,
-        orgId: payload.orgId,
+        userId,
+        email,
+        username,
+        role,
+        orgId,
         createdAt: new Date().toISOString(),
       },
       tokens: {
@@ -107,7 +106,7 @@ export class CognitoAuthProvider implements AuthProvider {
     };
   }
 
-  async refresh(refreshToken: string): Promise<{ accessToken: string; expiresIn: number }> {
+  async refresh(refreshToken: string): Promise<RefreshResult> {
     if (!this.clientId) {
       throw new Error('COGNITO_NOT_CONFIGURED: Missing COGNITO_CLIENT_ID');
     }
@@ -129,19 +128,23 @@ export class CognitoAuthProvider implements AuthProvider {
 
     return {
       accessToken: result.AccessToken,
+      refreshToken: result.RefreshToken || refreshToken, // Cognito optionally rotates
       expiresIn: result.ExpiresIn || 3600,
     };
   }
 
-  async logout(accessToken: string): Promise<void> {
+  async logout(accessToken: string, refreshToken?: string): Promise<void> {
     try {
       const command = new GlobalSignOutCommand({
         AccessToken: accessToken,
       });
       await this.client.send(command);
     } catch {
-      // Also register local revocation fallback
+      // Local revocation fallback
       this.jwtService.revokeToken(accessToken);
+      if (refreshToken) {
+        this.jwtService.revokeToken(refreshToken);
+      }
     }
   }
 

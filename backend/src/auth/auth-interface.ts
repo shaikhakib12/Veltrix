@@ -14,11 +14,17 @@ export interface LoginParams {
   orgId?: string;
 }
 
+export interface RefreshResult {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+}
+
 export interface AuthProvider {
   register(params: RegisterParams): Promise<AuthUser>;
   login(params: LoginParams): Promise<AuthSession>;
-  refresh(refreshToken: string): Promise<{ accessToken: string; expiresIn: number }>;
-  logout(accessToken: string): Promise<void>;
+  refresh(refreshToken: string): Promise<RefreshResult>;
+  logout(accessToken: string, refreshToken?: string): Promise<void>;
   verifyToken(token: string): Promise<TokenPayload>;
   revokeToken(token: string): Promise<void>;
   isTokenRevoked(token: string): Promise<boolean>;
