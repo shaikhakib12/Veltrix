@@ -1,8 +1,8 @@
 # VELTRIX: Autonomous Cyber Threat Detection & Response Platform
 ## System Architecture & Technical Design (`specs/design.md`)
 
-**Document Version:** 2.1.0 (Post-Audit Hardened)  
-**Status:** In Review (Phase 1 Specification)  
+**Document Version:** 2.2.0 (Verified & Reliability-Hardened)  
+**Status:** In Review (Phase 1 Final Verification)  
 **Brand Palette:** Midnight Navy (`#0B0F19`), Electric Cyan (`#00F5FF`), Royal Blue (`#2563EB`)  
 
 ---
@@ -45,7 +45,8 @@ flowchart TD
         SFN["AWS Step Functions<br/>(Approval Gate State Machine)"]
         L_RESP["Defensive Response Lambda<br/>(Revoke, Suspend, Block, Rollback)"]
         SQS_FIFO["Amazon SQS FIFO Queue<br/>(MessageGroupId = orgId)"]
-        L_AUDIT["Audit Logger Lambda<br/>(Serialized Chaining)"]
+        SQS_DLQ["Amazon SQS FIFO DLQ<br/>(Dead-Letter Queue)"]
+        L_AUDIT["Audit Logger Lambda<br/>(Serialized Chaining & State Checkpoint)"]
         DDB_AUDIT[("DynamoDB AuditLogs<br/>Append-Only IAM")]
         S3_LOCK[("Amazon S3 Object Lock<br/>Compliance WORM Archival")]
     end
@@ -70,6 +71,7 @@ flowchart TD
     L_INGEST -.->|Audit Event| SQS_FIFO
     L_DETECT -.->|Audit Event| SQS_FIFO
     SQS_FIFO --> L_AUDIT
+    SQS_FIFO -.->|After 3 Failures| SQS_DLQ
     L_AUDIT --> DDB_AUDIT
     DDB_AUDIT -.->|DynamoDB Stream| S3_LOCK
 ```
@@ -131,112 +133,72 @@ VELTRIX/
 
 ## 3. High-Precision Event Deduplication Architecture
 
-### Problem Discovered in Initial Proposal
-Truncating timestamps to the minute:
-$$\text{Hash} = \text{SHA-256}(\text{orgId} + \text{eventType} + \text{sourceIp} + \text{username} + \text{timestamp}_{\text{minute}})$$
-causes legitimate high-velocity brute-force attempts (e.g. 5 failed logins within 10 seconds) to produce identical hashes and get incorrectly dropped!
+### Client Retries vs Legitimate Rapid Attacks
+1. **Network Retries:** An HTTP client experiencing network timeout re-sends the exact same event with the original `eventId` and `idempotencyKey`.
+2. **High-Velocity Brute Force Attacks:** Distinct authentication attempts generated milliseconds apart carry unique `eventId` values.
 
-### Hardened Solution
-1. **Network Retries vs Legitimate Distinct Events:**
-   - A true duplicate occurs when an HTTP client or queue retries the exact same event. This retry carries an identical client-supplied `idempotencyKey` or `eventId`.
-   - Distinct authentication attempts have unique `eventId` tokens (UUIDv7 incorporating a millisecond timestamp and random entropy).
-2. **Idempotency Strategy:**
-   - Every event specifies or receives an `idempotencyKey` (defaults to `eventId`).
-   - The deduplication key in DynamoDB `Veltrix-SecurityEvents` is `attribute_not_exists(idempotencyKey)`.
-   - Result: 5 rapid failed logins within 10 seconds have 5 unique `eventId` values $\to$ **all 5 events are preserved and trigger RULE-001**, while an accidental network retry of event #3 is safely discarded!
+### Deduplication Logic
+- Every event assigns `idempotencyKey = event.idempotencyKey || event.eventId`.
+- DynamoDB conditional write: `attribute_not_exists(PK) AND attribute_not_exists(SK)`.
+- If an exact duplicate retry arrives, the conditional check fails $\to$ Ingestion engine intercepts `ConditionalCheckFailedException` and returns `202 Accepted` with `{ "status": "DUPLICATE_SUPPRESSED" }`.
+- Distinct brute-force attempts have unique `eventId` tokens $\to$ **All attempts are persisted and trigger RULE-001**.
 
 ---
 
-## 4. DynamoDB Schema & Hot-Partition Mitigation
+## 4. DynamoDB Schema & Sharding Design
 
-### Time-Sharded Compound Partition Keys
-To prevent partition throttling during 1,000 events/second bursts, the `Veltrix-SecurityEvents` table shards the partition key by date:
-- **Partition Key (PK):** `ORG#{orgId}#DATE#{YYYY-MM-DD}`
-- **Sort Key (SK):** `EVENT#{timestampIso}#{eventId}`
-
-### Global Secondary Indexes (GSI)
-1. **`GSI1-EventType`:**
-   - `GSI1_PK`: `ORG#{orgId}#TYPE#{eventType}`
-   - `GSI1_SK`: `timestampIso`
-   - Purpose: Enables sub-second filtering across all `auth.login.failed` or `data.exfiltration` events without full-table scans.
-2. **`GSI2-SourceIp`:**
-   - `GSI2_PK`: `ORG#{orgId}#IP#{sourceIp}`
-   - `GSI2_SK`: `timestampIso`
-   - Purpose: Enables deep forensic investigation of specific adversary IPs across multiple days.
-3. **`GSI1-StatusRisk` on `Veltrix-Incidents`:**
-   - `GSI1_PK`: `ORG#{orgId}#STATUS#{status}`
-   - `GSI1_SK`: `riskScore` (Numeric)
-   - Purpose: Direct ordered retrieval of highest-risk open incidents (`status = NEW` or `INVESTIGATING`).
+- **Default Implementation ($N=1$):** `PK = ORG#{orgId}#DATE#{YYYY-MM-DD}` provides deterministic, single-query reads per day without scatter-gather complexity.
+- **Enterprise Scaling ($N>1$):** If an organization's ingestion exceeds 1,000 writes/sec, write sharding activates using $\text{shardId} = \text{hash}(\text{eventId}) \pmod N$, and queries scatter-gather across $N$ shards with k-way merge-sort.
 
 ---
 
-## 5. Serialized Cryptographic Audit Ledger & Cloud Immutability
+## 5. SQS FIFO Audit Reliability & Linear Chain Recovery
 
-### Concurrency Handling
-In a distributed serverless architecture, concurrent Lambda functions writing audit logs directly to DynamoDB create race conditions (hash chain branching).
+### Message Ordering & Deduplication
+- **Queue:** Amazon SQS FIFO (`veltrix-audit-queue.fifo`).
+- **Grouping:** `MessageGroupId = orgId` ensures that all audit messages for a tenant are strictly serialized.
+- **Deduplication ID:** `MessageDeduplicationId = SHA-256(orgId + logId + payloadHash)`. SQS automatically discards duplicate messages within a 5-minute sliding window.
 
-VELTRIX solves this by decoupling audit ingestion from ledger anchoring:
-1. System events dispatch audit messages to an **Amazon SQS FIFO Queue** (`veltrix-audit-queue.fifo`).
-2. SQS FIFO enforces `MessageGroupId = orgId` and deduplication.
-3. A single-concurrency Audit Logger Lambda processes messages strictly in sequential order, calculating:
-   $$\text{IntegrityHash}_k = \text{SHA-256}(\text{IntegrityHash}_{k-1} \,\|\, \text{logId} \,\|\, \text{orgId} \,\|\, \text{actor} \,\|\, \text{action} \,\|\, \text{resource} \,\|\, \text{timestamp})$$
-4. **Cloud Immutability Enforcement:**
-   - Application-level: Append-only hash verification.
-   - Cloud IAM: DynamoDB execution roles explicitly deny `dynamodb:DeleteItem` and `dynamodb:UpdateItem` on `Veltrix-AuditLogs`.
-   - Long-Term Archival: DynamoDB Streams replicate logs into an **Amazon S3 Bucket with S3 Object Lock enabled in Compliance Mode**, technically preventing deletion or overwriting even by the root AWS account.
+### Lambda Processing & Atomic Hash Chaining
+1. Audit Logger Lambda consumes a message.
+2. Reads the tenant checkpoint from `Veltrix-AuditState` (`lastVerifiedHash`, `sequenceNumber`).
+3. Computes:
+   $$\text{IntegrityHash} = \text{SHA-256}(\text{lastVerifiedHash} \,\|\, \text{logId} \,\|\, \text{orgId} \,\|\, \text{actor} \,\|\, \text{action} \,\|\, \text{targetResource} \,\|\, \text{timestamp})$$
+4. Performs a **DynamoDB Transaction (`TransactWriteItems`)**:
+   - `PutItem` to `Veltrix-AuditLogs` with `attribute_not_exists(PK)`.
+   - `UpdateItem` to `Veltrix-AuditState` setting `lastVerifiedHash = IntegrityHash` and incrementing `sequenceNumber`.
+5. On success, SQS message is deleted.
+
+### Retry, Dead-Letter Queue (DLQ) & Chain Recovery
+- **Transient Failures:** SQS automatically retries the message after the visibility timeout. Because of the atomic transaction, partial writes cannot occur.
+- **Poison Pill / DLQ Handling:** If a malformed payload fails 3 times (`maxReceiveCount = 3`), SQS moves the message to `veltrix-audit-dlq.fifo`.
+- **Chain Continuity Recovery:**
+  - If a message were dropped without recovery, the linear hash chain would break for all subsequent messages!
+  - **Recovery Protocol:**
+    1. A CloudWatch alarm notifies the SOC of a DLQ event.
+    2. The DLQ message is inspected via administrative CLI: `veltrix audit inspect-dlq`.
+    3. The administrator can trigger an atomic repair using `veltrix audit replay-dlq` or insert a signed administrative bridge record (`CHAIN_REPAIR_BRIDGE`) recording the dead-letter event and re-anchoring `lastVerifiedHash`.
 
 ---
 
 ## 6. Two-Tier Runtime Separation: Simulation vs Real AWS
 
-To avoid confusing local test harness mocks with true AWS compatibility, VELTRIX enforces a strict two-tier architecture:
-
-| Tier | Environment | Components | Purpose |
+| Tier | Environment | Scope | Verification Method |
 | :--- | :--- | :--- | :--- |
-| **Tier 1: Local Emulation & Simulation Harness** | Development / Offline Demo | In-memory `MemoryStore`, mock Express server, local CLI. | Ultra-fast unit testing, lightning UI rendering, zero AWS billing, offline demo resilience. |
-| **Tier 2: AWS Serverless Production Layer** | Staging / Production | API Gateway, AWS Lambda (Node 20.x ARM64), DynamoDB On-Demand, EventBridge, Step Functions, SQS FIFO, Cognito. | Real-world high-throughput deployment, true IAM least privilege, CloudWatch monitoring. |
-
-*Rule:* Passing tests against `MemoryStore` verify domain logic, but are explicitly distinguished from AWS integration tests running against LocalStack or deployed AWS SAM resources.
+| **Tier 1: Local Emulation & Simulation Harness** | Development / Offline Demo | In-memory `MemoryStore`, mock Express server, local CLI. | Vitest unit tests verifying business logic in $< 1\text{ second}$. |
+| **Tier 2: AWS Serverless Production Layer** | Staging / Production | API Gateway, AWS Lambda, DynamoDB On-Demand, EventBridge, Step Functions, SQS FIFO, Cognito. | AWS SAM template validation (`cfn-lint`), LocalStack/DynamoDB-Local, and authorized AWS staging deployment. |
 
 ---
 
-## 7. Defensive SOAR Containment & Sandboxing
+## 7. Realistic AWS Cost Spectrum
 
-### Target Sandboxing
-To ensure automated defensive actions cannot accidentally impact production systems:
-- All containment actions (`BLOCK_IP`, `SUSPEND_USER`) evaluate target entities against a registered test organization inventory (`isSimulated: true` or RFC 5737 test IP ranges: `198.51.100.0/24`, `203.0.113.0/24`, `192.0.2.0/24`).
-- Any attempt to target real non-whitelisted IP addresses or production user handles is rejected with `400 Bad Request (UNAUTHORIZED_CONTAINMENT_TARGET)`.
+> [!NOTE]
+> AWS cloud operating costs are variable and depend on workload velocity, data retention, AWS region, and optional security hardening (such as AWS WAF). No guaranteed fixed cost or perpetual 100% Free Tier eligibility is claimed.
 
-### Zero-Bypass Approval Enforcement
-- High-impact containment actions require approval tokens.
-- Direct execution via `POST /responses/:incidentId/execute` requires Organization Administrator credentials or a valid approval token; otherwise, it automatically queues as `PENDING_APPROVAL`.
+### Workload Basis (100,000 events/month, 1.2 KB payload, 10 active analysts)
 
----
-
-## 8. Realistic AWS Serverless Cost Model
-
-### Workload Profile Assumptions (Monthly)
-- **Ingestion Velocity:** 100,000 events / month (~2.3 events/min average, burst capacity to 1,000 events/min during simulations).
-- **Average Event Payload:** 1.2 KB JSON.
-- **Compute:** 100,000 Lambda invocations @ 256 MB ARM64, average duration 120 ms.
-- **Active Analysts:** 10 Monthly Active Users (Cognito).
-- **Log Generation:** ~2 GB structured CloudWatch logs.
-- **Data Transfer Out:** ~5 GB / month.
-
-### Cost Breakdown: Year 1 Free Tier vs Post-Free Tier
-
-| Service | Usage Metric | Year 1 Free Tier ($ USD) | Post-Free Tier Standard ($ USD) | Pricing Basis |
-| :--- | :--- | :--- | :--- | :--- |
-| **AWS Lambda** | 100K calls, 12K GB-s | $0.00 | $0.05 | 1M free requests & 400K GB-s free tier indefinitely. |
-| **Amazon API Gateway** | 120K REST calls | $0.00 | $0.15 | 1M free calls/month for first 12 months, then $1.00/million. |
-| **Amazon DynamoDB** | 100K WRUs, 500K RRUs, 1 GB | $0.00 | $0.35 | 25 GB free storage indefinitely; On-Demand reads/writes. |
-| **Amazon EventBridge** | 100K custom events | $0.10 | $0.10 | $1.00 / million events. |
-| **Amazon SQS (FIFO)** | 100K audit messages | $0.00 | $0.05 | 1M free requests indefinitely. |
-| **Amazon Cognito** | 10 MAUs | $0.00 | $0.00 | First 50,000 MAUs are free indefinitely. |
-| **AWS Step Functions** | 100 state transitions | $0.00 | $0.00 | 4,000 free state transitions / month indefinitely. |
-| **Amazon CloudWatch** | 2 GB logs + basic metrics | $0.00 | $1.10 | 5 GB free tier ingestion first 12 months, then $0.50/GB. |
-| **Amazon S3 + Object Lock**| 1 GB standard + WORM | $0.00 | $0.05 | Standard S3 storage & request charges. |
-| **Data Transfer Out** | 5 GB internet egress | $0.00 | $0.00 | First 100 GB/month egress is free. |
-| **Total Estimated Monthly:**| | **~$0.10 – $0.50** | **~$1.85 – $2.50 / month** | *Ultra-low cost serverless architecture.* |
-
-*(Note: Adding AWS WAF adds a baseline charge of $5.00/WebACL + $1.00/rule/month, bringing total to ~$8.50/month if WAF is attached to API Gateway).*
+| Cost Tier | Monthly Estimate ($ USD) | Conditions & Assumptions |
+| :--- | :--- | :--- |
+| **Tier A: Development / Year 1 with Free Tier** | **~$0.10 – $1.50 / month** | Covers early testing within AWS Free Tier limits (1M Lambda calls, 1M API Gateway calls in Year 1, 25 GB DynamoDB free, 50K Cognito MAUs free). |
+| **Tier B: Standard Production (Post-Year 1, No WAF)** | **~$2.50 – $4.50 / month** | Post-12-month standard serverless pricing without Free Tier API Gateway discounts; includes ~2 GB CloudWatch log ingestion ($1.00), DynamoDB on-demand writes/reads ($0.35), SQS FIFO ($0.05), and EventBridge ($0.10). |
+| **Tier C: Enterprise Hardened (With AWS WAF & Archival)** | **~$8.50 – $15.00 / month** | Includes AWS WAF baseline ($5.00/WebACL + $1.00/rule/month), S3 Object Lock compliance archival, and CloudWatch metrics alarms. |
