@@ -6,6 +6,7 @@ export interface CursorPayload {
   filterHash: string;
   offset?: number;
   exclusiveStartKey?: Record<string, unknown>;
+  shards?: Array<Record<string, unknown> | undefined>;
   issuedAt: number;
 }
 

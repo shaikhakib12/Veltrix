@@ -1201,4 +1201,355 @@ describe('Phase 4: Event Ingestion & Query API (TASK-401 to TASK-403)', () => {
       expect(extractDateFromUuidV7('invalid-uuid')).toBeNull();
     });
   });
+
+  // ============================================================================
+  // 8. Phase 4 Final Production-Readiness Verification (3 Core Verification Areas)
+  // ============================================================================
+  describe('8. Phase 4 Final Production-Readiness Verification', () => {
+    // --- Area 1: UUIDv7 Date Extraction and Event Lookup ---
+    describe('8.1 UUIDv7 Date Extraction & Resilient Event Lookup', () => {
+      it('retrieves delayed events where event timestamp differs from UUID generation date', async () => {
+        // Event timestamp is in the past, but UUIDv7 is generated on another day
+        const delayedTimestamp = '2026-10-15T12:00:00.000Z';
+        const todayUuidV7 = generateUuidV7(new Date('2026-11-01T12:00:00.000Z').getTime());
+
+        const ingestRes = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({
+            eventId: todayUuidV7,
+            timestamp: delayedTimestamp,
+            eventType: 'auth.login.failed',
+            severity: 'HIGH',
+            category: 'AUTHENTICATION',
+            sourceIp: '198.51.100.99',
+            sourceSystem: 'legacy-syslog',
+          });
+
+        expect(ingestRes.status).toBe(202);
+
+        // Fetch by eventId: must succeed without false 404
+        const getRes = await request(app)
+          .get(`/api/v1/events/${todayUuidV7}`)
+          .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+        expect(getRes.status).toBe(200);
+        expect(getRes.body.data.eventId).toBe(todayUuidV7);
+        expect(getRes.body.data.timestamp).toBe(delayedTimestamp);
+      });
+
+      it('retrieves events with client-provided UUIDv4 identifiers without table scans', async () => {
+        const clientUuidV4 = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
+
+        const ingestRes = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({
+            eventId: clientUuidV4,
+            timestamp: new Date().toISOString(),
+            eventType: 'network.connection',
+            severity: 'MEDIUM',
+            category: 'NETWORK',
+            sourceIp: '203.0.113.50',
+            sourceSystem: 'perimeter-firewall',
+          });
+
+        expect(ingestRes.status).toBe(202);
+
+        const getRes = await request(app)
+          .get(`/api/v1/events/${clientUuidV4}`)
+          .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+        expect(getRes.status).toBe(200);
+        expect(getRes.body.data.eventId).toBe(clientUuidV4);
+      });
+
+      it('retrieves events crossing UTC midnight boundary seamlessly', async () => {
+        // Event timestamp: 23:59:59 on Oct 31; UUIDv7: 00:00:01 on Nov 1
+        const midnightTimestamp = '2026-10-31T23:59:59.000Z';
+        const nextDayUuidV7 = generateUuidV7(new Date('2026-11-01T00:00:01.000Z').getTime());
+
+        const ingestRes = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({
+            eventId: nextDayUuidV7,
+            timestamp: midnightTimestamp,
+            eventType: 'auth.mfa.failed',
+            severity: 'CRITICAL',
+            category: 'AUTHENTICATION',
+            sourceIp: '198.51.100.88',
+            sourceSystem: 'auth-gateway',
+          });
+
+        expect(ingestRes.status).toBe(202);
+
+        const getRes = await request(app)
+          .get(`/api/v1/events/${nextDayUuidV7}`)
+          .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+        expect(getRes.status).toBe(200);
+        expect(getRes.body.data.eventId).toBe(nextDayUuidV7);
+      });
+
+      it('rejects invalid or unsupported event identifier strings with 400 INVALID_EVENT_ID', async () => {
+        const res = await request(app)
+          .get('/api/v1/events/not-a-valid-uuid')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+        expect(res.status).toBe(400);
+        expect(res.body.error.code).toBe('INVALID_EVENT_ID');
+      });
+
+      it('returns 404 EVENT_NOT_FOUND for non-existent valid UUIDs', async () => {
+        const nonExistentId = generateUuidV7();
+        const res = await request(app)
+          .get(`/api/v1/events/${nonExistentId}`)
+          .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+        expect(res.status).toBe(404);
+        expect(res.body.error.code).toBe('EVENT_NOT_FOUND');
+      });
+    });
+
+    // --- Area 2: Idempotency-Key Payload Consistency ---
+    describe('8.2 Idempotency-Key Payload Consistency & 409 Conflict', () => {
+      it('returns 202 DUPLICATE_SUPPRESSED when same key and identical payload is resent', async () => {
+        const idempotencyKey = 'retry-consistent-key-101';
+        const payload = {
+          eventType: 'auth.login.failed',
+          severity: 'HIGH',
+          category: 'AUTHENTICATION',
+          sourceIp: '198.51.100.12',
+          sourceSystem: 'vpn-concentrator',
+        };
+
+        const res1 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .set('Idempotency-Key', idempotencyKey)
+          .send(payload);
+
+        expect(res1.status).toBe(202);
+        expect(res1.body.data.status).toBe('ACCEPTED');
+        const originalEventId = res1.body.data.eventId;
+
+        // Resend identical request
+        const res2 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .set('Idempotency-Key', idempotencyKey)
+          .send(payload);
+
+        expect(res2.status).toBe(202);
+        expect(res2.body.data.status).toBe('DUPLICATE_SUPPRESSED');
+        expect(res2.body.data.eventId).toBe(originalEventId);
+      });
+
+      it('returns 409 Conflict when same Idempotency-Key is reused with a different payload', async () => {
+        const idempotencyKey = 'conflict-test-key-202';
+
+        const originalPayload = {
+          eventType: 'auth.login.failed',
+          severity: 'HIGH',
+          category: 'AUTHENTICATION',
+          sourceIp: '198.51.100.10',
+          sourceSystem: 'vpn',
+        };
+
+        const conflictingPayload = {
+          eventType: 'data.exfiltration',
+          severity: 'CRITICAL',
+          category: 'DATA_ACCESS',
+          sourceIp: '198.51.100.10',
+          sourceSystem: 'dlp-sensor',
+        };
+
+        // 1. Initial request with originalPayload
+        const res1 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .set('Idempotency-Key', idempotencyKey)
+          .send(originalPayload);
+
+        expect(res1.status).toBe(202);
+        expect(res1.body.data.status).toBe('ACCEPTED');
+
+        // 2. Second request with SAME idempotency key but DIFFERENT payload
+        const res2 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .set('Idempotency-Key', idempotencyKey)
+          .send(conflictingPayload);
+
+        expect(res2.status).toBe(409);
+        expect(res2.body.success).toBe(false);
+        expect(res2.body.error.code).toBe('IDEMPOTENCY_PAYLOAD_MISMATCH');
+      });
+
+      it('handles JSON key reordering and formatting without triggering 409 Conflict', async () => {
+        const idempotencyKey = 'key-reordering-303';
+
+        const payloadOrdered = {
+          category: 'AUTHENTICATION',
+          eventType: 'auth.login.failed',
+          severity: 'HIGH',
+          sourceIp: '198.51.100.33',
+          sourceSystem: 'sso-portal',
+        };
+
+        const payloadReordered = {
+          sourceSystem: 'sso-portal',
+          severity: 'HIGH',
+          sourceIp: '198.51.100.33',
+          eventType: 'auth.login.failed',
+          category: 'AUTHENTICATION',
+        };
+
+        const res1 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .set('Idempotency-Key', idempotencyKey)
+          .send(payloadOrdered);
+
+        expect(res1.status).toBe(202);
+        expect(res1.body.data.status).toBe('ACCEPTED');
+
+        // Reordered keys must produce identical canonical hash
+        const res2 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .set('Idempotency-Key', idempotencyKey)
+          .send(payloadReordered);
+
+        expect(res2.status).toBe(202);
+        expect(res2.body.data.status).toBe('DUPLICATE_SUPPRESSED');
+      });
+
+      it('enforces cross-tenant idempotency key isolation (Org A key does not collide with Org B)', async () => {
+        const sharedKey = 'cross-tenant-shared-key-404';
+
+        // Org A submits with sharedKey
+        const resA = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .set('Idempotency-Key', sharedKey)
+          .send({
+            eventType: 'auth.login.failed',
+            severity: 'HIGH',
+            category: 'AUTHENTICATION',
+            sourceIp: '198.51.100.5',
+            sourceSystem: 'portal-a',
+          });
+
+        expect(resA.status).toBe(202);
+        expect(resA.body.data.status).toBe('ACCEPTED');
+
+        // Org B submits with same key but completely different payload -> Must succeed (isolated by tenantOrgId)
+        const resB = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgB}`)
+          .set('Idempotency-Key', sharedKey)
+          .send({
+            eventType: 'api.anomaly',
+            severity: 'CRITICAL',
+            category: 'API',
+            sourceIp: '203.0.113.99',
+            sourceSystem: 'edr-b',
+          });
+
+        expect(resB.status).toBe(202);
+        expect(resB.body.data.status).toBe('ACCEPTED');
+      });
+
+      it('maintains batch retry integrity across repeated submissions', async () => {
+        const batchEvents = [
+          {
+            eventId: generateUuidV7(),
+            eventType: 'auth.login.failed',
+            severity: 'MEDIUM',
+            category: 'AUTHENTICATION',
+            sourceIp: '10.0.0.1',
+            sourceSystem: 'batch-node-1',
+          },
+          {
+            eventId: generateUuidV7(),
+            eventType: 'network.connection',
+            severity: 'LOW',
+            category: 'NETWORK',
+            sourceIp: '10.0.0.2',
+            sourceSystem: 'batch-node-2',
+          },
+        ];
+
+        // 1. Initial batch submission
+        const res1 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({ events: batchEvents });
+
+        expect(res1.status).toBe(202);
+        expect(res1.body.data.accepted).toBe(2);
+        expect(res1.body.data.duplicates).toBe(0);
+
+        // 2. Retry exact same batch
+        const res2 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({ events: batchEvents });
+
+        expect(res2.status).toBe(202);
+        expect(res2.body.data.accepted).toBe(0);
+        expect(res2.body.data.duplicates).toBe(2);
+      });
+    });
+
+    // --- Area 3: DynamoDB Pagination & Cursor Integrity ---
+    describe('8.3 DynamoDB Pagination & Signed Cursor Integrity', () => {
+      it('rejects an expired cursor (> 24 hours old) with 400 INVALID_CURSOR', async () => {
+        const expiredIssuedAt = Date.now() - 25 * 60 * 60 * 1000;
+        const secret = process.env.JWT_SECRET || 'veltrix-default-cursor-secret-signing-key-32chars';
+        const payload = {
+          orgId: orgA,
+          filterHash: 'all',
+          offset: 0,
+          issuedAt: expiredIssuedAt,
+        };
+        const base64Data = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+        const { createHmac } = await import('node:crypto');
+        const hmac = createHmac('sha256', secret).update(base64Data).digest('base64url');
+        const expiredCursor = `${base64Data}.${hmac}`;
+
+        const res = await request(app)
+          .get(`/api/v1/events?cursor=${expiredCursor}`)
+          .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+        expect(res.status).toBe(400);
+        expect(res.body.error.code).toBe('INVALID_CURSOR');
+      });
+
+      it('confirms signed cursor carries no plaintext secrets or credentials', () => {
+        const cursor = signCursor({
+          orgId: orgA,
+          filterHash: 'all',
+          offset: 5,
+        });
+
+        const [base64Part] = cursor.split('.');
+        const decoded = JSON.parse(Buffer.from(base64Part, 'base64url').toString('utf8'));
+
+        expect(decoded).toHaveProperty('orgId');
+        expect(decoded).toHaveProperty('filterHash');
+        expect(decoded).toHaveProperty('offset');
+        expect(decoded).toHaveProperty('issuedAt');
+
+        // Confirm absence of secrets
+        expect(decoded).not.toHaveProperty('secret');
+        expect(decoded).not.toHaveProperty('jwt');
+        expect(decoded).not.toHaveProperty('password');
+        expect(decoded).not.toHaveProperty('accessKeyId');
+        expect(decoded).not.toHaveProperty('secretAccessKey');
+      });
+    });
+  });
 });

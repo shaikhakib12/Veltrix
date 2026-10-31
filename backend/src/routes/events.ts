@@ -141,6 +141,20 @@ export function createEventsRouter(storage?: StorageInterface): Router {
       } catch (err: unknown) {
         const errorObj = err as { code?: string; message?: string; details?: unknown };
 
+        if (errorObj.code === 'IDEMPOTENCY_PAYLOAD_MISMATCH') {
+          const errorResponse: ApiErrorResponse = {
+            success: false,
+            error: {
+              code: 'IDEMPOTENCY_PAYLOAD_MISMATCH',
+              message:
+                errorObj.message ||
+                'Idempotency key was previously used with a different request payload.',
+            },
+          };
+          res.status(409).json(errorResponse);
+          return;
+        }
+
         if (errorObj.code === 'FORBIDDEN_CROSS_TENANT_ACCESS') {
           const errorResponse: ApiErrorResponse = {
             success: false,
