@@ -1,6 +1,10 @@
 import express from 'express';
 import cors from 'cors';
 import { PLATFORM_INFO, type ApiResponse, type ApiErrorResponse } from '@veltrix/shared';
+import { createAuthRouter } from './routes/auth.js';
+import { authenticate } from './middleware/auth.js';
+import { enforceTenantIsolation } from './middleware/tenant.js';
+import { requireRole } from './middleware/rbac.js';
 
 export function createApp() {
   const app = express();
@@ -59,6 +63,61 @@ export function createApp() {
     };
     res.status(200).json(response);
   });
+
+  // Authentication Routes (TASK-301)
+  app.use('/api/v1/auth', createAuthRouter());
+
+  // Multi-Tenant Isolation Verification Route (TASK-303)
+  app.get(
+    '/api/v1/tenant/telemetry-overview',
+    authenticate,
+    enforceTenantIsolation,
+    (req, res) => {
+      res.status(200).json({
+        success: true,
+        data: {
+          orgId: req.tenantOrgId,
+          user: req.user?.username,
+          role: req.user?.role,
+          message: `Authorized access granted for organization '${req.tenantOrgId}'.`,
+        },
+      });
+    }
+  );
+
+  // RBAC Protected Administrative Route (TASK-304: requires ORG_ADMIN or SUPER_ADMIN)
+  app.post(
+    '/api/v1/admin/rules',
+    authenticate,
+    enforceTenantIsolation,
+    requireRole('ORG_ADMIN'),
+    (req, res) => {
+      res.status(200).json({
+        success: true,
+        data: {
+          orgId: req.tenantOrgId,
+          authorizedBy: req.user?.email,
+          message: 'Detection rule mutation permitted by administrator role.',
+        },
+      });
+    }
+  );
+
+  // RBAC Protected Super Admin Route (TASK-304: requires SUPER_ADMIN)
+  app.post(
+    '/api/v1/admin/global-oversight',
+    authenticate,
+    requireRole('SUPER_ADMIN'),
+    (req, res) => {
+      res.status(200).json({
+        success: true,
+        data: {
+          authorizedBy: req.user?.email,
+          message: 'Cross-tenant platform administrative action permitted.',
+        },
+      });
+    }
+  );
 
   // Standardized 404 Handler for Unmatched Routes
   app.use((_req, res) => {
