@@ -1,0 +1,160 @@
+# VELTRIX: Implementation Tasks & Verification Tracking (`specs/tasks.md`)
+
+**Document Version:** 2.0.0  
+**Status:** In Progress (Phase 0 & 1 Complete, Awaiting Review to Begin Phase 2)  
+**Execution Matrix:** 3-Person Team Allocation  
+- **[P1] Person 1:** Frontend Lead (React, Vite, Tailwind CSS, Recharts, Lucide, UI Testing)  
+- **[P2] Person 2:** Backend & Cybersecurity Lead (Node.js, TypeScript, Ingestion, Detection, Correlation, Risk, CLI)  
+- **[P3] Person 3:** Cloud, Database & DevSecOps Lead (AWS SAM, DynamoDB, Cognito, EventBridge, Step Functions, Audit, CI/CD)  
+- **[ALL]:** Shared Responsibilities (Architecture, Schemas, Code Reviews, Integration, Final Demo)  
+
+---
+
+## Phase 0 — Repository & Environment Inspection
+
+- [x] Verified **TASK-001 [ALL]:** Inspect workspace, toolchains (Node v24.18.0, npm 11.16.0, Git 2.54, Python 3.12), and remote GitHub repository.
+- [x] Verified **TASK-002 [ALL]:** Evaluate initial working directory, identify missing CLI and shared packages.
+- [x] Verified **TASK-003 [ALL]:** Identify technical risks (absence of local AWS/SAM CLI, rate limiting, disruptive containment, threat intelligence offline resilience).
+- [x] Verified **TASK-004 [ALL]:** Draft Phase 0 inspection and architecture assessment report.
+
+---
+
+## Phase 1 — Specification & Architecture
+
+- [x] Verified **TASK-101 [ALL]:** Author comprehensive System Requirements Specification (`specs/requirements.md`) with Modules A through L.
+- [x] Verified **TASK-102 [ALL]:** Formulate System Architecture & Technical Design (`specs/design.md`) including Web and CLI clients.
+- [x] Verified **TASK-103 [ALL]:** Establish Granular Tasks Breakdown with testable states (`specs/tasks.md`).
+- [x] Verified **TASK-104 [P2/P3]:** Document complete REST API Contracts for Web & CLI (`specs/api-contracts.md`).
+- [x] Verified **TASK-105 [P3]:** Formulate DynamoDB Schema & Access Patterns (`specs/database-schema.md`).
+- [x] Verified **TASK-106 [ALL]:** Author Full Testing & Quality Strategy (`specs/testing-strategy.md`).
+- [ ] Not started **TASK-107 [ALL]:** Team review and approval gate before initiating Phase 2 implementation.
+
+---
+
+## Phase 2 — Project Foundation & Monorepo Setup
+
+- [ ] Not started **TASK-201 [P3]:** Initialize monorepo root structure (`frontend/`, `backend/`, `cli/`, `infrastructure/`, `specs/`, `docs/`).
+- [ ] Not started **TASK-202 [P3]:** Configure root `package.json` with npm workspaces for `frontend`, `backend`, and `cli`.
+- [ ] Not started **TASK-203 [P2]:** Set up `backend/` TypeScript environment (`tsconfig.json`, `package.json`, Vitest).
+- [ ] Not started **TASK-204 [P1]:** Set up `frontend/` React 18 + Vite + Tailwind CSS + Lucide + Recharts environment.
+- [ ] Not started **TASK-205 [P2]:** Set up `cli/` Commander.js + TypeScript environment.
+- [ ] Not started **TASK-206 [P2/P3]:** Author shared domain contracts (`types/index.ts` across backend, frontend, cli).
+- [ ] Not started **TASK-207 [P3]:** Configure local mock storage & AWS SDK v3 adapter harness (`MemoryStore`).
+- [ ] Not started **TASK-208 [P3]:** Create GitHub Actions CI pipeline (`.github/workflows/ci.yml`).
+
+---
+
+## Phase 3 — Authentication & Database
+
+- [ ] Not started **TASK-301 [P3]:** Define Cognito User Pool & App Client configuration in AWS SAM template (`infrastructure/template.yaml`).
+- [ ] Not started **TASK-302 [P3]:** Implement backend tenant authorization middleware validating JWT claims and RBAC roles.
+- [ ] Not started **TASK-303 [P3]:** Configure DynamoDB schemas with On-Demand billing and automated TTL policies.
+- [ ] Not started **TASK-304 [P3]:** Write unit tests for tenant isolation and cross-tenant access rejection (`backend/tests/auth-isolation.test.ts`).
+
+---
+
+## Phase 4 — Event Ingestion API
+
+- [ ] Not started **TASK-401 [P2]:** Build Event Ingestion API (`POST /api/v1/events`):
+  - Zod validation for single and batch payloads.
+  - Timestamp canonicalization (ISO 8601 UTC).
+  - SHA-256 idempotency deduplication hashing.
+- [ ] Not started **TASK-402 [P2]:** Implement event query endpoint with filtering (`GET /api/v1/events`).
+- [ ] Not started **TASK-403 [P2]:** Write unit tests for event validation, deduplication, and normalization (`backend/tests/ingestion.test.ts`).
+
+---
+
+## Phase 5 — Detection, Correlation & Risk Scoring
+
+- [ ] Not started **TASK-501 [P2]:** Implement Threat Detection Engine (`backend/src/detection/engine.ts`).
+- [ ] Not started **TASK-502 [P2]:** Implement all 10 Sigma-inspired detection rules (`RULE-001` through `RULE-010`).
+- [ ] Not started **TASK-503 [P2]:** Build Event Correlation Engine with sliding temporal window entity matching (`backend/src/correlation/engine.ts`).
+- [ ] Not started **TASK-504 [P2]:** Implement Explainable Mathematical Risk Scoring Engine ($0–100$) (`backend/src/risk-engine/scorer.ts`).
+- [ ] Not started **TASK-505 [P2]:** Write unit tests for all 10 detection rules, correlation sequences, and risk scoring formula (`backend/tests/detection.test.ts`, `backend/tests/correlation-risk.test.ts`).
+
+---
+
+## Phase 6 — Threat Intelligence & Incidents
+
+- [ ] Not started **TASK-601 [P2]:** Build embedded offline IOC repository (Tor nodes, botnets, proxies) & IP lookup tool.
+- [ ] Not started **TASK-602 [P2]:** Implement Incident Management CRUD and status state machine (`NEW` $\to$ `INVESTIGATING` $\to$ `CONTAINED` $\to$ `RESOLVED`).
+- [ ] Not started **TASK-603 [P2]:** Write unit tests for incident lifecycle transitions and threat intel enrichment (`backend/tests/incidents.test.ts`).
+
+---
+
+## Phase 7 — Defensive Response & Audit Ledger
+
+- [ ] Not started **TASK-701 [P3]:** Implement Automated Defensive Response Engine (SOAR) (`backend/src/response/handler.ts`):
+  - Safe simulated containment: `BLOCK_IP`, `SUSPEND_USER`, `REVOKE_SESSION`, `STEP_UP_AUTH`.
+  - Human Approval Gates for high-impact actions (`PENDING_APPROVAL`).
+  - Operational rollback handlers (`UNBLOCK_IP`, `REINSTATE_USER`).
+- [ ] Not started **TASK-702 [P3]:** Implement Cryptographic Security Audit Logger (`backend/src/audit/integrityChain.ts`):
+  - Append-only SHA-256 hash chaining.
+  - One-click cryptographic chain verification API (`POST /api/v1/audit-logs/verify-chain`).
+- [ ] Not started **TASK-703 [P3]:** Write unit tests for containment execution, approval gates, rollback, and tamper detection (`backend/tests/response-audit.test.ts`).
+
+---
+
+## Phase 8 — Frontend SOC Dashboard
+
+- [ ] Not started **TASK-801 [P1]:** Implement responsive SOC Shell Layout (`Header.tsx`, `Sidebar.tsx`) with Midnight Navy & Electric Cyan styling.
+- [ ] Not started **TASK-802 [P1]:** Build `DashboardOverview.tsx` with Recharts telemetry area chart, severity donut, and MITRE tactic matrix.
+- [ ] Not started **TASK-803 [P1]:** Build `LiveEvents.tsx` with real-time telemetry stream, search, and JSON modal inspector.
+- [ ] Not started **TASK-804 [P1]:** Build `ThreatDetection.tsx` with 10 Sigma rules catalog, toggle controls, and threshold sliders.
+- [ ] Not started **TASK-805 [P1]:** Build `Incidents.tsx` with incident queue, explainable risk breakdown cards, and attack kill-chain timeline.
+- [ ] Not started **TASK-806 [P1]:** Build `ThreatIntelligence.tsx` with IOC database and IP enrichment tool.
+- [ ] Not started **TASK-807 [P1]:** Build `ResponseCenter.tsx` with human approval queue, active blocklist, and rollback buttons.
+- [ ] Not started **TASK-808 [P1]:** Build `SimulationLab.tsx` with 6 interactive scenario cards and live terminal stream.
+- [ ] Not started **TASK-809 [P1]:** Build `AuditLogs.tsx` with SHA-256 hash inspector and interactive "Verify Ledger Integrity" tool.
+- [ ] Not started **TASK-810 [P1]:** Build `Settings.tsx` with organization multi-tenancy controls and RBAC matrix.
+- [ ] Not started **TASK-811 [P1]:** Verify frontend production compilation (`npm --prefix frontend run build`).
+
+---
+
+## Phase 9 — VELTRIX CLI (`@veltrix/cli`)
+
+- [ ] Not started **TASK-901 [P2]:** Scaffold `cli/` executable (`bin/veltrix.ts`) and configure global command options (`--json`, `--org`, `--api-url`).
+- [ ] Not started **TASK-902 [P2]:** Implement `veltrix auth login / logout / status`.
+- [ ] Not started **TASK-903 [P2]:** Implement `veltrix events list / show / ingest --dry-run`.
+- [ ] Not started **TASK-904 [P2]:** Implement `veltrix detect run / rules list / rules test`.
+- [ ] Not started **TASK-905 [P2]:** Implement `veltrix incidents list / show / update / assign`.
+- [ ] Not started **TASK-906 [P2]:** Implement `veltrix intel ip / indicators list / mitre`.
+- [ ] Not started **TASK-907 [P2]:** Implement `veltrix response policies list / preview / execute / history`.
+- [ ] Not started **TASK-908 [P2]:** Implement `veltrix simulate list / run / results`.
+- [ ] Not started **TASK-909 [P2]:** Implement `veltrix status` and `veltrix config show`.
+- [ ] Not started **TASK-910 [P2]:** Write CLI unit and integration tests (`cli/tests/cli.test.ts`).
+
+---
+
+## Phase 10 — Full Integration & Simulation Verification
+
+- [ ] Not started **TASK-1001 [ALL]:** Implement the 6 Synthetic Simulation Scenarios (`backend/src/simulation/runner.ts`).
+- [ ] Not started **TASK-1002 [ALL]:** Test complete end-to-end event progression:
+  Telemetry Ingestion $\to$ Normalization $\to$ Sigma Detection $\to$ Correlation $\to$ Risk Scoring $\to$ Incident Creation $\to$ SOAR Containment $\to$ Audit Logging $\to$ Dashboard & CLI Sync.
+- [ ] Not started **TASK-1003 [ALL]:** Verify that identical incident and event telemetry is visible simultaneously in the Web SOC Console and CLI.
+
+---
+
+## Phase 11 — Security & DevSecOps Audit
+
+- [ ] Not started **TASK-1101 [P3]:** Run automated dependency vulnerability scan (`npm audit`).
+- [ ] Not started **TASK-1102 [P3]:** Perform static analysis and zero-secret scan across all files.
+- [ ] Not started **TASK-1103 [P3]:** Conduct cross-tenant data isolation security test.
+- [ ] Not started **TASK-1104 [P3]:** Verify cryptographic audit chain tamper-detection tests.
+
+---
+
+## Phase 12 — Deployment & AWS Infrastructure Verification
+
+- [ ] Not started **TASK-1201 [P3]:** Validate AWS SAM template (`infrastructure/template.yaml`).
+- [ ] Not started **TASK-1202 [P3]:** Verify IAM least-privilege policies.
+- [ ] Not started **TASK-1203 [P3]:** Finalize AWS serverless cost optimization analysis (`docs/aws-cost-analysis.md`).
+
+---
+
+## Phase 13 — Final Quality Assurance & Competition Readiness
+
+- [ ] Not started **TASK-1301 [ALL]:** Run full test suite across backend, frontend, and CLI.
+- [ ] Not started **TASK-1302 [ALL]:** Compile final test and coverage report.
+- [ ] Not started **TASK-1303 [ALL]:** Finalize comprehensive `README.md`, `docs/api-reference.md`, `docs/deployment-guide.md`, and 5-minute `docs/demo-script.md`.
+- [ ] Not started **TASK-1304 [ALL]:** Verify competition-ready status.
