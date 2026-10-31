@@ -10,7 +10,8 @@ import type {
   AuditLog,
   AuditState,
 } from '@veltrix/shared';
-import type { StorageInterface } from './storage-interface.js';
+import type { StorageInterface, EventQueryOptions } from './storage-interface.js';
+import { signCursor, verifyCursor, computeFilterHash } from '../utils/cursor.js';
 
 export class MemoryStore implements StorageInterface {
   // Primary stores partitioned by orgId where applicable
@@ -55,33 +56,63 @@ export class MemoryStore implements StorageInterface {
 
   async getEvents(
     orgId: string,
-    options?: {
-      limit?: number;
-      cursor?: string;
-      eventType?: string;
-      sourceIp?: string;
-    }
-  ): Promise<{ items: SecurityEvent[]; nextCursor?: string }> {
+    options?: EventQueryOptions
+  ): Promise<{ items: SecurityEvent[]; nextCursor?: string; total?: number }> {
     const events = this.eventsByOrg.get(orgId) || [];
     let filtered = [...events];
 
     if (options?.eventType) {
       filtered = filtered.filter((e) => e.eventType === options.eventType);
     }
+    if (options?.severity) {
+      filtered = filtered.filter((e) => e.severity === options.severity);
+    }
     if (options?.sourceIp) {
       filtered = filtered.filter((e) => e.sourceIp === options.sourceIp);
     }
+    if (options?.username) {
+      filtered = filtered.filter((e) => e.username === options.username);
+    }
+    if (options?.sourceSystem) {
+      filtered = filtered.filter((e) => e.sourceSystem === options.sourceSystem);
+    }
+    if (options?.startTime) {
+      const startMs = new Date(options.startTime).getTime();
+      filtered = filtered.filter((e) => new Date(e.timestamp).getTime() >= startMs);
+    }
+    if (options?.endTime) {
+      const endMs = new Date(options.endTime).getTime();
+      filtered = filtered.filter((e) => new Date(e.timestamp).getTime() <= endMs);
+    }
 
-    // Sort descending by timestamp
-    filtered.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    // Sort descending chronologically, tie-break deterministically by eventId
+    filtered.sort((a, b) => {
+      const diff = new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      return diff !== 0 ? diff : b.eventId.localeCompare(a.eventId);
+    });
 
+    const total = filtered.length;
     const limit = options?.limit || 50;
-    const startIndex = options?.cursor ? parseInt(options.cursor, 10) : 0;
-    const paginated = filtered.slice(startIndex, startIndex + limit);
-    const nextCursor =
-      startIndex + limit < filtered.length ? String(startIndex + limit) : undefined;
 
-    return { items: paginated, nextCursor };
+    let startIndex = 0;
+    if (options?.cursor) {
+      try {
+        const verified = verifyCursor(options.cursor, orgId, options);
+        startIndex = verified.offset ?? 0;
+      } catch (err: unknown) {
+        throw new Error('INVALID_CURSOR');
+      }
+    }
+
+    const paginated = filtered.slice(startIndex, startIndex + limit);
+    const nextOffset = startIndex + limit;
+    const filterHash = computeFilterHash(options);
+    const nextCursor =
+      nextOffset < filtered.length
+        ? signCursor({ orgId, filterHash, offset: nextOffset })
+        : undefined;
+
+    return { items: paginated, nextCursor, total };
   }
 
   async getEventById(orgId: string, eventId: string): Promise<SecurityEvent | null> {

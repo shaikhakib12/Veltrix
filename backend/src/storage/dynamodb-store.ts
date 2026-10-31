@@ -1,6 +1,4 @@
-import {
-  DynamoDBClient,
-} from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   PutCommand,
@@ -20,7 +18,9 @@ import type {
   AuditLog,
   AuditState,
 } from '@veltrix/shared';
-import type { StorageInterface } from './storage-interface.js';
+import type { StorageInterface, EventQueryOptions } from './storage-interface.js';
+import { signCursor, verifyCursor, computeFilterHash } from '../utils/cursor.js';
+import { extractDateFromUuidV7 } from '../utils/uuid.js';
 
 export class DynamoDBStore implements StorageInterface {
   private docClient: DynamoDBDocumentClient;
@@ -135,59 +135,146 @@ export class DynamoDBStore implements StorageInterface {
 
   async getEvents(
     orgId: string,
-    options?: {
-      limit?: number;
-      cursor?: string;
-      eventType?: string;
-      sourceIp?: string;
-    }
-  ): Promise<{ items: SecurityEvent[]; nextCursor?: string }> {
-    const today = new Date().toISOString().slice(0, 10);
-    const pk = `ORG#${orgId}#DATE#${today}`;
+    options?: EventQueryOptions
+  ): Promise<{ items: SecurityEvent[]; nextCursor?: string; total?: number }> {
+    const targetDate = options?.startTime
+      ? options.startTime.slice(0, 10)
+      : options?.endTime
+        ? options.endTime.slice(0, 10)
+        : new Date().toISOString().slice(0, 10);
+
+    const pk = `ORG#${orgId}#DATE#${targetDate}`;
 
     let indexName: string | undefined;
     let keyCondition = 'PK = :pk';
     const exprValues: Record<string, unknown> = { ':pk': pk };
+    const exprNames: Record<string, string> = {};
+    const filterConditions: string[] = [];
 
     if (options?.eventType) {
       indexName = 'GSI1-EventTypeIndex';
       keyCondition = 'GSI1_PK = :gsi1pk';
       exprValues[':gsi1pk'] = `ORG#${orgId}#TYPE#${options.eventType}`;
       delete exprValues[':pk'];
+
+      if (options.startTime && options.endTime) {
+        keyCondition += ' AND GSI1_SK BETWEEN :startTime AND :endTime';
+        exprValues[':startTime'] = options.startTime;
+        exprValues[':endTime'] = options.endTime;
+      } else if (options.startTime) {
+        keyCondition += ' AND GSI1_SK >= :startTime';
+        exprValues[':startTime'] = options.startTime;
+      } else if (options.endTime) {
+        keyCondition += ' AND GSI1_SK <= :endTime';
+        exprValues[':endTime'] = options.endTime;
+      }
     } else if (options?.sourceIp) {
       indexName = 'GSI2-SourceIpIndex';
       keyCondition = 'GSI2_PK = :gsi2pk';
       exprValues[':gsi2pk'] = `ORG#${orgId}#IP#${options.sourceIp}`;
       delete exprValues[':pk'];
+
+      if (options.startTime && options.endTime) {
+        keyCondition += ' AND GSI2_SK BETWEEN :startTime AND :endTime';
+        exprValues[':startTime'] = options.startTime;
+        exprValues[':endTime'] = options.endTime;
+      } else if (options.startTime) {
+        keyCondition += ' AND GSI2_SK >= :startTime';
+        exprValues[':startTime'] = options.startTime;
+      } else if (options.endTime) {
+        keyCondition += ' AND GSI2_SK <= :endTime';
+        exprValues[':endTime'] = options.endTime;
+      }
+    } else {
+      if (options?.startTime && options?.endTime) {
+        keyCondition += ' AND SK BETWEEN :startSk AND :endSk';
+        exprValues[':startSk'] = `EVENT#${options.startTime}`;
+        exprValues[':endSk'] = `EVENT#${options.endTime}#\uffff`;
+      } else if (options?.startTime) {
+        keyCondition += ' AND SK >= :startSk';
+        exprValues[':startSk'] = `EVENT#${options.startTime}`;
+      } else if (options?.endTime) {
+        keyCondition += ' AND SK <= :endSk';
+        exprValues[':endSk'] = `EVENT#${options.endTime}#\uffff`;
+      }
     }
 
-    const exclusiveStartKey = options?.cursor
-      ? JSON.parse(Buffer.from(options.cursor, 'base64').toString('utf8'))
-      : undefined;
+    if (options?.severity) {
+      filterConditions.push('#sev = :sev');
+      exprNames['#sev'] = 'severity';
+      exprValues[':sev'] = options.severity;
+    }
+    if (options?.username) {
+      filterConditions.push('#usr = :usr');
+      exprNames['#usr'] = 'username';
+      exprValues[':usr'] = options.username;
+    }
+    if (options?.sourceSystem) {
+      filterConditions.push('#srcSys = :srcSys');
+      exprNames['#srcSys'] = 'sourceSystem';
+      exprValues[':srcSys'] = options.sourceSystem;
+    }
+
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    if (options?.cursor) {
+      try {
+        const verified = verifyCursor(options.cursor, orgId, options);
+        exclusiveStartKey = verified.exclusiveStartKey;
+      } catch (err: unknown) {
+        throw new Error('INVALID_CURSOR');
+      }
+    }
 
     const command = new QueryCommand({
       TableName: this.eventsTable,
       IndexName: indexName,
       KeyConditionExpression: keyCondition,
       ExpressionAttributeValues: exprValues,
-      ScanIndexForward: false, // Descending chronological
+      ExpressionAttributeNames: Object.keys(exprNames).length > 0 ? exprNames : undefined,
+      FilterExpression: filterConditions.length > 0 ? filterConditions.join(' AND ') : undefined,
+      ScanIndexForward: false,
       Limit: options?.limit || 50,
       ExclusiveStartKey: exclusiveStartKey,
     });
 
     const response = await this.executeWithRetry(() => this.docClient.send(command));
     const items = (response.Items || []) as SecurityEvent[];
+    const filterHash = computeFilterHash(options);
     const nextCursor = response.LastEvaluatedKey
-      ? Buffer.from(JSON.stringify(response.LastEvaluatedKey)).toString('base64')
+      ? signCursor({
+          orgId,
+          filterHash,
+          exclusiveStartKey: response.LastEvaluatedKey as Record<string, unknown>,
+        })
       : undefined;
 
-    return { items, nextCursor };
+    return { items, nextCursor, total: items.length };
   }
 
-  async getEventById(_orgId: string, _eventId: string): Promise<SecurityEvent | null> {
-    // In DynamoDB, full event fetch by ID without date is typically served via GSI or scan
-    // Left as extensible stub for Phase 4 ingestion queries
-    return null;
+  async getEventById(orgId: string, eventId: string): Promise<SecurityEvent | null> {
+    try {
+      // High-efficiency targeted single-partition Query via UUIDv7 date extraction (eliminates table scans)
+      const extractedDate = extractDateFromUuidV7(eventId);
+      const targetDate = extractedDate || new Date().toISOString().slice(0, 10);
+      const pk = `ORG#${orgId}#DATE#${targetDate}`;
+
+      const command = new QueryCommand({
+        TableName: this.eventsTable,
+        KeyConditionExpression: 'PK = :pk',
+        FilterExpression: 'eventId = :eventId',
+        ExpressionAttributeValues: {
+          ':pk': pk,
+          ':eventId': eventId,
+        },
+        Limit: 1,
+      });
+
+      const response = await this.executeWithRetry(() => this.docClient.send(command));
+      const items = (response.Items || []) as SecurityEvent[];
+      return items[0] || null;
+    } catch {
+      return null;
+    }
   }
 
   // --- Incidents Management ---

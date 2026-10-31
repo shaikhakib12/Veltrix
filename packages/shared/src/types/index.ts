@@ -1,5 +1,6 @@
 import type {
   EVENT_CATEGORIES,
+  SUPPORTED_EVENT_TYPES,
   SEVERITIES,
   INCIDENT_STATUSES,
   RESPONSE_ACTION_TYPES,
@@ -9,6 +10,7 @@ import type {
 } from '../constants/index.js';
 
 export type EventCategory = (typeof EVENT_CATEGORIES)[number];
+export type SupportedEventType = (typeof SUPPORTED_EVENT_TYPES)[number];
 export type Severity = (typeof SEVERITIES)[number];
 export type IncidentStatus = (typeof INCIDENT_STATUSES)[number];
 export type ResponseActionType = (typeof RESPONSE_ACTION_TYPES)[number];
@@ -29,6 +31,22 @@ export interface SecurityEvent {
   metadata?: Record<string, unknown>;
   isSimulated?: boolean;
   idempotencyKey?: string;
+  ingestedAt?: string; // Server-side ISO 8601 UTC receipt timestamp
+}
+
+export interface IngestionItemResult {
+  eventId: string;
+  status: 'ACCEPTED' | 'DUPLICATE_SUPPRESSED' | 'REJECTED' | 'FAILED';
+  message?: string;
+  errors?: Array<{ field: string; message: string }>;
+}
+
+export interface IngestionResponseData {
+  total: number;
+  accepted: number;
+  duplicates: number;
+  rejected: number;
+  results: IngestionItemResult[];
 }
 
 export interface DetectionRule {
@@ -207,4 +225,14 @@ export interface PaginatedQuery {
   limit?: number;
   cursor?: string;
   sortOrder?: 'ASC' | 'DESC';
+}
+
+export interface EventQueryFilter extends PaginatedQuery {
+  startTime?: string;
+  endTime?: string;
+  eventType?: string;
+  severity?: Severity;
+  sourceIp?: string;
+  username?: string;
+  sourceSystem?: string;
 }

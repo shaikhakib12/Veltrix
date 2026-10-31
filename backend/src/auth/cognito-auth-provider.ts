@@ -149,7 +149,57 @@ export class CognitoAuthProvider implements AuthProvider {
   }
 
   async verifyToken(token: string): Promise<TokenPayload> {
-    return this.jwtService.verifyAccessToken(token);
+    if (await this.isTokenRevoked(token)) {
+      throw new Error('TOKEN_REVOKED');
+    }
+
+    // Inspect JWT header to separate RS256 vs HS256 verification configuration
+    const decodedComplete = jwt.decode(token, { complete: true });
+    if (!decodedComplete || typeof decodedComplete !== 'object') {
+      throw new Error('TOKEN_INVALID');
+    }
+
+    const header = decodedComplete.header;
+    const payload = decodedComplete.payload as Record<string, unknown>;
+
+    // Cognito tokens are signed with RS256
+    if (header.alg === 'RS256') {
+      const region = process.env.AWS_REGION || 'us-east-1';
+      const expectedIssuer = this.userPoolId
+        ? `https://cognito-idp.${region}.amazonaws.com/${this.userPoolId}`
+        : undefined;
+
+      // Validate expiration
+      const nowEpoch = Math.floor(Date.now() / 1000);
+      if (typeof payload.exp === 'number' && payload.exp < nowEpoch) {
+        throw new Error('TOKEN_EXPIRED');
+      }
+
+      // Validate issuer if UserPoolId is configured
+      if (expectedIssuer && payload.iss !== expectedIssuer) {
+        throw new Error('TOKEN_INVALID: Untrusted Cognito Issuer');
+      }
+
+      // Validate token_use
+      if (payload.token_use !== 'id' && payload.token_use !== 'access') {
+        throw new Error('TOKEN_INVALID: Invalid Cognito token_use');
+      }
+
+      return {
+        userId: (payload.sub as string) || (payload['cognito:username'] as string),
+        email: (payload.email as string) || '',
+        username: (payload.preferred_username as string) || (payload['cognito:username'] as string) || 'cognito-user',
+        role: (payload['custom:role'] as UserRole) || 'SECURITY_ANALYST',
+        orgId: (payload['custom:orgId'] as string) || 'org-enterprise-01',
+        iat: payload.iat as number | undefined,
+        exp: payload.exp as number | undefined,
+        iss: payload.iss as string | undefined,
+        aud: payload.aud as string | undefined,
+      };
+    }
+
+    // Explicit rejection of non-RS256 tokens in Cognito provider to prevent algorithm confusion
+    throw new Error('TOKEN_INVALID: Unsupported algorithm for Cognito provider');
   }
 
   async revokeToken(token: string): Promise<void> {

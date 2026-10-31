@@ -56,12 +56,12 @@
 
 ## Phase 4 — Event Ingestion API
 
-- [ ] Not started **TASK-401 [P2]:** Build Event Ingestion API (`POST /api/v1/events`):
-  - Zod validation for single and batch payloads.
+- [x] Verified **TASK-401 [P2]:** Build Event Ingestion API (`POST /api/v1/events`):
+  - Zod validation for single and batch payloads (up to 100 events).
   - High-precision deduplication using `idempotencyKey = eventId`.
-  - Timestamp canonicalization (ISO 8601 UTC).
-- [ ] Not started **TASK-402 [P2]:** Implement event query endpoint with filtering (`GET /api/v1/events`).
-- [ ] Not started **TASK-403 [P2]:** Write unit tests for event validation, deduplication, and normalization (`backend/tests/ingestion.test.ts`).
+  - Timestamp canonicalization (ISO 8601 UTC) and RFC 9562 UUIDv7 generation.
+- [x] Verified **TASK-402 [P2]:** Implement event query endpoint with filtering and cursor pagination (`GET /api/v1/events`).
+- [x] Verified **TASK-403 [P2]:** Write unit and integration tests for validation, deduplication, tenant isolation, and query pagination (`backend/tests/ingestion.test.ts`).
 
 ---
 
