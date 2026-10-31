@@ -1,11 +1,11 @@
 # VELTRIX: Implementation Tasks & Verification Tracking (`specs/tasks.md`)
 
-**Document Version:** 2.0.0  
-**Status:** In Progress (Phase 0 & 1 Complete, Awaiting Review to Begin Phase 2)  
-**Execution Matrix:** 3-Person Team Allocation  
-- **[P1] Person 1:** Frontend Lead (React, Vite, Tailwind CSS, Recharts, Lucide, UI Testing)  
-- **[P2] Person 2:** Backend & Cybersecurity Lead (Node.js, TypeScript, Ingestion, Detection, Correlation, Risk, CLI)  
-- **[P3] Person 3:** Cloud, Database & DevSecOps Lead (AWS SAM, DynamoDB, Cognito, EventBridge, Step Functions, Audit, CI/CD)  
+**Document Version:** 2.1.0 (Post-Audit Hardened & Rebalanced)  
+**Status:** In Review (Phase 0 & 1 Complete, Awaiting Review to Begin Phase 2)  
+**Execution Matrix:** Balanced 3-Person Team Allocation  
+- **[P1] Person 1:** Frontend & CLI Presentation Lead (React 18, Vite, Tailwind CSS, Recharts, Lucide, CLI Formatters & Terminal UX)  
+- **[P2] Person 2:** Backend Core & Cybersecurity Intelligence Lead (Node.js, TypeScript, Ingestion, Detection, Correlation, Risk, Threat Intel, CLI API Client)  
+- **[P3] Person 3:** Cloud, Database, DevSecOps & Security Automation Lead (AWS SAM, DynamoDB, Cognito, EventBridge, Step Functions, SQS FIFO Audit, CLI Packaging)  
 - **[ALL]:** Shared Responsibilities (Architecture, Schemas, Code Reviews, Integration, Final Demo)  
 
 ---
@@ -27,7 +27,8 @@
 - [x] Verified **TASK-104 [P2/P3]:** Document complete REST API Contracts for Web & CLI (`specs/api-contracts.md`).
 - [x] Verified **TASK-105 [P3]:** Formulate DynamoDB Schema & Access Patterns (`specs/database-schema.md`).
 - [x] Verified **TASK-106 [ALL]:** Author Full Testing & Quality Strategy (`specs/testing-strategy.md`).
-- [ ] Not started **TASK-107 [ALL]:** Team review and approval gate before initiating Phase 2 implementation.
+- [x] Verified **TASK-107 [ALL]:** Perform Strict Specification Audit & Deliver Audit Report (`specs/phase-1-audit-report.md`).
+- [ ] Not started **TASK-108 [ALL]:** Team review and approval gate before initiating Phase 2 implementation.
 
 ---
 
@@ -37,7 +38,7 @@
 - [ ] Not started **TASK-202 [P3]:** Configure root `package.json` with npm workspaces for `frontend`, `backend`, and `cli`.
 - [ ] Not started **TASK-203 [P2]:** Set up `backend/` TypeScript environment (`tsconfig.json`, `package.json`, Vitest).
 - [ ] Not started **TASK-204 [P1]:** Set up `frontend/` React 18 + Vite + Tailwind CSS + Lucide + Recharts environment.
-- [ ] Not started **TASK-205 [P2]:** Set up `cli/` Commander.js + TypeScript environment.
+- [ ] Not started **TASK-205 [P3]:** Set up `cli/` Commander.js + TypeScript environment and executable bin wrapper.
 - [ ] Not started **TASK-206 [P2/P3]:** Author shared domain contracts (`types/index.ts` across backend, frontend, cli).
 - [ ] Not started **TASK-207 [P3]:** Configure local mock storage & AWS SDK v3 adapter harness (`MemoryStore`).
 - [ ] Not started **TASK-208 [P3]:** Create GitHub Actions CI pipeline (`.github/workflows/ci.yml`).
@@ -48,7 +49,7 @@
 
 - [ ] Not started **TASK-301 [P3]:** Define Cognito User Pool & App Client configuration in AWS SAM template (`infrastructure/template.yaml`).
 - [ ] Not started **TASK-302 [P3]:** Implement backend tenant authorization middleware validating JWT claims and RBAC roles.
-- [ ] Not started **TASK-303 [P3]:** Configure DynamoDB schemas with On-Demand billing and automated TTL policies.
+- [ ] Not started **TASK-303 [P3]:** Configure DynamoDB schemas with Time-Sharded partition keys (`ORG#{orgId}#DATE#{YYYY-MM-DD}`).
 - [ ] Not started **TASK-304 [P3]:** Write unit tests for tenant isolation and cross-tenant access rejection (`backend/tests/auth-isolation.test.ts`).
 
 ---
@@ -57,8 +58,8 @@
 
 - [ ] Not started **TASK-401 [P2]:** Build Event Ingestion API (`POST /api/v1/events`):
   - Zod validation for single and batch payloads.
+  - High-precision deduplication using `idempotencyKey = eventId`.
   - Timestamp canonicalization (ISO 8601 UTC).
-  - SHA-256 idempotency deduplication hashing.
 - [ ] Not started **TASK-402 [P2]:** Implement event query endpoint with filtering (`GET /api/v1/events`).
 - [ ] Not started **TASK-403 [P2]:** Write unit tests for event validation, deduplication, and normalization (`backend/tests/ingestion.test.ts`).
 
@@ -86,10 +87,11 @@
 
 - [ ] Not started **TASK-701 [P3]:** Implement Automated Defensive Response Engine (SOAR) (`backend/src/response/handler.ts`):
   - Safe simulated containment: `BLOCK_IP`, `SUSPEND_USER`, `REVOKE_SESSION`, `STEP_UP_AUTH`.
-  - Human Approval Gates for high-impact actions (`PENDING_APPROVAL`).
+  - Zero-bypass Human Approval Gates for high-impact actions (`PENDING_APPROVAL`).
+  - Target sandboxing: strict validation against whitelisted test identities/CIDRs.
   - Operational rollback handlers (`UNBLOCK_IP`, `REINSTATE_USER`).
 - [ ] Not started **TASK-702 [P3]:** Implement Cryptographic Security Audit Logger (`backend/src/audit/integrityChain.ts`):
-  - Append-only SHA-256 hash chaining.
+  - Append-only SHA-256 hash chaining with SQS FIFO serialization.
   - One-click cryptographic chain verification API (`POST /api/v1/audit-logs/verify-chain`).
 - [ ] Not started **TASK-703 [P3]:** Write unit tests for containment execution, approval gates, rollback, and tamper detection (`backend/tests/response-audit.test.ts`).
 
@@ -113,16 +115,17 @@
 
 ## Phase 9 — VELTRIX CLI (`@veltrix/cli`)
 
-- [ ] Not started **TASK-901 [P2]:** Scaffold `cli/` executable (`bin/veltrix.ts`) and configure global command options (`--json`, `--org`, `--api-url`).
-- [ ] Not started **TASK-902 [P2]:** Implement `veltrix auth login / logout / status`.
-- [ ] Not started **TASK-903 [P2]:** Implement `veltrix events list / show / ingest --dry-run`.
-- [ ] Not started **TASK-904 [P2]:** Implement `veltrix detect run / rules list / rules test`.
-- [ ] Not started **TASK-905 [P2]:** Implement `veltrix incidents list / show / update / assign`.
-- [ ] Not started **TASK-906 [P2]:** Implement `veltrix intel ip / indicators list / mitre`.
-- [ ] Not started **TASK-907 [P2]:** Implement `veltrix response policies list / preview / execute / history`.
-- [ ] Not started **TASK-908 [P2]:** Implement `veltrix simulate list / run / results`.
-- [ ] Not started **TASK-909 [P2]:** Implement `veltrix status` and `veltrix config show`.
-- [ ] Not started **TASK-910 [P2]:** Write CLI unit and integration tests (`cli/tests/cli.test.ts`).
+- [ ] Not started **TASK-901 [P3]:** Scaffold `cli/` executable (`bin/veltrix.ts`) and packaging (`package.json`).
+- [ ] Not started **TASK-902 [P2]:** Build CLI API Client (`cli/src/api/client.ts`) connecting to shared backend REST endpoints.
+- [ ] Not started **TASK-903 [P1]:** Implement `veltrix auth login / logout / status` with chalk terminal banners.
+- [ ] Not started **TASK-904 [P1]:** Implement `veltrix events list / show / ingest --dry-run` with table formatting.
+- [ ] Not started **TASK-905 [P2]:** Implement `veltrix detect run / rules list / rules test`.
+- [ ] Not started **TASK-906 [P1]:** Implement `veltrix incidents list / show / update / assign` with risk color badges.
+- [ ] Not started **TASK-907 [P2]:** Implement `veltrix intel ip / indicators list / mitre`.
+- [ ] Not started **TASK-908 [P2/P1]:** Implement `veltrix response policies list / preview / execute / history` with interactive confirmation.
+- [ ] Not started **TASK-909 [P1]:** Implement `veltrix simulate list / run / results` with spinners (`ora`).
+- [ ] Not started **TASK-910 [P1]:** Implement `veltrix status` and `veltrix config show`.
+- [ ] Not started **TASK-911 [P2]:** Write CLI unit and integration tests (`cli/tests/cli.test.ts`).
 
 ---
 

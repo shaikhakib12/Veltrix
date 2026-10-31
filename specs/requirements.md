@@ -1,7 +1,7 @@
 # VELTRIX: Autonomous Cyber Threat Detection & Response Platform
 ## System Requirements Specification (`specs/requirements.md`)
 
-**Document Version:** 2.0.0  
+**Document Version:** 2.1.0 (Post-Audit Hardened)  
 **Status:** In Review (Phase 1 Specification)  
 **Project:** VELTRIX  
 **Tagline:** Beyond Detection. Into Defense.  
@@ -14,13 +14,13 @@
 VELTRIX is an autonomous, event-driven Security Information and Event Management (SIEM) and Security Orchestration, Automation, and Response (SOAR) platform. Modern Security Operations Centers (SOC) face crippling alert fatigue, uncoordinated alerts from disparate systems, and delayed manual containment actions.
 
 VELTRIX resolves these challenges by:
-1. Ingesting and normalizing security telemetry with deduplication and idempotency verification.
-2. Evaluating signals in real-time against Sigma-inspired detection rules.
+1. Ingesting and normalizing security telemetry with high-precision idempotency verification (preventing accidental deduplication of rapid brute-force attempts).
+2. Evaluating signals in real-time against 10 Sigma-inspired detection rules with sliding temporal windows.
 3. Correlating disparate alerts across time, IP, and identity into coherent attack sequences mapped to the MITRE ATT&CK® matrix.
-4. Computing explainable, deterministic mathematical risk scores ($0–100$).
-5. Providing an interactive, dark-first SOC dashboard and a high-performance terminal CLI (`veltrix`).
-6. Enforcing controlled, approval-gated defensive responses (`BLOCK_IP`, `SUSPEND_USER`, `REVOKE_SESSION`, `STEP_UP_AUTH`) with full rollback capabilities.
-7. Anchoring all operational actions in an append-only, SHA-256 cryptographic audit ledger.
+4. Computing explainable, deterministic mathematical risk scores ($0–100$) with transparent factor breakdowns.
+5. Providing unified operational interfaces: a dark-first Web SOC Console and a high-performance terminal CLI (`@veltrix/cli`).
+6. Enforcing controlled, approval-gated defensive responses (`BLOCK_IP`, `SUSPEND_USER`, `REVOKE_SESSION`, `STEP_UP_AUTH`) with zero-bypass authorization and instant rollback.
+7. Anchoring all operational actions in an append-only, SHA-256 cryptographic audit ledger serialized via SQS FIFO.
 
 ---
 
@@ -43,13 +43,17 @@ VELTRIX enforces strict organization-level data isolation backed by Amazon Cogni
 - **FR-AUTH-01:** Secure user authentication (registration, login, MFA, session token invalidation) via Amazon Cognito User Pools.
 - **FR-AUTH-02:** Organization tenant isolation: every security event, rule, incident, and audit record must carry a verified `orgId`.
 - **FR-AUTH-03:** Backend claims verification: The backend API Gateway and Lambda authorizer validate JWT tokens; client-provided `orgId` parameters must match JWT claims or be rejected with `403 Forbidden`.
-- **FR-AUTH-04:** Role-Based Access Control (RBAC) enforced on every API route and UI control.
+- **FR-AUTH-04:** Role-Based Access Control (RBAC) enforced on every API route, UI action, and CLI command.
 
-### Module B — Event Ingestion API
+### Module B — Event Ingestion API & High-Precision Deduplication
 - **FR-INGEST-01:** High-throughput REST endpoint `POST /api/v1/events` supporting single and batch telemetry payloads (up to 100 events/batch).
-- **FR-INGEST-02:** Standardized Event Schema: `eventId`, `orgId`, `timestamp` (ISO 8601 UTC), `eventType`, `severity`, `category` (AUTHENTICATION, NETWORK, PRIVILEGE, API, DATA_ACCESS, SYSTEM), `sourceIp`, `username`, `sourceSystem`, `metadata`, `isSimulated`.
+- **FR-INGEST-02:** Standardized Event Schema: `eventId`, `orgId`, `timestamp` (ISO 8601 UTC), `eventType`, `severity`, `category` (AUTHENTICATION, NETWORK, PRIVILEGE, API, DATA_ACCESS, SYSTEM), `sourceIp`, `username`, `sourceSystem`, `metadata`, `isSimulated`, `idempotencyKey`.
 - **FR-INGEST-03:** Schema validation via Zod, rejecting malformed, untyped, or malicious injection payloads with structured error diagnostic responses.
-- **FR-INGEST-04:** Idempotency & Deduplication: Calculates `SHA-256(orgId + eventType + sourceIp + username + timestamp_minute)` to suppress duplicate retransmissions within sliding windows.
+- **FR-INGEST-04 (Hardened Deduplication):** To prevent discarding legitimate high-velocity brute-force events (e.g. 5 failed logins within 10 seconds), deduplication distinguishes between true network retries and distinct attacks:
+  - If `idempotencyKey` is provided by the client, it is used for deduplication.
+  - If omitted, `idempotencyKey = eventId` (UUIDv7/UUIDv4 generated per event).
+  - Deduplication fingerprint: `SHA-256(orgId + idempotencyKey)`.
+  - Legitimate repeated authentication attempts with unique event IDs are **never** discarded.
 
 ### Module C — Threat Detection Engine (Sigma-Inspired)
 - **FR-DETECT-01:** Independent, rule-based detection engine evaluating sliding temporal windows.
@@ -65,6 +69,7 @@ VELTRIX enforces strict organization-level data isolation backed by Amazon Cogni
   8. `RULE-008`: Excessive / Burst API Requests (MITRE `T1499`, burst $> 100$ requests/minute to sensitive endpoints).
   9. `RULE-009`: Multi-Account Targeted Reconnaissance (MITRE `T1595`, single IP probing $> 4$ user handles in 180s).
   10. `RULE-010`: Off-Hours Administrative Anomaly (MITRE `T1078`, administrative actions executed outside 06:00 - 22:00 window).
+- **FR-DETECT-04:** Dynamic Rule Testing: Expose `POST /api/v1/detection-rules/test` allowing analysts to dry-run rules against synthetic payloads without persisting alerts.
 
 ### Module D — Event Correlation Engine
 - **FR-CORR-01:** Temporal sliding window correlation across common source IPs and target usernames (15-minute default window).
@@ -80,7 +85,7 @@ VELTRIX enforces strict organization-level data isolation backed by Amazon Cogni
 
 ### Module F — Threat Intelligence
 - **FR-TI-01:** Embedded offline IOC repository with Tor exit nodes, botnet C2s, and malicious proxy indicators.
-- **FR-TI-02:** Interactive IP reputation inspection via web console and CLI.
+- **FR-TI-02:** Interactive IP reputation inspection via web console and CLI (`veltrix intel ip <address>`).
 - **FR-TI-03:** Graceful degradation: Functions seamlessly offline without requiring third-party API keys.
 - **FR-TI-04:** MITRE ATT&CK technique mapping and mitigation recommendations.
 
@@ -91,15 +96,17 @@ VELTRIX enforces strict organization-level data isolation backed by Amazon Cogni
 
 ### Module H — Defensive Response Engine (SOAR)
 - **FR-RESP-01:** Supported containment actions against simulated targets: `REVOKE_SESSION`, `SUSPEND_USER`, `BLOCK_IP`, `STEP_UP_AUTH`, `ESCALATE_ALERT`.
-- **FR-RESP-02:** Human Approval Gates: High-impact disruptive actions (`BLOCK_IP`, `SUSPEND_USER`) queue as `PENDING_APPROVAL` and require explicit analyst sign-off.
-- **FR-RESP-03:** Instant Rollback: Full operational rollback support (`UNBLOCK_IP`, `REINSTATE_USER`).
-- **FR-RESP-04:** Containment Registry: Live inspection of all active blocked IPs and suspended accounts.
+- **FR-RESP-02 (Zero-Bypass Approval Gates):** High-impact actions (`BLOCK_IP`, `SUSPEND_USER`) queue as `PENDING_APPROVAL`. Direct execution via `/execute` without approval token or Org Admin authorization is rejected with `403 Forbidden`.
+- **FR-RESP-03 (Target Whitelisting & Sandboxing):** All containment actions strictly validate that targets match authorized simulated CIDR blocks or test identities. Actions against non-whitelisted IP ranges or production identities are structurally rejected.
+- **FR-RESP-04 (Rollback Registry):** Instant operational rollback support (`UNBLOCK_IP`, `REINSTATE_USER`) for all containment actions.
 
 ### Module I — Security Audit Logging & Cryptographic Ledger
 - **FR-AUDIT-01:** Append-only recording of all logins, rule changes, detections, incident transitions, and containment actions.
-- **FR-AUDIT-02:** SHA-256 Chained Integrity: Every block anchors to the previous block's hash:
+- **FR-AUDIT-02 (Serialized Chaining):** To prevent race conditions in distributed serverless environments, audit writes are serialized via SQS FIFO queue with `MessageGroupId = orgId`.
+- **FR-AUDIT-03 (SHA-256 Fingerprint Chain):** Every record anchors to the previous record's hash:
   $$\text{IntegrityHash}_k = \text{SHA-256}(\text{IntegrityHash}_{k-1} \,\|\, \text{Payload})$$
-- **FR-AUDIT-03:** Verification API: One-click validation recalculating all hashes to detect any tampering or chain discontinuity.
+- **FR-AUDIT-04:** Verification API: One-click validation recalculating all hashes to detect any tampering or chain discontinuity.
+- **FR-AUDIT-05:** Real-cloud immutability: Backed by DynamoDB IAM restrictions (disallowing `DeleteItem`/`UpdateItem`) and S3 Object Lock in Compliance Mode for long-term compliance.
 
 ### Module J — Security Operations Center (SOC) Dashboard
 - **FR-DASH-01:** Dark-first cyber aesthetic: Midnight Navy canvas (`#0B0F19`), Electric Cyan (`#00F5FF`), Royal Blue.
@@ -144,10 +151,10 @@ VELTRIX enforces strict organization-level data isolation backed by Amazon Cogni
 
 ### Scalability & Availability
 - **NFR-SCALE-01:** Cloud-native serverless architecture with zero continuously running idle compute instances.
-- **NFR-SCALE-02:** DynamoDB On-Demand capacity supporting burst workloads up to 1,000 events/second.
+- **NFR-SCALE-02:** DynamoDB Time-Sharded Partitioning supporting burst workloads up to 1,000 events/second without hot-partition throttling.
 
 ### Security & Governance
 - **NFR-SEC-01:** Zero hardcoded secrets or credentials in repository.
-- **NFR-SEC-02:** Tenant isolation enforced at database partition key level (`ORG#{orgId}`).
+- **NFR-SEC-02:** Tenant isolation enforced at database partition key level (`ORG#{orgId}#DATE#{YYYY-MM-DD}`).
 - **NFR-SEC-03:** Least-privilege IAM roles scoped without wildcard permissions.
 - **NFR-SEC-04:** Data encrypted in transit (TLS 1.3) and at rest (AWS KMS AES-256).
