@@ -1,0 +1,50 @@
+# Node.js dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Environment variables & secrets (NEVER COMMIT)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+*.key
+*.cert
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Testing & Coverage
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# AWS SAM & Cloud tooling
+.aws-sam/
+samconfig.toml
+
+# IDE & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Vite cache
+.vite/

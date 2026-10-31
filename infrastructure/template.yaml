@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  VELTRIX - Autonomous Cyber Threat Detection & Controlled Defensive Response Platform
+  Production AWS Serverless Infrastructure Definition
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: nodejs22.x
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        NODE_ENV: production
+        STORAGE_MODE: aws
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Deployment target environment name
+
+Resources:
+  # ============================================================================
+  # 1. DynamoDB Tables
+  # ============================================================================
+
+  SecurityEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Veltrix-SecurityEvents-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1_PK
+          AttributeType: S
+        - AttributeName: GSI1_SK
+          AttributeType: S
+        - AttributeName: GSI2_PK
+          AttributeType: S
+        - AttributeName: GSI2_SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1-EventTypeIndex
+          KeySchema:
+            - AttributeName: GSI1_PK
+              KeyType: HASH
+            - AttributeName: GSI1_SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI2-SourceIpIndex
+          KeySchema:
+            - AttributeName: GSI2_PK
+              KeyType: HASH
+            - AttributeName: GSI2_SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Veltrix-Incidents-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  DetectionRulesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Veltrix-DetectionRules-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+
+  ThreatIndicatorsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Veltrix-ThreatIndicators-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+
+  ResponseExecutionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Veltrix-ResponseExecutions-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
+  AuditLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Veltrix-AuditLogs-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+
+  AuditStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Veltrix-AuditState-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+
+  # ============================================================================
+  # 2. SQS FIFO Audit Queues
+  # ============================================================================
+
+  AuditDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'Veltrix-Audit-DLQ-${Environment}.fifo'
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  AuditQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'Veltrix-AuditLog-Queue-${Environment}.fifo'
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AuditDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  # ============================================================================
+  # 3. Cryptographic Archival S3 Bucket with Object Lock (WORM)
+  # ============================================================================
+
+  AuditArchiveBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'veltrix-audit-archive-${Environment}-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      ObjectLockEnabled: true
+      ObjectLockConfiguration:
+        ObjectLockRule:
+          DefaultRetention:
+            Mode: GOVERNANCE
+            Days: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  SecurityEventsTableName:
+    Description: DynamoDB Security Events table
+    Value: !Ref SecurityEventsTable
+
+  AuditQueueUrl:
+    Description: SQS FIFO Audit Queue URL
+    Value: !Ref AuditQueue
+
+  AuditArchiveBucketName:
+    Description: S3 Object Lock Audit Bucket
+    Value: !Ref AuditArchiveBucket

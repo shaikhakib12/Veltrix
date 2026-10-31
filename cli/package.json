@@ -1,0 +1,26 @@
+{
+  "name": "@veltrix/cli",
+  "version": "1.0.0",
+  "description": "High-performance SOC terminal operator CLI for VELTRIX",
+  "type": "module",
+  "bin": {
+    "veltrix": "./bin/veltrix.js"
+  },
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@veltrix/shared": "*",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.8.7",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

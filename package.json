@@ -1,0 +1,25 @@
+{
+  "name": "veltrix-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "VELTRIX — Autonomous Cyber Threat Detection & Response Platform",
+  "author": "VELTRIX Team",
+  "license": "UNLICENSED",
+  "workspaces": [
+    "packages/*",
+    "backend",
+    "frontend",
+    "cli"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "clean": "npm run clean --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "rimraf": "^6.0.1"
+  }
+}
