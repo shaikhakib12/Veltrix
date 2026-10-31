@@ -11,6 +11,7 @@ import type {
   AuditState,
 } from '@veltrix/shared';
 import type { StorageInterface, EventQueryOptions } from './storage-interface.js';
+import { signCursor, verifyCursor, computeFilterHash } from '../utils/cursor.js';
 
 export class MemoryStore implements StorageInterface {
   // Primary stores partitioned by orgId where applicable
@@ -96,26 +97,19 @@ export class MemoryStore implements StorageInterface {
     let startIndex = 0;
     if (options?.cursor) {
       try {
-        const decoded = JSON.parse(Buffer.from(options.cursor, 'base64').toString('utf8'));
-        if (
-          typeof decoded !== 'object' ||
-          decoded === null ||
-          decoded.orgId !== orgId ||
-          typeof decoded.offset !== 'number'
-        ) {
-          throw new Error('INVALID_CURSOR');
-        }
-        startIndex = decoded.offset;
-      } catch {
+        const verified = verifyCursor(options.cursor, orgId, options);
+        startIndex = verified.offset ?? 0;
+      } catch (err: unknown) {
         throw new Error('INVALID_CURSOR');
       }
     }
 
     const paginated = filtered.slice(startIndex, startIndex + limit);
     const nextOffset = startIndex + limit;
+    const filterHash = computeFilterHash(options);
     const nextCursor =
       nextOffset < filtered.length
-        ? Buffer.from(JSON.stringify({ orgId, offset: nextOffset })).toString('base64')
+        ? signCursor({ orgId, filterHash, offset: nextOffset })
         : undefined;
 
     return { items: paginated, nextCursor, total };

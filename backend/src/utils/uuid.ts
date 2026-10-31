@@ -44,3 +44,28 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 export function isValidUuid(id: string): boolean {
   return typeof id === 'string' && UUID_REGEX.test(id);
 }
+
+/**
+ * Extracts the ISO date string (YYYY-MM-DD) encoded in the high 48-bits of an RFC 9562 UUIDv7.
+ * Enables direct O(1) DynamoDB time-sharded partition key lookup (ORG#{orgId}#DATE#{YYYY-MM-DD})
+ * without executing an unbounded full-table scan.
+ *
+ * Returns null if the UUID is not a valid version 7 identifier.
+ */
+export function extractDateFromUuidV7(uuid: string): string | null {
+  if (!isValidUuid(uuid)) return null;
+
+  // Check version nibble: 13th character (index 14 with dashes) must be '7'
+  if (uuid.charAt(14) !== '7') {
+    return null;
+  }
+
+  const hexTs = uuid.slice(0, 8) + uuid.slice(9, 13);
+  const timestampMs = parseInt(hexTs, 16);
+
+  if (isNaN(timestampMs) || timestampMs <= 0) {
+    return null;
+  }
+
+  return new Date(timestampMs).toISOString().slice(0, 10); // YYYY-MM-DD
+}

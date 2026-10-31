@@ -23,6 +23,7 @@ export function createEventsRouter(storage?: StorageInterface): Router {
     async (req: Request, res: Response): Promise<void> => {
       const tenantOrgId = req.tenantOrgId!;
       const isSuperAdmin = req.user?.role === 'SUPER_ADMIN';
+      const headerIdempotencyKey = (req.headers['idempotency-key'] || req.headers['x-idempotency-key']) as string | undefined;
 
       try {
         const body = req.body;
@@ -120,7 +121,8 @@ export function createEventsRouter(storage?: StorageInterface): Router {
         const singleResult = await eventService.ingestSingleEvent(
           body,
           tenantOrgId,
-          isSuperAdmin
+          isSuperAdmin,
+          headerIdempotencyKey
         );
 
         const response: ApiResponse<{

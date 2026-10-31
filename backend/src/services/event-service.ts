@@ -32,7 +32,8 @@ export class EventService {
   async ingestSingleEvent(
     rawPayload: unknown,
     tenantOrgId: string,
-    isSuperAdmin: boolean = false
+    isSuperAdmin: boolean = false,
+    headerIdempotencyKey?: string
   ): Promise<SingleIngestionResult> {
     // 1. Zod schema validation
     const parseResult = SingleEventIngestSchema.safeParse(rawPayload);
@@ -56,7 +57,7 @@ export class EventService {
     }
 
     // 3. Normalization
-    const normalizedEvent = this.normalizeEvent(data, tenantOrgId);
+    const normalizedEvent = this.normalizeEvent(data, tenantOrgId, headerIdempotencyKey);
 
     // 4. Persistence with atomic conditional deduplication
     const persistResult = await this.storage.saveEvent(normalizedEvent);
@@ -239,7 +240,8 @@ export class EventService {
    */
   private normalizeEvent(
     data: z.infer<typeof SingleEventIngestSchema>,
-    tenantOrgId: string
+    tenantOrgId: string,
+    headerIdempotencyKey?: string
   ): SecurityEvent {
     const nowIso = new Date().toISOString();
     const eventTimestamp = data.timestamp
@@ -250,7 +252,7 @@ export class EventService {
       ? data.eventId
       : generateUuidV7();
 
-    const idempotencyKey = data.idempotencyKey || eventId;
+    const idempotencyKey = data.idempotencyKey || headerIdempotencyKey || eventId;
 
     return {
       eventId,

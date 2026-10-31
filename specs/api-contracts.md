@@ -16,6 +16,7 @@ All requests made by the Web console, CLI, and telemetry clients must include:
 | `Content-Type` | String | Yes | `application/json` |
 | `Authorization` | String | Yes (Prod) | Bearer token: `Bearer <Cognito_JWT_ID_Token>` |
 | `x-organization-id` | String | Yes | Organization identifier (e.g., `org-enterprise-01`). Verified against JWT claims. |
+| `Idempotency-Key` | String | Optional | Client-supplied request deduplication key for safe network retries. |
 
 ---
 

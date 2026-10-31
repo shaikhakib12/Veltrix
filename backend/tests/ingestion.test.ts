@@ -8,7 +8,8 @@ import { resetAuthProviderForTesting } from '../src/auth/index.js';
 import { MemoryStore } from '../src/storage/memory-store.js';
 import { DynamoDBStore } from '../src/storage/dynamodb-store.js';
 import { resetStorageForTesting } from '../src/storage/index.js';
-import { generateUuidV7 } from '../src/utils/uuid.js';
+import { generateUuidV7, extractDateFromUuidV7 } from '../src/utils/uuid.js';
+import { signCursor } from '../src/utils/cursor.js';
 import type { SecurityEvent } from '@veltrix/shared';
 
 describe('Phase 4: Event Ingestion & Query API (TASK-401 to TASK-403)', () => {
@@ -966,6 +967,238 @@ describe('Phase 4: Event Ingestion & Query API (TASK-401 to TASK-403)', () => {
 
       const after = await memoryStore.getEvents(orgA);
       expect(after.items).toHaveLength(0);
+    });
+  });
+  // ============================================================================
+  // 7. Security Audit Adversarial Tests (Phase 4 Code Review)
+  // ============================================================================
+  describe('7. Security Audit Adversarial & Concurrency Ingestion Tests', () => {
+    it('supports header-based Idempotency-Key for clients omitting eventId', async () => {
+      const idempotencyKey = 'client-retry-key-header-999';
+
+      // 1. First submission with Idempotency-Key header (no eventId in body)
+      const res1 = await request(app)
+        .post('/api/v1/events')
+        .set('Authorization', `Bearer ${analystTokenOrgA}`)
+        .set('Idempotency-Key', idempotencyKey)
+        .send({
+          eventType: 'auth.login.failed',
+          severity: 'HIGH',
+          category: 'AUTHENTICATION',
+          sourceIp: '198.51.100.77',
+          sourceSystem: 'web-gateway',
+        });
+
+      expect(res1.status).toBe(202);
+      expect(res1.body.data.status).toBe('ACCEPTED');
+      const generatedEventId = res1.body.data.eventId;
+
+      // 2. Retry with the exact same Idempotency-Key header (simulated network retry)
+      const res2 = await request(app)
+        .post('/api/v1/events')
+        .set('Authorization', `Bearer ${analystTokenOrgA}`)
+        .set('Idempotency-Key', idempotencyKey)
+        .send({
+          eventType: 'auth.login.failed',
+          severity: 'HIGH',
+          category: 'AUTHENTICATION',
+          sourceIp: '198.51.100.77',
+          sourceSystem: 'web-gateway',
+        });
+
+      expect(res2.status).toBe(202);
+      expect(res2.body.data.status).toBe('DUPLICATE_SUPPRESSED');
+    });
+
+    it('documents non-idempotency when client omits both eventId and Idempotency-Key', async () => {
+      // When client omits both eventId and idempotencyKey/header, server generates fresh UUIDv7 for each request
+      const res1 = await request(app)
+        .post('/api/v1/events')
+        .set('Authorization', `Bearer ${analystTokenOrgA}`)
+        .send({
+          eventType: 'network.connection',
+          severity: 'LOW',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.80',
+          sourceSystem: 'netflow',
+        });
+
+      const res2 = await request(app)
+        .post('/api/v1/events')
+        .set('Authorization', `Bearer ${analystTokenOrgA}`)
+        .send({
+          eventType: 'network.connection',
+          severity: 'LOW',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.80',
+          sourceSystem: 'netflow',
+        });
+
+      expect(res1.status).toBe(202);
+      expect(res2.status).toBe(202);
+      expect(res1.body.data.status).toBe('ACCEPTED');
+      expect(res2.body.data.status).toBe('ACCEPTED');
+      expect(res1.body.data.eventId).not.toBe(res2.body.data.eventId);
+    });
+
+    it('atomically deduplicates concurrent identical submissions using Promise.all', async () => {
+      const fixedEventId = generateUuidV7();
+      const payload = {
+        eventId: fixedEventId,
+        eventType: 'auth.login.failed',
+        severity: 'HIGH',
+        category: 'AUTHENTICATION',
+        sourceIp: '198.51.100.90',
+        sourceSystem: 'concurrent-tester',
+      };
+
+      // Send 5 concurrent identical requests
+      const promises = Array.from({ length: 5 }, () =>
+        request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send(payload)
+      );
+
+      const responses = await Promise.all(promises);
+      const statuses = responses.map((r) => r.body.data?.status);
+
+      // Exactly 1 must be ACCEPTED, and the other 4 must be DUPLICATE_SUPPRESSED
+      const acceptedCount = statuses.filter((s) => s === 'ACCEPTED').length;
+      const suppressedCount = statuses.filter((s) => s === 'DUPLICATE_SUPPRESSED').length;
+
+      expect(acceptedCount).toBe(1);
+      expect(suppressedCount).toBe(4);
+    });
+
+    it('accepts concurrent distinct rapid event submissions without false positive collisions', async () => {
+      // 10 distinct events fired concurrently in the exact same millisecond
+      const promises = Array.from({ length: 10 }, (_, i) =>
+        request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({
+            eventId: generateUuidV7(),
+            eventType: 'api.request',
+            severity: 'LOW',
+            category: 'API',
+            sourceIp: '198.51.100.95',
+            sourceSystem: 'burst-client',
+            metadata: { threadId: i },
+          })
+      );
+
+      const responses = await Promise.all(promises);
+      for (const res of responses) {
+        expect(res.status).toBe(202);
+        expect(res.body.data.status).toBe('ACCEPTED');
+      }
+
+      // Verify all 10 were saved
+      const queryRes = await request(app)
+        .get('/api/v1/events?sourceIp=198.51.100.95')
+        .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+      expect(queryRes.status).toBe(200);
+      expect(queryRes.body.data.events).toHaveLength(10);
+    });
+
+    it('rejects a tampered pagination cursor signature with 400 INVALID_CURSOR', async () => {
+      // Valid cursor signed by server
+      const validCursor = signCursor({
+        orgId: orgA,
+        filterHash: 'all',
+        offset: 5,
+      });
+
+      // Tamper with the base64 portion of the signed cursor
+      const [base64, sig] = validCursor.split('.');
+      const decoded = JSON.parse(Buffer.from(base64, 'base64url').toString('utf8'));
+      decoded.offset = 999; // Tampered offset
+      const tamperedBase64 = Buffer.from(JSON.stringify(decoded)).toString('base64url');
+      const tamperedCursor = `${tamperedBase64}.${sig}`;
+
+      const res = await request(app)
+        .get(`/api/v1/events?cursor=${tamperedCursor}`)
+        .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('INVALID_CURSOR');
+    });
+
+    it('rejects pagination cursor reuse across different query filters with 400 INVALID_CURSOR', async () => {
+      // Seed 2 events to ensure pagination boundary is reached
+      await request(app)
+        .post('/api/v1/events')
+        .set('Authorization', `Bearer ${analystTokenOrgA}`)
+        .send({
+          eventType: 'auth.login.failed',
+          severity: 'HIGH',
+          category: 'AUTHENTICATION',
+          sourceIp: '198.51.100.1',
+          sourceSystem: 'auth',
+        });
+      await request(app)
+        .post('/api/v1/events')
+        .set('Authorization', `Bearer ${analystTokenOrgA}`)
+        .send({
+          eventType: 'auth.login.failed',
+          severity: 'HIGH',
+          category: 'AUTHENTICATION',
+          sourceIp: '198.51.100.2',
+          sourceSystem: 'auth',
+        });
+
+      // 1. Obtain a cursor for an eventType=auth.login.failed query
+      const res1 = await request(app)
+        .get('/api/v1/events?eventType=auth.login.failed&limit=1')
+        .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+      const cursor = res1.body.data.nextCursor;
+      expect(cursor).toBeDefined();
+
+      // 2. Attempt to use this cursor on a completely different query filter (eventType=network.connection)
+      const res2 = await request(app)
+        .get(`/api/v1/events?eventType=network.connection&cursor=${cursor}`)
+        .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+      expect(res2.status).toBe(400);
+      expect(res2.body.success).toBe(false);
+      expect(res2.body.error.code).toBe('INVALID_CURSOR');
+    });
+
+    it('rejects a crafted cursor with negative offset with 400 INVALID_CURSOR', async () => {
+      // Craft a signed cursor with invalid negative offset
+      const invalidCursor = signCursor({
+        orgId: orgA,
+        filterHash: 'all',
+        offset: -10,
+      });
+
+      const res = await request(app)
+        .get(`/api/v1/events?cursor=${invalidCursor}`)
+        .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('INVALID_CURSOR');
+    });
+
+    it('extracts date from UUIDv7 accurately and rejects non-v7 UUIDs in extractDateFromUuidV7', () => {
+      // Test known timestamp: 2026-11-01T12:00:00.000Z
+      const knownMs = new Date('2026-11-01T12:00:00.000Z').getTime();
+      const uuidv7 = generateUuidV7(knownMs);
+
+      const extractedDate = extractDateFromUuidV7(uuidv7);
+      expect(extractedDate).toBe('2026-11-01');
+
+      // UUIDv4 (random) should return null (no embedded millisecond date in high 48-bits)
+      const uuidv4 = 'd3b07384-d113-4e4e-8c0a-75a7c2901309';
+      expect(extractDateFromUuidV7(uuidv4)).toBeNull();
+
+      // Garbage string should return null
+      expect(extractDateFromUuidV7('invalid-uuid')).toBeNull();
     });
   });
 });

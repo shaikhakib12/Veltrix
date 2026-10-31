@@ -4,9 +4,7 @@ import {
   PutCommand,
   GetCommand,
   QueryCommand,
-  ScanCommand,
   TransactWriteCommand,
-  type ScanCommandOutput,
 } from '@aws-sdk/lib-dynamodb';
 import { createHash } from 'node:crypto';
 import type {
@@ -21,6 +19,8 @@ import type {
   AuditState,
 } from '@veltrix/shared';
 import type { StorageInterface, EventQueryOptions } from './storage-interface.js';
+import { signCursor, verifyCursor, computeFilterHash } from '../utils/cursor.js';
+import { extractDateFromUuidV7 } from '../utils/uuid.js';
 
 export class DynamoDBStore implements StorageInterface {
   private docClient: DynamoDBDocumentClient;
@@ -218,17 +218,9 @@ export class DynamoDBStore implements StorageInterface {
     let exclusiveStartKey: Record<string, unknown> | undefined;
     if (options?.cursor) {
       try {
-        const decoded = JSON.parse(Buffer.from(options.cursor, 'base64').toString('utf8'));
-        if (
-          typeof decoded !== 'object' ||
-          decoded === null ||
-          decoded.orgId !== orgId ||
-          !decoded.exclusiveStartKey
-        ) {
-          throw new Error('INVALID_CURSOR');
-        }
-        exclusiveStartKey = decoded.exclusiveStartKey;
-      } catch {
+        const verified = verifyCursor(options.cursor, orgId, options);
+        exclusiveStartKey = verified.exclusiveStartKey;
+      } catch (err: unknown) {
         throw new Error('INVALID_CURSOR');
       }
     }
@@ -247,13 +239,13 @@ export class DynamoDBStore implements StorageInterface {
 
     const response = await this.executeWithRetry(() => this.docClient.send(command));
     const items = (response.Items || []) as SecurityEvent[];
+    const filterHash = computeFilterHash(options);
     const nextCursor = response.LastEvaluatedKey
-      ? Buffer.from(
-          JSON.stringify({
-            orgId,
-            exclusiveStartKey: response.LastEvaluatedKey,
-          })
-        ).toString('base64')
+      ? signCursor({
+          orgId,
+          filterHash,
+          exclusiveStartKey: response.LastEvaluatedKey as Record<string, unknown>,
+        })
       : undefined;
 
     return { items, nextCursor, total: items.length };
@@ -261,18 +253,24 @@ export class DynamoDBStore implements StorageInterface {
 
   async getEventById(orgId: string, eventId: string): Promise<SecurityEvent | null> {
     try {
-      const command = new ScanCommand({
+      // High-efficiency targeted single-partition Query via UUIDv7 date extraction (eliminates table scans)
+      const extractedDate = extractDateFromUuidV7(eventId);
+      const targetDate = extractedDate || new Date().toISOString().slice(0, 10);
+      const pk = `ORG#${orgId}#DATE#${targetDate}`;
+
+      const command = new QueryCommand({
         TableName: this.eventsTable,
-        FilterExpression: 'orgId = :orgId AND eventId = :eventId',
+        KeyConditionExpression: 'PK = :pk',
+        FilterExpression: 'eventId = :eventId',
         ExpressionAttributeValues: {
-          ':orgId': orgId,
+          ':pk': pk,
           ':eventId': eventId,
         },
         Limit: 1,
       });
 
-      const response = await this.executeWithRetry<ScanCommandOutput>(() => this.docClient.send(command));
-      const items = (response.Items || []) as unknown as SecurityEvent[];
+      const response = await this.executeWithRetry(() => this.docClient.send(command));
+      const items = (response.Items || []) as SecurityEvent[];
       return items[0] || null;
     } catch {
       return null;
