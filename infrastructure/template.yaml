@@ -1,0 +1,250 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  VELTRIX: Autonomous Cyber Threat Detection & Response Platform
+  Cloud-Native Serverless SIEM & SOAR Architecture
+
+Parameters:
+  Stage:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment stage environment
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        DYNAMODB_EVENTS: !Ref SecurityEventsTable
+        DYNAMODB_INCIDENTS: !Ref IncidentsTable
+        DYNAMODB_RULES: !Ref DetectionRulesTable
+        DYNAMODB_AUDIT: !Ref AuditLogsTable
+        EVENT_BUS_NAME: !Ref VeltrixEventBus
+
+Resources:
+  # ==========================================
+  # 1. Amazon Cognito Identity & RBAC
+  # ==========================================
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub Veltrix-UserPool-${Stage}
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      Schema:
+        - Name: orgId
+          AttributeDataType: String
+          Mutable: true
+        - Name: userRole
+          AttributeDataType: String
+          Mutable: true
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub Veltrix-WebClient-${Stage}
+      UserPoolId: !Ref CognitoUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+
+  # ==========================================
+  # 2. Amazon EventBridge Custom Bus
+  # ==========================================
+  VeltrixEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub veltrix-event-bus-${Stage}
+
+  # ==========================================
+  # 3. Amazon DynamoDB Tables (On-Demand & TTL)
+  # ==========================================
+  SecurityEventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub Veltrix-SecurityEvents-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1_PK
+          AttributeType: S
+        - AttributeName: GSI1_SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1-EventType
+          KeySchema:
+            - AttributeName: GSI1_PK
+              KeyType: HASH
+            - AttributeName: GSI1_SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub Veltrix-Incidents-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1_PK
+          AttributeType: S
+        - AttributeName: GSI1_SK
+          AttributeType: N
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1-RiskScore
+          KeySchema:
+            - AttributeName: GSI1_PK
+              KeyType: HASH
+            - AttributeName: GSI1_SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  DetectionRulesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub Veltrix-DetectionRules-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  AuditLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub Veltrix-AuditLogs-${Stage}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  # ==========================================
+  # 4. Amazon API Gateway REST API
+  # ==========================================
+  VeltrixApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Cors:
+        AllowMethods: "'GET,POST,PATCH,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,x-organization-id'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuth
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+
+  # ==========================================
+  # 5. Core Lambda Micro-Functions
+  # ==========================================
+  IngestionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub Veltrix-Ingestion-${Stage}
+      CodeUri: ../backend/dist/
+      Handler: server.ingestHandler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SecurityEventsTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref VeltrixEventBus
+      Events:
+        PostEvents:
+          Type: Api
+          Properties:
+            RestApiId: !Ref VeltrixApi
+            Path: /api/v1/events
+            Method: post
+
+  DetectionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub Veltrix-Detection-${Stage}
+      CodeUri: ../backend/dist/
+      Handler: server.detectionHandler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DetectionRulesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IncidentsTable
+      Events:
+        EventBridgeTrigger:
+          Type: EventBridgeRule
+          Properties:
+            EventBusName: !Ref VeltrixEventBus
+            Pattern:
+              source:
+                - veltrix.ingestion
+
+  AuditFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub Veltrix-AuditLogger-${Stage}
+      CodeUri: ../backend/dist/
+      Handler: server.auditHandler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AuditLogsTable
+
+Outputs:
+  ApiEndpoint:
+    Description: Production API Gateway Endpoint URL
+    Value: !Sub "https://${VeltrixApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}/"
+  UserPoolId:
+    Description: Amazon Cognito User Pool ID
+    Value: !Ref CognitoUserPool
+  UserPoolClientId:
+    Description: Amazon Cognito App Client ID
+    Value: !Ref CognitoUserPoolClient

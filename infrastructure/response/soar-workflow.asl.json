@@ -1,0 +1,104 @@
+{
+  "Comment": "VELTRIX Autonomous Defensive Response (SOAR) Orchestration Workflow",
+  "StartAt": "EvaluateIncidentSeverity",
+  "States": {
+    "EvaluateIncidentSeverity": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.severity",
+          "StringEquals": "CRITICAL",
+          "Next": "CheckApprovalRequired"
+        },
+        {
+          "Variable": "$.severity",
+          "StringEquals": "HIGH",
+          "Next": "CheckApprovalRequired"
+        }
+      ],
+      "Default": "ExecuteLowImpactNotification"
+    },
+    "CheckApprovalRequired": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.requiresApproval",
+          "BooleanEquals": true,
+          "Next": "WaitForAnalystApproval"
+        }
+      ],
+      "Default": "ExecuteImmediateContainment"
+    },
+    "WaitForAnalystApproval": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+      "Parameters": {
+        "QueueUrl": "${ApprovalQueueUrl}",
+        "MessageBody": {
+          "TaskToken.$": "$$.Task.Token",
+          "IncidentId.$": "$.incidentId",
+          "Action.$": "$.recommendedAction",
+          "TargetEntity.$": "$.targetEntity",
+          "RiskScore.$": "$.riskScore"
+        }
+      },
+      "TimeoutSeconds": 3600,
+      "Next": "ProcessApprovalDecision"
+    },
+    "ProcessApprovalDecision": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.decision",
+          "StringEquals": "APPROVED",
+          "Next": "ExecuteImmediateContainment"
+        }
+      ],
+      "Default": "ContainmentRejected"
+    },
+    "ExecuteImmediateContainment": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:Veltrix-ResponseExecutor-${Stage}",
+      "Parameters": {
+        "incidentId.$": "$.incidentId",
+        "action.$": "$.recommendedAction",
+        "targetEntity.$": "$.targetEntity",
+        "actor.$": "$.approvedBy"
+      },
+      "Next": "RecordAuditFingerprint"
+    },
+    "ExecuteLowImpactNotification": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:Veltrix-ResponseExecutor-${Stage}",
+      "Parameters": {
+        "incidentId.$": "$.incidentId",
+        "action": "ESCALATE_ALERT",
+        "targetEntity.$": "$.targetEntity",
+        "actor": "AUTONOMOUS_POLICY"
+      },
+      "Next": "RecordAuditFingerprint"
+    },
+    "RecordAuditFingerprint": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:Veltrix-AuditLogger-${Stage}",
+      "Parameters": {
+        "orgId.$": "$.orgId",
+        "action": "SOAR_CONTAINMENT_COMPLETED",
+        "targetResource.$": "$.targetEntity",
+        "result": "SUCCESS"
+      },
+      "End": true
+    },
+    "ContainmentRejected": {
+      "Type": "Task",
+      "Resource": "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:Veltrix-AuditLogger-${Stage}",
+      "Parameters": {
+        "orgId.$": "$.orgId",
+        "action": "SOAR_CONTAINMENT_REJECTED",
+        "targetResource.$": "$.targetEntity",
+        "result": "DENIED"
+      },
+      "End": true
+    }
+  }
+}
