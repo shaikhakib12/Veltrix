@@ -30,6 +30,9 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
+      - name: Build Shared Packages
+        run: npm run build --workspace=@veltrix/shared
+
       - name: Typecheck Workspaces
         run: npm run typecheck
 
