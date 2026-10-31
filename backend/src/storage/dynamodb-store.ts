@@ -93,66 +93,6 @@ export class DynamoDBStore implements StorageInterface {
 
     const ttlEpoch = Math.floor(new Date(event.timestamp).getTime() / 1000) + 30 * 86400;
 
-    // 1. Idempotency Key Tracking & Payload Consistency Verification
-    const idempPk = `ORG#${orgId}#IDEMPOTENCY#${idempotencyKey}`;
-    try {
-      await this.executeWithRetry(() =>
-        this.docClient.send(
-          new PutCommand({
-            TableName: this.eventsTable,
-            Item: {
-              PK: idempPk,
-              SK: 'RECORD',
-              orgId,
-              idempotencyKey,
-              payloadHash: payloadHash || '',
-              eventId: event.eventId,
-              ttl: ttlEpoch,
-            },
-            ConditionExpression: 'attribute_not_exists(PK)',
-          })
-        )
-      );
-    } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
-        // Idempotency record already exists: verify payload consistency
-        try {
-          const existing = await this.executeWithRetry(() =>
-            this.docClient.send(
-              new GetCommand({
-                TableName: this.eventsTable,
-                Key: { PK: idempPk, SK: 'RECORD' },
-              })
-            )
-          );
-          const existingItem = existing.Item as { payloadHash?: string; eventId?: string } | undefined;
-          if (
-            existingItem &&
-            payloadHash &&
-            existingItem.payloadHash &&
-            existingItem.payloadHash !== payloadHash
-          ) {
-            const mismatchErr = new Error(
-              `Idempotency key '${idempotencyKey}' was previously used with a different request payload.`
-            );
-            (mismatchErr as unknown as { code: string }).code = 'IDEMPOTENCY_PAYLOAD_MISMATCH';
-            throw mismatchErr;
-          }
-          return {
-            saved: false,
-            isDuplicate: true,
-            eventId: existingItem?.eventId || event.eventId,
-          };
-        } catch (fetchErr) {
-          if ((fetchErr as { code?: string })?.code === 'IDEMPOTENCY_PAYLOAD_MISMATCH') {
-            throw fetchErr;
-          }
-          return { saved: false, isDuplicate: true, eventId: event.eventId };
-        }
-      }
-      throw err;
-    }
-
     const item = {
       PK: pk,
       SK: sk,
@@ -172,46 +112,150 @@ export class DynamoDBStore implements StorageInterface {
       metadata: event.metadata,
       isSimulated: event.isSimulated || false,
       idempotencyKey,
+      payloadHash: payloadHash || '',
       ttl: ttlEpoch,
     };
+
+    const { PK: _p, SK: _s, ...itemPayload } = item;
+
+    // Atomically create Main Event, ID Pointer, and Idempotency Record in a single TransactWriteCommand
+    const transactItems: Array<{
+      Put: {
+        TableName: string;
+        Item: Record<string, unknown>;
+        ConditionExpression: string;
+      };
+    }> = [
+      {
+        Put: {
+          TableName: this.eventsTable,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
+        },
+      },
+      {
+        Put: {
+          TableName: this.eventsTable,
+          Item: {
+            PK: `ORG#${orgId}#EVENTID#${event.eventId}`,
+            SK: 'METADATA',
+            ...itemPayload,
+          },
+          ConditionExpression: 'attribute_not_exists(PK)',
+        },
+      },
+    ];
+
+    if (idempotencyKey !== event.eventId) {
+      transactItems.push({
+        Put: {
+          TableName: this.eventsTable,
+          Item: {
+            PK: `ORG#${orgId}#IDEMPOTENCY#${idempotencyKey}`,
+            SK: 'RECORD',
+            orgId,
+            idempotencyKey,
+            eventId: event.eventId,
+            payloadHash: payloadHash || '',
+            ttl: ttlEpoch,
+          },
+          ConditionExpression: 'attribute_not_exists(PK)',
+        },
+      });
+    }
 
     try {
       await this.executeWithRetry(() =>
         this.docClient.send(
-          new PutCommand({
+          new TransactWriteCommand({
+            TransactItems: transactItems,
+          })
+        )
+      );
+      return { saved: true, isDuplicate: false, eventId: event.eventId };
+    } catch (err: unknown) {
+      const errName = (err as { name?: string })?.name;
+      if (
+        errName === 'ConditionalCheckFailedException' ||
+        errName === 'TransactionCanceledException'
+      ) {
+        // Atomic duplicate caught; verify payload consistency
+        return await this.handleDuplicatePayloadConsistency(
+          orgId,
+          idempotencyKey,
+          event.eventId,
+          payloadHash
+        );
+      }
+      throw err;
+    }
+  }
+
+  private async handleDuplicatePayloadConsistency(
+    orgId: string,
+    idempotencyKey: string,
+    eventId: string,
+    payloadHash?: string
+  ): Promise<{ saved: boolean; isDuplicate: boolean; eventId?: string }> {
+    try {
+      let existingRecord: { payloadHash?: string; eventId?: string } | undefined;
+
+      // 1. Check existing event ID pointer
+      const pointerResult = await this.executeWithRetry(() =>
+        this.docClient.send(
+          new GetCommand({
             TableName: this.eventsTable,
-            Item: item,
-            ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
+            Key: {
+              PK: `ORG#${orgId}#EVENTID#${eventId}`,
+              SK: 'METADATA',
+            },
           })
         )
       );
 
-      // Save O(1) ID pointer item for scan-free retrieval of any ID format (UUIDv4/UUIDv7/delayed)
-      try {
-        const { PK: _p, SK: _s, ...itemPayload } = item;
-        await this.executeWithRetry(() =>
+      if (pointerResult.Item) {
+        existingRecord = pointerResult.Item as { payloadHash?: string; eventId?: string };
+      } else if (idempotencyKey !== eventId) {
+        // 2. Check existing idempotency record
+        const idempResult = await this.executeWithRetry(() =>
           this.docClient.send(
-            new PutCommand({
+            new GetCommand({
               TableName: this.eventsTable,
-              Item: {
-                PK: `ORG#${orgId}#EVENTID#${event.eventId}`,
-                SK: 'METADATA',
-                ...itemPayload,
+              Key: {
+                PK: `ORG#${orgId}#IDEMPOTENCY#${idempotencyKey}`,
+                SK: 'RECORD',
               },
             })
           )
         );
-      } catch {
-        // Pointer item write is best-effort optimization; primary telemetry record is already safely stored
+        if (idempResult.Item) {
+          existingRecord = idempResult.Item as { payloadHash?: string; eventId?: string };
+        }
       }
 
-      return { saved: true, isDuplicate: false, eventId: event.eventId };
-    } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
-        // Atomic duplicate caught; suppress downstream processing
-        return { saved: false, isDuplicate: true, eventId: event.eventId };
+      if (
+        existingRecord &&
+        payloadHash &&
+        existingRecord.payloadHash &&
+        existingRecord.payloadHash !== payloadHash
+      ) {
+        const mismatchErr = new Error(
+          `Idempotency key or Event ID was previously used with a different request payload.`
+        );
+        (mismatchErr as unknown as { code: string }).code = 'IDEMPOTENCY_PAYLOAD_MISMATCH';
+        throw mismatchErr;
       }
-      throw err;
+
+      return {
+        saved: false,
+        isDuplicate: true,
+        eventId: existingRecord?.eventId || eventId,
+      };
+    } catch (err: unknown) {
+      if ((err as { code?: string })?.code === 'IDEMPOTENCY_PAYLOAD_MISMATCH') {
+        throw err;
+      }
+      return { saved: false, isDuplicate: true, eventId };
     }
   }
 

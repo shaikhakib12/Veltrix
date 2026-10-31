@@ -9,7 +9,7 @@ import { MemoryStore } from '../src/storage/memory-store.js';
 import { DynamoDBStore } from '../src/storage/dynamodb-store.js';
 import { resetStorageForTesting } from '../src/storage/index.js';
 import { generateUuidV7, extractDateFromUuidV7 } from '../src/utils/uuid.js';
-import { signCursor } from '../src/utils/cursor.js';
+import { signCursor, verifyCursor, getCursorSigningSecret } from '../src/utils/cursor.js';
 import type { SecurityEvent } from '@veltrix/shared';
 
 describe('Phase 4: Event Ingestion & Query API (TASK-401 to TASK-403)', () => {
@@ -1387,6 +1387,44 @@ describe('Phase 4: Event Ingestion & Query API (TASK-401 to TASK-403)', () => {
         expect(res2.body.error.code).toBe('IDEMPOTENCY_PAYLOAD_MISMATCH');
       });
 
+      it('prevents bypassing event ID payload consistency when using a different idempotency key', async () => {
+        const sharedEventId = generateUuidV7();
+
+        // 1. First submission with eventId and idempotencyKey A
+        const res1 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .set('Idempotency-Key', 'idemp-key-alpha')
+          .send({
+            eventId: sharedEventId,
+            eventType: 'auth.login.failed',
+            severity: 'HIGH',
+            category: 'AUTHENTICATION',
+            sourceIp: '198.51.100.11',
+            sourceSystem: 'auth-service',
+          });
+
+        expect(res1.status).toBe(202);
+        expect(res1.body.data.status).toBe('ACCEPTED');
+
+        // 2. Second submission with SAME eventId, DIFFERENT idempotencyKey, and DIFFERENT payload -> 409 Conflict
+        const res2 = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .set('Idempotency-Key', 'idemp-key-beta-bypass-attempt')
+          .send({
+            eventId: sharedEventId,
+            eventType: 'network.connection',
+            severity: 'LOW',
+            category: 'NETWORK',
+            sourceIp: '198.51.100.11',
+            sourceSystem: 'network-monitor',
+          });
+
+        expect(res2.status).toBe(409);
+        expect(res2.body.error.code).toBe('IDEMPOTENCY_PAYLOAD_MISMATCH');
+      });
+
       it('handles JSON key reordering and formatting without triggering 409 Conflict', async () => {
         const idempotencyKey = 'key-reordering-303';
 
@@ -1508,7 +1546,7 @@ describe('Phase 4: Event Ingestion & Query API (TASK-401 to TASK-403)', () => {
     describe('8.3 DynamoDB Pagination & Signed Cursor Integrity', () => {
       it('rejects an expired cursor (> 24 hours old) with 400 INVALID_CURSOR', async () => {
         const expiredIssuedAt = Date.now() - 25 * 60 * 60 * 1000;
-        const secret = process.env.JWT_SECRET || 'veltrix-default-cursor-secret-signing-key-32chars';
+        const secret = getCursorSigningSecret();
         const payload = {
           orgId: orgA,
           filterHash: 'all',
@@ -1549,6 +1587,31 @@ describe('Phase 4: Event Ingestion & Query API (TASK-401 to TASK-403)', () => {
         expect(decoded).not.toHaveProperty('password');
         expect(decoded).not.toHaveProperty('accessKeyId');
         expect(decoded).not.toHaveProperty('secretAccessKey');
+      });
+
+      it('strictly enforces separate CURSOR_SIGNING_SECRET and rejects low entropy in production', () => {
+        const oldEnv = process.env.NODE_ENV;
+        const oldSecret = process.env.CURSOR_SIGNING_SECRET;
+
+        try {
+          process.env.NODE_ENV = 'production';
+          delete process.env.CURSOR_SIGNING_SECRET;
+
+          // Missing secret in production throws
+          expect(() => getCursorSigningSecret()).toThrow('PRODUCTION_CONFIG_ERROR');
+
+          // Secret with less than 32 characters in production throws
+          process.env.CURSOR_SIGNING_SECRET = 'too-short-secret';
+          expect(() => getCursorSigningSecret()).toThrow('PRODUCTION_CONFIG_ERROR');
+
+          // Valid 32+ character production secret passes
+          const validProdSecret = 'a-very-strong-production-cursor-secret-with-high-entropy-64bytes';
+          process.env.CURSOR_SIGNING_SECRET = validProdSecret;
+          expect(getCursorSigningSecret()).toBe(validProdSecret);
+        } finally {
+          process.env.NODE_ENV = oldEnv;
+          process.env.CURSOR_SIGNING_SECRET = oldSecret;
+        }
       });
     });
   });

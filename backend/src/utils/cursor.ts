@@ -29,6 +29,32 @@ export function computeFilterHash(options?: EventQueryOptions): string {
 }
 
 /**
+ * Retrieves the cryptographic secret used exclusively for pagination cursor HMAC signatures.
+ * Enforces separation between cursor signing secrets and JWT authentication secrets.
+ * Rejects missing or low-entropy (< 32 chars) secrets in production environments.
+ */
+export function getCursorSigningSecret(overrideSecret?: string): string {
+  if (overrideSecret) {
+    return overrideSecret;
+  }
+
+  const configured = process.env.CURSOR_SIGNING_SECRET;
+  if (configured && configured.trim().length >= 32) {
+    return configured.trim();
+  }
+
+  // In production, prohibit default or missing secrets
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'PRODUCTION_CONFIG_ERROR: CURSOR_SIGNING_SECRET must be configured with at least 32 characters in production'
+    );
+  }
+
+  // Separate development secret (never shared with JWT_SECRET in production)
+  return configured || 'veltrix-dev-cursor-signing-secret-minimum-32-chars-entropy';
+}
+
+/**
  * Signs a pagination cursor using HMAC-SHA256.
  * Returns a URL-safe Base64 string with detached HMAC signature: `<base64Data>.<hmacSignature>`
  */
@@ -36,10 +62,7 @@ export function signCursor(
   payload: Omit<CursorPayload, 'issuedAt'>,
   secret?: string
 ): string {
-  const cursorSecret =
-    secret ||
-    process.env.JWT_SECRET ||
-    'veltrix-default-cursor-secret-signing-key-32chars';
+  const cursorSecret = getCursorSigningSecret(secret);
 
   const fullPayload: CursorPayload = {
     ...payload,
@@ -77,10 +100,7 @@ export function verifyCursor(
   }
 
   const [base64Data, hmac] = parts;
-  const cursorSecret =
-    secret ||
-    process.env.JWT_SECRET ||
-    'veltrix-default-cursor-secret-signing-key-32chars';
+  const cursorSecret = getCursorSigningSecret(secret);
 
   const expectedHmac = createHmac('sha256', cursorSecret).update(base64Data).digest('base64url');
 

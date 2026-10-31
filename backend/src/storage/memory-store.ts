@@ -45,12 +45,16 @@ export class MemoryStore implements StorageInterface {
     const idempotencyRecords = this.idempotencyRecordsByOrg.get(orgId)!;
     const idempotencyKey = event.idempotencyKey || event.eventId;
 
-    // Payload consistency check for idempotency keys
-    const existing = idempotencyRecords.get(idempotencyKey);
+    // Payload consistency check for idempotency keys AND event IDs
+    // (A different idempotency key cannot bypass event ID payload consistency)
+    const existingByIdemp = idempotencyRecords.get(idempotencyKey);
+    const existingByEventId = idempotencyRecords.get(event.eventId);
+    const existing = existingByIdemp || existingByEventId;
+
     if (existing) {
       if (payloadHash && existing.payloadHash && existing.payloadHash !== payloadHash) {
         const err = new Error(
-          `Idempotency key '${idempotencyKey}' was previously used with a different request payload.`
+          `Idempotency key or Event ID was previously used with a different request payload.`
         );
         (err as unknown as { code: string }).code = 'IDEMPOTENCY_PAYLOAD_MISMATCH';
         throw err;
