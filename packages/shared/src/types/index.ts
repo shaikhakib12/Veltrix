@@ -164,6 +164,23 @@ export interface AuthTokens {
   tokenType: 'Bearer';
 }
 
+export interface TokenPayload {
+  userId: string;
+  email: string;
+  username: string;
+  role: UserRole;
+  orgId: string;
+  iat?: number;
+  exp?: number;
+  iss?: string;
+  aud?: string;
+}
+
+export interface AuthSession {
+  user: AuthUser;
+  tokens: AuthTokens;
+}
+
 export interface ApiResponse<T> {
   success: boolean;
   data: T;
