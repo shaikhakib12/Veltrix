@@ -33,8 +33,13 @@ export function veltrixMiddleware(client: VeltrixClient, options?: MiddlewareOpt
             : (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()) ||
           '127.0.0.1';
 
-        // Lightweight pattern analysis on URI and query
-        const uriDecoded = decodeURIComponent(originalUrl);
+        // Lightweight pattern analysis on URI and query (safe against malformed percent sequences)
+        let uriDecoded = originalUrl;
+        try {
+          uriDecoded = decodeURIComponent(originalUrl);
+        } catch {
+          uriDecoded = originalUrl;
+        }
         const attackAnalysis = analyzeRequest(method, uriDecoded, statusCode);
 
         if (!attackAnalysis.isAttack && !captureAll) {

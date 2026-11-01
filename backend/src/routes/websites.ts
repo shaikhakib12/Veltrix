@@ -6,7 +6,7 @@ import {
   DomainVerifyRequestSchema,
   type WebsiteAsset,
 } from '@veltrix/shared';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, requireBearerAuth } from '../middleware/auth.js';
 import { enforceTenantIsolation } from '../middleware/tenant.js';
 import { requireRole } from '../middleware/rbac.js';
 import { getStorage } from '../storage/index.js';
@@ -29,6 +29,7 @@ export function createWebsitesRouter(options?: {
   );
 
   // All endpoints require authentication and tenant isolation
+  router.use(requireBearerAuth);
   router.use(authenticate);
   router.use(enforceTenantIsolation);
 
@@ -96,7 +97,25 @@ export function createWebsitesRouter(options?: {
         updatedAt: nowIso,
       };
 
-      await storage.saveWebsite(newSite);
+      try {
+        await storage.saveWebsite(newSite);
+      } catch (err: unknown) {
+        const msg = (err as Error)?.message || '';
+        if (
+          msg.includes('DOMAIN_ALREADY_CLAIMED') ||
+          (err as { name?: string })?.name === 'ConditionalCheckFailedException' ||
+          (err as { name?: string })?.name === 'TransactionCanceledException'
+        ) {
+          return res.status(409).json({
+            success: false,
+            error: {
+              code: 'DOMAIN_ALREADY_CLAIMED',
+              message: `Domain '${data.primaryDomain}' is already claimed by another organization.`,
+            },
+          });
+        }
+        throw err;
+      }
 
       // Audit log
       await storage.appendAuditLog({
@@ -127,7 +146,7 @@ export function createWebsitesRouter(options?: {
   // 2. List Websites (GET /api/v1/websites)
   router.get(
     '/',
-    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER'),
+    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER', 'AUDITOR'),
     async (req: Request, res: Response) => {
       const orgId = req.tenantOrgId!;
       const status = req.query.status as string | undefined;
@@ -152,7 +171,7 @@ export function createWebsitesRouter(options?: {
   // 3. Get Website Details (GET /api/v1/websites/:siteId)
   router.get(
     '/:siteId',
-    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER'),
+    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER', 'AUDITOR'),
     async (req: Request, res: Response) => {
       const orgId = req.tenantOrgId!;
       const siteId = req.params.siteId as string;

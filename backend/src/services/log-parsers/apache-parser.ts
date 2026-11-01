@@ -16,7 +16,7 @@ export class ApacheLogParser implements LogParserInterface {
 
   parseLine(line: string, context: LogParserContext, _lineIndex = 0): SecurityEvent | null {
     const trimmed = line.trim();
-    if (!trimmed) return null;
+    if (!trimmed || trimmed.length > 65536) return null;
 
     // Mode 1: JSON formatted log
     if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
@@ -67,6 +67,7 @@ export class ApacheLogParser implements LogParserInterface {
     }
 
     const [, sourceIp, remoteUser, timeLocal, httpMethod, requestUri, statusStr, , , userAgent] = match;
+    const cleanIp = sourceIp!.replace(/^\[|\]$/g, '');
     const httpStatus = parseInt(statusStr!, 10);
     const timestamp = parseApacheTimestamp(timeLocal!);
     const attackAnalysis = detectWebAttackType(httpMethod!, requestUri!, httpStatus);
@@ -78,7 +79,7 @@ export class ApacheLogParser implements LogParserInterface {
       eventType: attackAnalysis.eventType,
       severity: attackAnalysis.severity,
       category: attackAnalysis.category,
-      sourceIp: sourceIp!,
+      sourceIp: cleanIp,
       username: remoteUser && remoteUser !== '-' ? remoteUser : undefined,
       sourceSystem: context.sourceSystem || 'collector:apache',
       metadata: {
