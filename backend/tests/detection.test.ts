@@ -772,7 +772,7 @@ describe('Phase 5: Threat Detection Engine (TASK-501 through TASK-505)', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.success).toBe(true);
-      expect(res.body.data.rules.length).toBe(10);
+      expect(res.body.data.rules.length).toBe(15);
       const ruleIds = res.body.data.rules.map((r: { ruleId: string }) => r.ruleId);
       expect(ruleIds).toContain('RULE-001');
       expect(ruleIds).toContain('RULE-010');

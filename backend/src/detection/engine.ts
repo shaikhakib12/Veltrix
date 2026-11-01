@@ -20,6 +20,11 @@ import {
   Rule008ExcessiveApiRequests,
   Rule009MultiAccountRecon,
   Rule010OffHoursAnomaly,
+  Rule101SqlInjection,
+  Rule102CrossSiteScripting,
+  Rule103PathTraversal,
+  Rule104BotActivity,
+  Rule105AuthFlowTampering,
 } from './rules/index.js';
 import type { StorageInterface } from '../storage/storage-interface.js';
 
@@ -33,7 +38,7 @@ export class DetectionEngine {
   }
 
   /**
-   * Registers all 10 built-in Sigma-inspired detection rules.
+   * Registers all 15 built-in detection rules (10 Sigma rules + 5 Website Attack Monitoring rules).
    */
   private registerDefaultRules(): void {
     const defaultRules: DetectionRuleInterface[] = [
@@ -47,6 +52,11 @@ export class DetectionEngine {
       new Rule008ExcessiveApiRequests(),
       new Rule009MultiAccountRecon(),
       new Rule010OffHoursAnomaly(),
+      new Rule101SqlInjection(),
+      new Rule102CrossSiteScripting(),
+      new Rule103PathTraversal(),
+      new Rule104BotActivity(),
+      new Rule105AuthFlowTampering(),
     ];
 
     for (const rule of defaultRules) {

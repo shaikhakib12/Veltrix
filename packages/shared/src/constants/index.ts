@@ -105,6 +105,9 @@ export const AUDIT_ACTION_TYPES = [
   'INTEGRATION_ROTATED',
   'INTEGRATION_REVOKED',
   'INTEGRATION_DELETED',
+  'WEB_ATTACK_DETECTED',
+  'ATTACK_CORRELATED',
+  'RISK_SCORE_UPDATED',
 ] as const;
 
 export const RFC5737_SIMULATED_IP_RANGES = [
@@ -151,3 +154,21 @@ export const INTEGRATION_TYPES = [
 ] as const;
 
 export const INTEGRATION_STATUSES = ['ACTIVE', 'INACTIVE', 'REVOKED'] as const;
+
+export const WEB_CONFIDENCE_TIERS = [
+  'SUSPICIOUS_ATTEMPT',
+  'BLOCKED_ATTEMPT',
+  'POTENTIAL_EXPLOITATION',
+  'CONFIRMED_EXPLOITATION',
+] as const;
+
+export const WEB_ATTACK_TYPES = [
+  'SQLI',
+  'XSS',
+  'PATH_TRAVERSAL',
+  'BOT_ACTIVITY',
+  'AUTH_TAMPERING',
+  'API_ABUSE',
+] as const;
+
+export const RISK_BANDS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;

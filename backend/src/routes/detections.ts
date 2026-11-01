@@ -99,6 +99,50 @@ export function createDetectionsRouter(
   );
 
   /**
+   * GET /api/v1/detections/web
+   * Queries web-specific threat detections (RULE-101 to RULE-105).
+   */
+  router.get('/web', async (req: Request, res: Response) => {
+    try {
+      const orgId = req.tenantOrgId!;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+      const queryResult = await store.getDetections(orgId, { limit });
+      const webDetections = queryResult.items.filter(
+        (d) =>
+          d.ruleId.startsWith('RULE-10') ||
+          (d.evidence?.details as { attackType?: string } | undefined)?.attackType !== undefined
+      );
+
+      const response: ApiResponse<{
+        items: Detection[];
+        total: number;
+      }> = {
+        success: true,
+        data: {
+          items: webDetections,
+          total: webDetections.length,
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+          total: webDetections.length,
+        },
+      };
+
+      res.status(200).json(response);
+    } catch (err: unknown) {
+      console.error('[VELTRIX] Query web detections error:', err);
+      const errorResponse: ApiErrorResponse = {
+        success: false,
+        error: {
+          code: 'STORAGE_QUERY_ERROR',
+          message: 'Failed to query web threat detections',
+        },
+      };
+      res.status(500).json(errorResponse);
+    }
+  });
+
+  /**
    * GET /api/v1/detections
    * Queries generated threat detections with keyset pagination and filtering.
    */
@@ -165,6 +209,66 @@ export function createDetectionsRouter(
         error: {
           code: 'STORAGE_QUERY_ERROR',
           message: 'Failed to query threat detections',
+        },
+      };
+      res.status(500).json(errorResponse);
+    }
+  });
+
+  /**
+   * GET /api/v1/detections/:detectionId/evidence
+   * Retrieves detailed explainable evidence for a detection.
+   */
+  router.get('/:detectionId/evidence', async (req: Request, res: Response) => {
+    try {
+      const orgId = req.tenantOrgId!;
+      const detectionId = String(req.params.detectionId || '');
+
+      const detection = await store.getDetectionById(orgId, detectionId);
+      if (!detection || detection.orgId !== orgId) {
+        const errorResponse: ApiErrorResponse = {
+          success: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: `Detection with ID '${detectionId}' was not found`,
+          },
+        };
+        res.status(404).json(errorResponse);
+        return;
+      }
+
+      const response: ApiResponse<{
+        detectionId: string;
+        ruleId: string;
+        ruleName: string;
+        severity: string;
+        confidence: number;
+        detectedAt: string;
+        evidence: typeof detection.evidence;
+      }> = {
+        success: true,
+        data: {
+          detectionId: detection.detectionId,
+          ruleId: detection.ruleId,
+          ruleName: detection.ruleName,
+          severity: detection.severity,
+          confidence: detection.confidence,
+          detectedAt: detection.detectedAt,
+          evidence: detection.evidence,
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+        },
+      };
+
+      res.status(200).json(response);
+    } catch (err: unknown) {
+      console.error(`[VELTRIX] Error fetching detection evidence ${req.params.detectionId}:`, err);
+      const errorResponse: ApiErrorResponse = {
+        success: false,
+        error: {
+          code: 'STORAGE_RETRIEVAL_ERROR',
+          message: 'Failed to retrieve detection evidence',
         },
       };
       res.status(500).json(errorResponse);

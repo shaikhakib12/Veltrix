@@ -2,10 +2,12 @@ import type { SecurityEvent, Detection } from '@veltrix/shared';
 import type { StorageInterface } from '../storage/storage-interface.js';
 import { getStorage } from '../storage/index.js';
 import { DetectionEngine } from './engine.js';
+import { AttackCorrelationEngine } from '../correlation/engine.js';
 
 export interface DetectionPipelineOptions {
   storage?: StorageInterface;
   engine?: DetectionEngine;
+  correlationEngine?: AttackCorrelationEngine;
   maxWindowSeconds?: number;
   maxRetries?: number;
   retryDelayMs?: number;
@@ -14,6 +16,7 @@ export interface DetectionPipelineOptions {
 export class DetectionPipeline {
   private storage: StorageInterface;
   private engine: DetectionEngine;
+  private correlationEngine: AttackCorrelationEngine;
   private maxWindowSeconds: number;
   private maxRetries: number;
   private retryDelayMs: number;
@@ -26,9 +29,19 @@ export class DetectionPipeline {
   constructor(options?: DetectionPipelineOptions) {
     this.storage = options?.storage || getStorage();
     this.engine = options?.engine || new DetectionEngine(this.storage);
+    this.correlationEngine =
+      options?.correlationEngine || new AttackCorrelationEngine(this.storage);
     this.maxWindowSeconds = options?.maxWindowSeconds ?? 600; // 10 minutes covers all Sigma rules
     this.maxRetries = options?.maxRetries ?? 3;
     this.retryDelayMs = options?.retryDelayMs ?? 50;
+  }
+
+  getEngine(): DetectionEngine {
+    return this.engine;
+  }
+
+  getCorrelationEngine(): AttackCorrelationEngine {
+    return this.correlationEngine;
   }
 
   /**
@@ -107,7 +120,8 @@ export class DetectionPipeline {
 
   /**
    * Core processing method for an individual event.
-   * Loads the sliding window history, evaluates rules, and persists explainable detections.
+   * Loads the sliding window history, evaluates rules, persists explainable detections,
+   * and automatically triggers the Attack Correlation & Risk Scoring Engine.
    */
   async processEvent(event: SecurityEvent): Promise<Detection[]> {
     const orgId = event.orgId;
@@ -145,6 +159,18 @@ export class DetectionPipeline {
       }
     );
 
+    // 3. Automatically correlate detections into unified Incidents & compute risk scores (TASK-706, TASK-707)
+    for (const detection of evalResult.detections) {
+      try {
+        await this.correlationEngine.correlateDetection(detection, recentEvents);
+      } catch (err) {
+        console.error(
+          `[VELTRIX-CORRELATION] Error correlating detection ${detection.detectionId}:`,
+          err
+        );
+      }
+    }
+
     return evalResult.detections;
   }
 
@@ -176,12 +202,13 @@ export class DetectionPipeline {
   }
 
   /**
-   * Resets queue state for testing.
+   * Resets queue and correlation state for testing.
    */
   clear(): void {
     this.queue = [];
     this.isProcessing = false;
     this.pendingResolvers = [];
+    this.correlationEngine.clear();
   }
 }
 
