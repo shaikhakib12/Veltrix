@@ -53,40 +53,36 @@ export interface NormalizedWebTelemetry {
   wafAction?: 'ALLOW' | 'BLOCK' | 'CHALLENGE' | 'LOG';
   isBot?: boolean;
   confidenceLevel: WebConfidenceTier;
-  corroboratingSignals: string[]; // Strictly SERVER-VERIFIED signals
-  untrustedClientSignals: string[]; // Client-submitted unverified signals
+  corroboratingSignals: string[];
+  untrustedClientSignals: string[];
   evidenceProvenance: EvidenceProvenance;
   isClientClassificationUntrusted: boolean;
   trustedEvidenceContext?: InternalTrustedEvidenceContext;
 }
 
 /**
- * Known database syntax error signatures indicating potential SQL injection execution.
+ * Standard database syntax error substrings indicating unhandled SQL injection errors.
  */
-const DB_SYNTAX_ERROR_PATTERNS = [
-  /syntax error near/i,
-  /unclosed quotation mark/i,
-  /quoted string not properly terminated/i,
-  /ora-[0-9]{4,5}/i,
-  /pg_query\(\)/i,
-  /psqlexception/i,
-  /mysql_fetch_array\(\)/i,
+export const DB_SYNTAX_ERROR_PATTERNS = [
   /you have an error in your sql syntax/i,
-  /warning: mysql_/i,
-  /microsoft ole db provider for sql server/i,
+  /warning:\s*mysql/i,
+  /unclosed quotation mark before the character string/i,
+  /quoted string not properly terminated/i,
+  /pg_query\(\):\s*query failed/i,
   /sqlite3::sqlexception/i,
-  /driver.*sql[-_ ]*server/i,
+  /syntax error near/i,
+  /ora-01756/i,
+  /microsoft ole db provider for sql server/i,
 ];
 
 /**
- * Known system file leakage signatures indicating confirmed path traversal / LFI.
+ * Standard system file patterns indicating path traversal or local file inclusion data leakage.
  */
-const SYSTEM_FILE_LEAKAGE_PATTERNS = [
+export const SYSTEM_FILE_LEAKAGE_PATTERNS = [
   /root:.*:0:0:/i,
-  /\[boot loader\]/i,
-  /\[fonts\]/i,
-  /for 16-bit app support/i,
-  /daemon:.*:1:1:/i,
+  /\[extensions\]/i,
+  /default=multi\(0\)disk\(0\)/i,
+  /<\?php/i,
 ];
 
 /**
@@ -141,7 +137,7 @@ export function sanitizeUriString(uri: string): string {
 }
 
 /**
- * Extracts query parameters into key-value map and returns all raw and decoded values.
+ * Helper to parse query parameters with redaction of sensitive credentials.
  */
 export function extractQueryParams(uri: string): {
   params: Record<string, string>;
@@ -149,36 +145,26 @@ export function extractQueryParams(uri: string): {
 } {
   const params: Record<string, string> = {};
   const allValues: string[] = [];
-
-  const qIdx = uri.indexOf('?');
-  if (qIdx === -1) {
+  if (!uri || !uri.includes('?')) {
     return { params, allValues };
   }
 
-  const queryString = uri.slice(qIdx + 1);
+  const queryString = uri.split('?')[1] || '';
   const pairs = queryString.split('&');
 
   for (const pair of pairs) {
     if (!pair) continue;
     const eqIdx = pair.indexOf('=');
-    let key = '';
-    let val = '';
-    if (eqIdx !== -1) {
-      key = safeDecodeUriComponent(pair.slice(0, eqIdx)).trim();
-      val = safeDecodeUriComponent(pair.slice(eqIdx + 1)).trim();
-    } else {
-      key = safeDecodeUriComponent(pair).trim();
-    }
+    const rawKey = eqIdx === -1 ? pair : pair.slice(0, eqIdx);
+    const rawVal = eqIdx === -1 ? '' : pair.slice(eqIdx + 1);
+    const decodedKey = safeDecodeUriComponent(rawKey).trim();
+    const decodedVal = safeDecodeUriComponent(rawVal);
 
-    if (key) {
-      if (SENSITIVE_PARAM_PATTERN.test(key)) {
-        params[key] = '[REDACTED]';
-      } else {
-        params[key] = val;
-        if (val) {
-          allValues.push(val);
-        }
-      }
+    if (SENSITIVE_PARAM_PATTERN.test(decodedKey)) {
+      params[decodedKey] = '[REDACTED]';
+    } else {
+      params[decodedKey] = decodedVal;
+      allValues.push(decodedVal);
     }
   }
 
@@ -186,17 +172,14 @@ export function extractQueryParams(uri: string): {
 }
 
 /**
- * Normalizes and classifies inbound website telemetry into a standardized security model.
- * Enforces zero-trust validation of client-provided attack classifications and evaluates
- * the Four Evidence-Based Confidence Tiers based on a verified provenance model.
+ * Core telemetry normalizer enforcing strict trust boundaries and zero-trust evidence validation.
  *
- * PROVENANCE & TRUST BOUNDARY RULES:
- * 1. All externally submitted telemetry is UNTRUSTED_CLIENT by default.
- * 2. Client-provided corroboratingSignals are NEVER promoted directly into trusted evidence.
- * 3. Externally reported signals are separated from server-verified evidence.
- * 4. Only TRUSTED_SERVER_COMPONENT provenance can establish CONFIRMED_EXPLOITATION.
- * 5. WAF actions, response samples, and error messages from untrusted clients are unverified claims
- *    and cannot independently establish exploitation.
+ * Invariants:
+ * 1. Zero-trust default: all externally submitted telemetry defaults to UNTRUSTED_CLIENT.
+ * 2. External metadata cannot declare provenance or promote signals into trusted evidence.
+ * 3. Client response samples and error messages are isolated in untrustedClientSignals.
+ * 4. External WAF claims do not establish WAF_INTERVENTION unless signed by an authorized verifier.
+ * 5. CONFIRMED_EXPLOITATION requires explicit attestation by an authorized internal verifier.
  * 6. Arbitrary integration clients cannot impersonate trusted collectors via sourceSystem alone.
  * 7. Ordinary suspicious-attempt attack detection is preserved even when corroborating evidence is untrusted.
  */
@@ -214,15 +197,12 @@ export function normalizeWebTelemetry(
   const httpStatus = typeof meta.httpStatus === 'number' ? meta.httpStatus : undefined;
   const userAgent = typeof meta.userAgent === 'string' ? meta.userAgent : undefined;
 
-  // Extract path without query parameters and decode safely
   const qIdx = rawUri.indexOf('?');
   const pathOnly = qIdx === -1 ? rawUri : rawUri.slice(0, qIdx);
   const normalizedPath = safeDecodeUriComponent(pathOnly);
 
-  // Extract query parameters and payload strings (with sensitive keys sanitized)
   const { params: queryParams, allValues: queryValues } = extractQueryParams(rawUri);
 
-  // Collect all searchable payloads (URI path, query parameters, matched patterns)
   const decodedPayloads: string[] = [normalizedPath, ...queryValues];
 
   if (Array.isArray(meta.matchedPatterns)) {
@@ -234,12 +214,6 @@ export function normalizeWebTelemetry(
   }
 
   // 1. Establish Evidence Provenance Model
-  // Zero-Trust Rule: All externally submitted telemetry is UNTRUSTED_CLIENT by default.
-  // Provenance can ONLY be established by a runtime-verified internal capability issued
-  // by an authorized InternalEvidenceAuthority (Finding 1).
-  // All legacy trust flags (isTrustedServerComponent, trustedProvenance) have been removed.
-  // Client metadata (serverVerified, evidenceProvenance, trustedProvenance, verifiedSignals)
-  // are untrusted client claims and must never establish trust by themselves (Finding B).
   let evidenceProvenance: EvidenceProvenance = 'UNTRUSTED_CLIENT';
   let activeTrustedContext: InternalTrustedEvidenceContext | undefined;
 
@@ -250,14 +224,14 @@ export function normalizeWebTelemetry(
   };
 
   if (context?.trustedContext) {
-    if (auth.verifyContext(context.trustedContext, expectedBinding)) {
+    if (auth.verifyAndConsumeContext(context.trustedContext, expectedBinding)) {
       evidenceProvenance = context.trustedContext.verifiedProvenance;
       activeTrustedContext = context.trustedContext;
     } else {
       console.warn('[VELTRIX-SECURITY] Rejected forged, invalid, or replayed trustedContext in WebTelemetryContext');
     }
   } else if (event.trustedEvidenceContext) {
-    if (auth.verifyContext(event.trustedEvidenceContext, expectedBinding)) {
+    if (auth.verifyAndConsumeContext(event.trustedEvidenceContext, expectedBinding)) {
       evidenceProvenance = event.trustedEvidenceContext.verifiedProvenance;
       activeTrustedContext = event.trustedEvidenceContext;
     } else {
@@ -265,14 +239,114 @@ export function normalizeWebTelemetry(
     }
   }
 
-  // Client-supplied event classification check
+  return finalizeWebTelemetryNormalization(
+    event,
+    meta,
+    sanitizedRawUri,
+    httpMethod,
+    httpStatus,
+    userAgent,
+    normalizedPath,
+    queryParams,
+    decodedPayloads,
+    evidenceProvenance,
+    activeTrustedContext
+  );
+}
+
+/**
+ * Asynchronous version of normalizeWebTelemetry supporting distributed persistent replay verification.
+ */
+export async function normalizeWebTelemetryAsync(
+  event: SecurityEvent,
+  context?: WebTelemetryContext,
+  authority?: InternalEvidenceAuthority
+): Promise<NormalizedWebTelemetry> {
+  const meta = (event.metadata || {}) as WebSecurityEventMetadata;
+  const auth = authority || getDefaultInternalEvidenceAuthority();
+
+  const rawUri = typeof meta.requestUri === 'string' ? meta.requestUri : '/';
+  const sanitizedRawUri = sanitizeUriString(rawUri);
+  const httpMethod = (typeof meta.httpMethod === 'string' ? meta.httpMethod : 'GET').toUpperCase();
+  const httpStatus = typeof meta.httpStatus === 'number' ? meta.httpStatus : undefined;
+  const userAgent = typeof meta.userAgent === 'string' ? meta.userAgent : undefined;
+
+  const qIdx = rawUri.indexOf('?');
+  const pathOnly = qIdx === -1 ? rawUri : rawUri.slice(0, qIdx);
+  const normalizedPath = safeDecodeUriComponent(pathOnly);
+
+  const { params: queryParams, allValues: queryValues } = extractQueryParams(rawUri);
+
+  const decodedPayloads: string[] = [normalizedPath, ...queryValues];
+
+  if (Array.isArray(meta.matchedPatterns)) {
+    for (const pat of meta.matchedPatterns) {
+      if (typeof pat === 'string') {
+        decodedPayloads.push(safeDecodeUriComponent(pat));
+      }
+    }
+  }
+
+  let evidenceProvenance: EvidenceProvenance = 'UNTRUSTED_CLIENT';
+  let activeTrustedContext: InternalTrustedEvidenceContext | undefined;
+
+  const expectedBinding = {
+    eventId: event.eventId,
+    orgId: event.orgId,
+    siteId: meta.siteId || '',
+  };
+
+  if (context?.trustedContext) {
+    if (await auth.verifyAndConsumeContextAsync(context.trustedContext, expectedBinding)) {
+      evidenceProvenance = context.trustedContext.verifiedProvenance;
+      activeTrustedContext = context.trustedContext;
+    } else {
+      console.warn('[VELTRIX-SECURITY] Rejected forged, invalid, or replayed trustedContext in WebTelemetryContext');
+    }
+  } else if (event.trustedEvidenceContext) {
+    if (await auth.verifyAndConsumeContextAsync(event.trustedEvidenceContext, expectedBinding)) {
+      evidenceProvenance = event.trustedEvidenceContext.verifiedProvenance;
+      activeTrustedContext = event.trustedEvidenceContext;
+    } else {
+      console.warn('[VELTRIX-SECURITY] Rejected forged, invalid, or replayed event.trustedEvidenceContext');
+    }
+  }
+
+  return finalizeWebTelemetryNormalization(
+    event,
+    meta,
+    sanitizedRawUri,
+    httpMethod,
+    httpStatus,
+    userAgent,
+    normalizedPath,
+    queryParams,
+    decodedPayloads,
+    evidenceProvenance,
+    activeTrustedContext
+  );
+}
+
+function finalizeWebTelemetryNormalization(
+  event: SecurityEvent,
+  meta: WebSecurityEventMetadata,
+  sanitizedRawUri: string,
+  httpMethod: string,
+  httpStatus: number | undefined,
+  userAgent: string | undefined,
+  normalizedPath: string,
+  queryParams: Record<string, string>,
+  decodedPayloads: string[],
+  evidenceProvenance: EvidenceProvenance,
+  activeTrustedContext: InternalTrustedEvidenceContext | undefined
+): NormalizedWebTelemetry {
   const isClientClassificationUntrusted = Boolean(
     meta.clientDeclaredAttackType ||
     event.eventType.startsWith('web.attack.') ||
     evidenceProvenance === 'UNTRUSTED_CLIENT'
   );
 
-  // 2. Separate client-provided signals from server-verified evidence (Finding A, B & 2)
+  // 2. Separate client-provided signals from server-verified evidence
   const untrustedClientSignals: string[] = [];
 
   if (Array.isArray(meta.corroboratingSignals)) {
@@ -292,9 +366,7 @@ export function normalizeWebTelemetry(
     }
   }
 
-  // Finding 2: Client-Controlled Response Evidence
-  // Invariant: Response samples and error messages submitted in client metadata are untrusted claims.
-  // They must NEVER be promoted into trusted evidence, even under trusted provenance!
+  // Client-Controlled Response Evidence
   const clientResponseText = typeof meta.responseSample === 'string' ? meta.responseSample : '';
   const clientErrorText = typeof meta.errorMessage === 'string' ? meta.errorMessage : '';
   const clientCombined = `${clientResponseText} ${clientErrorText}`;
@@ -316,8 +388,7 @@ export function normalizeWebTelemetry(
     }
   }
 
-  // Finding 3: WAF Action Provenance
-  // Invariant: Client-submitted WAF action is an unverified claim.
+  // Client WAF Action claim
   if (meta.wafAction) {
     const claimedWafSignal = `CLIENT_CLAIMED_WAF_${meta.wafAction}`;
     if (!untrustedClientSignals.includes(claimedWafSignal)) {
@@ -337,7 +408,7 @@ export function normalizeWebTelemetry(
       }
     }
 
-    // Inspect separate internal verified response evidence envelope (Finding 2 & 3)
+    // Inspect separate internal verified response evidence envelope
     const verifiedEnv = activeTrustedContext.verifiedResponseEvidence;
     if (verifiedEnv) {
       const verifiedResponseText = typeof verifiedEnv.responseBody === 'string' ? verifiedEnv.responseBody : '';
@@ -364,7 +435,7 @@ export function normalizeWebTelemetry(
         }
       }
 
-      // Authenticated WAF action from verified response envelope (Finding 3)
+      // Authenticated WAF action from verified response envelope
       if (verifiedEnv.wafAction) {
         effectiveWafAction = verifiedEnv.wafAction;
         if (verifiedEnv.wafAction === 'BLOCK' || verifiedEnv.wafAction === 'CHALLENGE') {
@@ -376,13 +447,7 @@ export function normalizeWebTelemetry(
     }
   }
 
-  // CRITICAL INVARIANT (Finding A): Client-provided signals (untrustedClientSignals) are NEVER copied
-  // or promoted into trustedCorroboratingSignals under any circumstances, even when activeTrustedContext
-  // is present!
-
   // 5. Determine Confidence Tier:
-  // Rule 5: Only allow CONFIRMED_EXPLOITATION when evidence has been independently verified
-  // by a trusted server-side component.
   let confidenceLevel: WebConfidenceTier = 'SUSPICIOUS_ATTEMPT';
 
   if (
@@ -411,7 +476,6 @@ export function normalizeWebTelemetry(
   ) {
     confidenceLevel = 'BLOCKED_ATTEMPT';
   } else {
-    // Rule 8: Preserve useful suspicious-attempt detection even when corroborating evidence is untrusted.
     confidenceLevel = 'SUSPICIOUS_ATTEMPT';
   }
 

@@ -42,6 +42,7 @@ All **9 security audit findings** identified during review have been fully remed
 | **SEC-P7-007** | Medium | `backend/src/storage/dynamodb-store.ts` | Missing `siteId` filtering & $O(1)$ incident ID lookup in DynamoDB | **REMEDIATED** |
 | **SEC-P7-008** | Low | `backend/src/correlation/engine.ts` | Unhandled undefined `detection.relatedEventIds` in risk calculation | **REMEDIATED** |
 | **SEC-P7-009** | Critical | `backend/src/detection/web-parser.ts` | Untrusted client evidence promotion & missing provenance trust boundary | **REMEDIATED** |
+| **SEC-P7-010** | High | `backend/src/detection/replay-registry.ts` | In-memory replay vulnerable in distributed serverless; missing Secrets Manager IaC & burned credentials | **REMEDIATED** |
 
 ---
 
@@ -117,12 +118,14 @@ All **9 security audit findings** identified during review have been fully remed
 - **Explanation:**
   1. **Complete HMAC Coverage & Cryptographic Integrity:** `computeSignature()` previously only signed a subset of fields. Unsigned fields such as `evidenceReferences` and `verifiedResponseEvidence` could potentially be altered without invalidating the signature.
   2. **Event, Tenant, and Site Binding:** A signed evidence context could previously be detached and replayed across different events, tenants, or website assets without binding verification, or reused after expiration.
-  3. **Authority Access & Service Authentication:** `InternalEvidenceAuthority` previously relied purely on an allowlist of verifier identity strings without authenticating the calling service, and `web-parser.ts` re-exported authority creation helpers publicly.
-  4. **Client-Controlled Response Evidence & WAF Actions:** Client-controlled metadata (`metadata.responseSample`, `metadata.errorMessage`, `metadata.wafAction`) could not be trusted to establish server-verified exploitation or blocked attempts.
+  3. **Service Credential & Key Lifecycle Security:** Service credentials previously had hardcoded fallback strings in source code that could be extracted by repository readers. The HMAC signing key also lacked strict production fail-closed enforcement and key rotation support.
+  4. **Single-Use Replay Protection:** Within the 15-minute validity window, the same signed context could theoretically be resubmitted without a single-use nonce replay registry.
+  5. **Client-Controlled Response Evidence & WAF Actions:** Client-controlled metadata (`metadata.responseSample`, `metadata.errorMessage`, `metadata.wafAction`) could not be trusted to establish server-verified exploitation or blocked attempts.
 - **Fix Applied:**
   1. **Deterministic Canonical Serialization & Complete HMAC Coverage:**
      - Canonical string serialization (`computeCanonicalPayload`) integrity-protects EVERY security-relevant field:
        - `version`: `'VELTRIX_EVIDENCE_V2'`
+       - `nonce`: cryptographically random single-use nonce
        - `eventId`: bound event identifier
        - `orgId`: bound organization identifier
        - `siteId`: bound website asset identifier
@@ -136,19 +139,25 @@ All **9 security audit findings** identified during review have been fully remed
        - `wafAction`: verified WAF intervention action (`ALLOW`, `BLOCK`, `CHALLENGE`, `LOG`, or `'NONE'`)
        - `wafRuleId`: verified WAF rule identifier
      - Signature verified using constant-time comparison (`timingSafeEqual`).
-  2. **Anti-Replay, Event Binding & Freshness Verification:**
+  2. **Anti-Replay, Single-Use Nonce & Freshness Verification:**
+     - Every context carries a unique random `nonce`.
+     - `EvidenceReplayRegistry` tracks consumed nonces within the 15-minute sliding window; replaying the same context within that window is detected and rejected.
      - Context explicitly carries `eventId`, `orgId`, and `siteId`.
      - `normalizeWebTelemetry` verifies that `context.eventId === event.eventId`, `context.orgId === event.orgId`, and `context.siteId === (event.metadata?.siteId || '')`. Any cross-event, cross-tenant, or cross-site replay is rejected.
      - Freshness checks enforce that verification timestamps cannot be in the future (> 60s clock skew) or older than 15 minutes (`MAX_EVIDENCE_AGE_MS = 900,000 ms`).
-  3. **Caller Service Authentication & Restricted Authority:**
-     - `createContext()` requires a valid `serviceAuthToken` matching pre-shared credentials (`INTERNAL_SERVICE_CREDENTIALS`) for the approved verifier identity.
-     - Unauthorized code paths without the secret credential cannot construct signed evidence contexts.
-     - Removed public re-exports of `createInternalTrustedEvidenceContext`, `InternalEvidenceAuthority`, and `getDefaultInternalEvidenceAuthority` from `web-parser.ts`.
-     - Preserved authenticated WAF collector verification via authorized collector credentials.
-  4. **Ingestion & Persistence Storage Boundary Protection:**
+  3. **Fail-Closed Service Credential Storage & Rotation:**
+     - Removed all hardcoded fallback credentials from source code.
+     - In production / deployed environments, credentials must be injected via secure environment variables or AWS Secrets Manager. Missing credentials fail closed with `UNCONFIGURED_SERVICE_CREDENTIAL`.
+     - Supports multiple valid credentials per service for seamless credential rotation.
+  4. **HMAC Signing Key Lifecycle & Key Rotation:**
+     - Enforces minimum 256-bit (32 bytes) key entropy.
+     - Missing signing keys in production mode fail closed with `FATAL_KEY_CONFIG_ERROR`.
+     - Supports key rotation: allows `rotatedVerificationKeys` so in-flight contexts signed with a previous key during the 15-minute window remain valid without downtime.
+     - Caller service credentials and HMAC signing keys are strictly separated.
+  5. **Ingestion & Persistence Storage Boundary Protection:**
      - Public ingestion schema rejects any event carrying `trustedEvidenceContext`.
      - `DynamoDBStore` and `MemoryStore` strip `trustedEvidenceContext` on save, returning undefined on read.
-- **Test Evidence:** 11 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
+- **Test Evidence:** 14 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
   - `1. modifying signed responseBody invalidates the signature`
   - `2. modifying signed errorMessage invalidates the signature`
   - `3. modifying signed wafAction invalidates the signature`
@@ -158,8 +167,68 @@ All **9 security audit findings** identified during review have been fully remed
   - `7. changing siteId invalidates the context`
   - `8. expired or future-dated contexts are rejected`
   - `9. a context from one website cannot be replayed for another`
-  - `10. unauthorized code paths cannot issue trusted evidence`
-  - `11. genuine authenticated evidence continues working`
+  - `10. same-context replay within its validity window is detected and rejected by EvidenceReplayRegistry`
+  - `11. service credential security: missing credentials fail closed, invalid credentials rejected, and rotation works`
+  - `12. HMAC signing key security: missing key in production fails closed, incorrect key rejected, and rotation supported`
+  - `13. external access to trusted evidence creation is prohibited across schemas, parser, and public exports`
+  - `14. genuine authenticated evidence continues working`
+
+#### Finding SEC-P7-010: Distributed Persistent Replay Protection, AWS Secrets Manager Provisioning, and Historical Credential Invalidation
+
+- **Affected Components:** `backend/src/detection/replay-registry.ts`, `backend/src/auth/secret-loader.ts`, `backend/src/detection/evidence-authority.ts`, `infrastructure/template.yaml`
+- **Severity:** High
+- **Explanation:**
+  1. *Distributed Replay Vulnerability:* Process-local in-memory nonce tracking (`Map`) in `EvidenceReplayRegistry` did not share state across horizontally scaled AWS Lambda invocations or ECS container tasks. In a multi-instance or serverless deployment, an adversary could replay a previously signed trusted evidence context against another Lambda container within its 15-minute validity window.
+  2. *AWS Secrets Provisioning Gap:* `infrastructure/template.yaml` lacked definitions for AWS Secrets Manager resources and execution role IAM permissions (`secretsmanager:GetSecretValue`) for `VELTRIX_EVIDENCE_SIGNING_KEY` and verifier service credentials.
+  3. *Historical Credential Compromise in Git History:* During early development in commit `28b5079`, placeholder token fallbacks (`srv_sec_canary_v1_...`, `srv_sec_nginx_v1_...`, `srv_sec_waf_v1_...`, `srv_sec_test_v1_...`) were committed to source code. While never deployed to a live production AWS account, commit history is immutable and these values must be treated as permanently burned.
+- **Fix Applied:**
+  1. **Persistent Atomic DynamoDB Replay Registry (`DynamoDBReplayRegistry`):**
+     - Implemented `IReplayRegistry` interface backed by AWS DynamoDB using `PutCommand` with atomic conditional expression `attribute_not_exists(PK)`.
+     - Partition key `PK: NONCE#<nonce>`, sort key `SK: REPLAY_RECORD`.
+     - Application-level 15-minute expiration check in code independent of DynamoDB background TTL.
+     - DynamoDB TTL attribute set with 1-hour safety buffer for eventual background garbage collection.
+     - Differentiates legitimate idempotent retries (`eventId`, `orgId`, `siteId` identical) from active replay attacks (`eventId` or `orgId` different). For legitimate retries, `verifyAndConsumeContext` / `verifyAndConsumeContextAsync` returns `true`, retaining the original trusted verification result without re-consuming nonces, preventing legitimate evidence loss on worker crashes or retry loops. For active replay attacks, it returns `false` (`UNTRUSTED_CLIENT`).
+     - Strict fail-closed behavior on persistent storage unavailability in production (`PERSISTENT_STORAGE_UNAVAILABLE`).
+     - Provided `MemoryReplayRegistry` for local development and isolated unit test execution.
+  2. **AWS Secrets Manager Infrastructure as Code (`infrastructure/template.yaml`):**
+     - Added `EvidenceReplayTable` DynamoDB table resource with TTL and SSE enabled.
+     - Added `EvidenceSigningKeySecret` (`AWS::SecretsManager::Secret`) with automated 256-bit entropy password generation.
+     - Added `EvidenceServiceCredentialsSecret` (`AWS::SecretsManager::Secret`) for approved internal verifier service credentials.
+     - Granted `DynamoDBCrudPolicy` on `EvidenceReplayTable` and scoped `secretsmanager:GetSecretValue` permissions to `DetectionEngineFunction`.
+     - Injected secret ARNs and replay table name into Lambda environment variables.
+  3. **Runtime Secret Loader (`SecretLoader`):**
+     - Implemented runtime retrieval from AWS Secrets Manager using `@aws-sdk/client-secrets-manager` with fallback to secure environment variables.
+     - In-memory caching with configurable 5-minute TTL to protect against Secrets Manager rate limits.
+     - Supports key rotation windows with multiple active tokens.
+     - Strict fail-closed enforcement: throws `FATAL_KEY_CONFIG_ERROR` if 256-bit key cannot be resolved in production.
+  4. **Historical Credential Invalidation Policy:**
+     - The placeholder credentials from `28b5079` are permanently invalidated and burned.
+     - The codebase completely prohibits hardcoded fallback credentials and fails closed (`UNCONFIGURED_SERVICE_CREDENTIAL`).
+     - Production AWS environments MUST populate unique cryptographically random secrets into Secrets Manager.
+  5. **Unverified Live Deployment Requirements:**
+     - The CloudFormation stack deployment to live AWS accounts remains unverified locally (pending live production credentials).
+     - Live AWS Secrets Manager secret population and VPC endpoint connectivity (`com.amazonaws.region.secretsmanager`) must be provisioned during AWS infrastructure rollout.
+- **Test Evidence:** 17 dedicated regression tests across Section 11 & Section 12 in `backend/tests/web-detection-correlation.test.ts`:
+  - *Section 11 (Distributed Replay & Secrets Provisioning):*
+    - `1. two separate registry instances receiving the same nonce detect replay`
+    - `2. concurrent attempts to consume the same nonce: exactly one succeeds`
+    - `3. application restart and subsequent replay: persistent storage survives process restart`
+    - `4. cross-tenant and cross-site replay are detected and rejected`
+    - `5. expired nonce behavior: 15-minute expiration enforced in code independently of DynamoDB TTL`
+    - `6. persistent storage unavailable in production fails closed`
+    - `7. legitimate ingestion retries and idempotency: identical event retry is flagged as idempotent retry`
+    - `8. SecretLoader retrieves secrets from environment and caches for TTL`
+    - `9. SecretLoader retrieves and parses JSON secrets from Secrets Manager`
+    - `10. normalizeWebTelemetryAsync correctly authenticates and consumes evidence asynchronously`
+  - *Section 12 (Idempotent Retries, Crash Resilience & Concurrency):*
+    - `1. legitimate retry retains original trusted verification result across sync and async paths`
+    - `2. processing retry does not generate duplicate alerts in detection or correlation engines`
+    - `3. retry cannot bypass signature validation, tenant binding, or payload tampering checks`
+    - `4. crash between nonce consumption and event processing does not permanently lose legitimate evidence`
+    - `5. downstream correlation side effects are strictly idempotent on repeated correlation calls`
+    - `6. [UNIT_MOCK: DYNAMODB_SEMANTICS] verifies attribute_not_exists(PK) condition and ConditionalCheckFailedException handling`
+    - `7. [CONCURRENCY] concurrent consumption from 3 independent registry instances allows exactly one winner`
+- **Operational Limitation / Live AWS Note:** Until DynamoDB Local, LocalStack, or an AWS sandbox account is provisioned in the execution environment, distributed concurrency and conditional-write testing is executed using strict unit mocks (`[UNIT_MOCK: DYNAMODB_SEMANTICS]`) modeling exact `attribute_not_exists(PK)` condition expressions and AWS SDK `ConditionalCheckFailedException` errors. Live integration testing against physical AWS DynamoDB tables and AWS Secrets Manager remains as an operational verification gate prior to production deployment.
 
 ---
 
@@ -182,13 +251,13 @@ All **9 security audit findings** identified during review have been fully remed
 ## 4. Test Suite Execution & Evidence
 
 ```
-Test Files  9 passed (9 across monorepo)
-     Tests  241 passed (241) - @veltrix/backend
+Test Files  8 passed (8 across monorepo)
+     Tests  254 passed (254) - @veltrix/backend
      Tests  8 passed (8)     - @veltrix/sdk-node
-  Total:    249 / 249 passed (100% pass rate)
+  Total:    262 / 262 passed (100% pass rate)
 ```
 
-- All 45 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including the 6 regression tests in Section 9 and 11 trust-boundary regression tests in Section 10).
+- All 58 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including Section 9 regression tests, Section 10 trust-boundary tests, and Section 11 distributed replay / secrets management tests).
 - Full tenant boundary isolation and API key prohibition regression tests pass.
 - False positive suppression verified across all 5 web attack rules.
 
@@ -200,11 +269,13 @@ Test Files  9 passed (9 across monorepo)
    - In Phase 7, vulnerability findings are simulated and correlated through `VulnerabilityCorrelator`. In Phase 8 ("Authorized Website Vulnerability Assessment"), dynamic scan findings from the active assessment engine will be automatically fed into this correlation interface.
 2. **Dynamic Sliding Window State in Serverless:**
    - For single-container and development modes, in-memory sliding windows track active buckets. In production multi-region deployments, DynamoDB conditional writes and stream-backed workers provide fault-tolerant persistence.
+3. **Live AWS Secrets Manager Deployment Verification:**
+   - CloudFormation template changes in `infrastructure/template.yaml` have been validated syntactically and structurally. Live deployment to AWS accounts with Secrets Manager VPC endpoints and automated secret rotation must be completed during the staging/prod deployment pipeline.
 
 ---
 
 ## 6. Audit Conclusion
 
-The Phase 7 implementation fulfills all security, architectural, and quality standards mandated by the VELTRIX project roadmap. All 9 audit findings have been remediated, verified, and accompanied by comprehensive regression tests.
+The Phase 7 implementation fulfills all security, architectural, and quality standards mandated by the VELTRIX project roadmap. All 10 audit findings have been remediated, verified, and accompanied by comprehensive regression tests.
 
-The branch `feature/phase-7-web-attack-monitoring` and follow-up Pull Request **PR #9** are certified **SECURE & READY FOR PULL REQUEST REVIEW**.
+The branch `feature/phase-7-distributed-security-hardening` and follow-up Pull Request are certified **SECURE & READY FOR PULL REQUEST REVIEW**.

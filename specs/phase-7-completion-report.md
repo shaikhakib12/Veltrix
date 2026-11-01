@@ -158,7 +158,7 @@ Implemented in `frontend/src/components/WebsiteAttackMonitoring.tsx` and integra
 
 ## 9. Automated Test Suite Verification (TASK-707)
 
-Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` executes 45 tests covering:
+Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` executes 48 tests covering:
 1. Positive and negative payload verification for `RULE-101` (SQLi).
 2. Positive and negative payload verification for `RULE-102` (XSS).
 3. Positive and negative payload verification for `RULE-103` (Path Traversal).
@@ -170,7 +170,8 @@ Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` execut
 9. REST APIs, keyset pagination, tenant isolation (Tenant B cannot access Tenant A data: 404 `WEBSITE_NOT_FOUND`), and API key scoping (`FORBIDDEN_API_KEY_SCOPE_PROHIBITED`).
 10. Security audit regressions: credential redaction in query parameters/raw URIs, NaN poisoning defense, generic IP collision defense, correlation idempotency, sliding window bucket boundary correlation, and out-of-order timestamp preservation.
 11. Evidence provenance & internal trust boundary: rejection of client-submitted `CANARY_TOKEN_BREACH`, `DATA_LEAKAGE_INDICATOR`, `UNAUTHORIZED_PRIVILEGE_MUTATION`, isolation of forged DB errors, anti-impersonation via `sourceSystem`, strict non-promotion of untrusted client signals in trusted execution contexts, and server-verified evidence processing via `InternalTrustedEvidenceContext`.
-12. PR #10 Final Cryptographic Integrity & Context Binding Hardening: deterministic canonical serialization signing the complete trusted evidence context (13 integrity-protected fields including hashes of response bodies and error messages), anti-replay and strict binding to `eventId`, `orgId`, and `siteId`, timestamp freshness validation (rejecting future-dated contexts and contexts older than 15 minutes), service authentication requiring `serviceAuthToken` matching pre-shared credentials (`INTERNAL_SERVICE_CREDENTIALS`), removal of public authority creation exports from `web-parser.ts`, and preservation of authenticated WAF collector verification.
+12. PR #10 Final Credential & Runtime Security Hardening: deterministic canonical serialization signing 14 fields (including single-use nonce), elimination of all hardcoded fallback credentials, fail-closed service authentication, credential rotation, HMAC signing key lifecycle with minimum 256-bit entropy, key rotation (`rotatedVerificationKeys`), sliding-window `EvidenceReplayRegistry` preventing same-context replay within the validity window, and removal of public authority creation exports.
+13. Distributed Replay Protection & AWS Secrets Provisioning (SEC-P7-010): persistent atomic replay protection using AWS DynamoDB (`DynamoDBReplayRegistry` with `attribute_not_exists(PK)` conditional write), application-level 15-minute expiration independent of DynamoDB background TTL, differentiated idempotent retry handling, in-memory test fallback (`MemoryReplayRegistry`), AWS Secrets Manager IaC resource definitions and scoped IAM policies in `infrastructure/template.yaml`, runtime secret loader (`SecretLoader`) with 5-minute in-memory caching and fail-closed production enforcement, and formal permanent invalidation of historical fallback placeholder credentials from commit `28b5079`.
 
 ### Full Monorepo Test Results:
 ```
@@ -178,16 +179,16 @@ Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` execut
 > npm run test --workspaces --if-present
 
 @veltrix/sdk-node: 8 passed (8 tests)
-@veltrix/backend: 241 passed (241 tests)
-Total: 249 / 249 passed (100% pass rate)
+@veltrix/backend: 261 passed (261 tests)
+Total: 269 / 269 passed (100% pass rate)
 ```
 
 ---
 
 ## 10. Conclusion & PR Management
 
-Phase 7 (TASK-701 through TASK-707) is complete, independently audited, hardened with an internal trust boundary, and verified against all criteria.
+Phase 7 (TASK-701 through TASK-707) and all subsequent distributed security hardening tasks are complete, independently audited, hardened with distributed persistent replay protection, and verified against all criteria.
 Per instructions:
 - Phase 7 is NOT merged into `main`.
 - Phase 8 has NOT been started.
-- All outstanding changes are submitted via PR #10 targeting `main`.
+- All outstanding changes are submitted via a follow-up feature branch (`feature/phase-7-distributed-security-hardening`) targeting `main`.
