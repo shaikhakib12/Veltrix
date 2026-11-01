@@ -488,6 +488,7 @@ export class DynamoDBStore implements StorageInterface {
       evidence: detection.evidence,
       mitreAttack: detection.mitreAttack,
       status: detection.status || 'ACTIVE',
+      siteId: (detection.evidence?.details as { siteId?: string } | undefined)?.siteId,
       dedupKey,
       ttl: ttlEpoch,
     };
@@ -608,6 +609,13 @@ export class DynamoDBStore implements StorageInterface {
     if (options?.status) {
       filterConditions.push('#st = :st');
       exprNames['#st'] = 'status';
+      if (options?.siteId) {
+        filterConditions.push('(#sId = :sId OR #ev.#det.#sId = :sId)');
+        exprNames['#sId'] = 'siteId';
+        exprNames['#ev'] = 'evidence';
+        exprNames['#det'] = 'details';
+        exprValues[':sId'] = options.siteId;
+      }
       exprValues[':st'] = options.status;
     }
 
@@ -719,6 +727,23 @@ export class DynamoDBStore implements StorageInterface {
         })
       )
     );
+
+    try {
+      await this.executeWithRetry(() =>
+        this.docClient.send(
+          new PutCommand({
+            TableName: this.incidentsTable,
+            Item: {
+              ...item,
+              PK: `ORG#${orgId}#INCIDENTID#${incident.incidentId}`,
+              SK: 'METADATA',
+            },
+          })
+        )
+      );
+    } catch {
+      // Best-effort pointer write
+    }
   }
 
   async getIncidents(
@@ -734,6 +759,14 @@ export class DynamoDBStore implements StorageInterface {
     let indexName: string | undefined;
     let keyCondition = 'PK = :pk';
     const exprValues: Record<string, unknown> = { ':pk': `ORG#${orgId}` };
+    const filterConditions: string[] = [];
+    const exprNames: Record<string, string> = {};
+
+    if (options?.siteId) {
+      filterConditions.push('#sId = :sId');
+      exprNames['#sId'] = 'siteId';
+      exprValues[':sId'] = options.siteId;
+    }
 
     if (options?.status) {
       indexName = 'GSI1-StatusRiskIndex';
@@ -756,6 +789,8 @@ export class DynamoDBStore implements StorageInterface {
       IndexName: indexName,
       KeyConditionExpression: keyCondition,
       ExpressionAttributeValues: exprValues,
+      ExpressionAttributeNames: Object.keys(exprNames).length > 0 ? exprNames : undefined,
+      FilterExpression: filterConditions.length > 0 ? filterConditions.join(' AND ') : undefined,
       ScanIndexForward: false,
       Limit: options?.limit || 20,
       ExclusiveStartKey: exclusiveStartKey,
@@ -771,6 +806,25 @@ export class DynamoDBStore implements StorageInterface {
   }
 
   async getIncidentById(orgId: string, incidentId: string): Promise<Incident | null> {
+    try {
+      const result = await this.executeWithRetry(() =>
+        this.docClient.send(
+          new GetCommand({
+            TableName: this.incidentsTable,
+            Key: {
+              PK: `ORG#${orgId}#INCIDENTID#${incidentId}`,
+              SK: 'METADATA',
+            },
+          })
+        )
+      );
+      if (result.Item) {
+        const { PK, SK, GSI1_PK, GSI1_SK, GSI2_PK, GSI2_SK, ...incident } = result.Item as Record<string, unknown>;
+        return incident as unknown as Incident;
+      }
+    } catch {
+      // Fallback to query
+    }
     const response = await this.getIncidents(orgId, { limit: 100 });
     const match = response.items.find((i) => i.incidentId === incidentId);
     return match || null;

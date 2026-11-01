@@ -15,6 +15,7 @@ import {
   Rule104BotActivity,
   Rule105AuthFlowTampering,
 } from '../src/detection/rules/web/index.js';
+import { normalizeWebTelemetry } from '../src/detection/web-parser.js';
 import { JwtService } from '../src/auth/jwt-service.js';
 import { LocalAuthProvider } from '../src/auth/local-auth-provider.js';
 import { resetAuthProviderForTesting } from '../src/auth/index.js';
@@ -1039,6 +1040,233 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       // 404 because siteId does not belong to Tenant B
       expect(res.status).toBe(404);
       expect(res.body.error.code).toBe('WEBSITE_NOT_FOUND');
+    });
+  });
+
+  describe('9. Security Audit Regressions & Edge Cases', () => {
+    it('redacts sensitive query parameter values in rawUri and queryParams', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000099',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.12',
+        sourceSystem: 'collector:nginx',
+        metadata: {
+          siteId,
+          requestUri: '/login?user=admin&password=SuperSecretPassword123!&token=sec_abc_9988&cvv=123',
+          httpMethod: 'GET',
+          httpStatus: 200,
+        },
+      });
+
+      expect(parsed.queryParams.password).toBe('[REDACTED]');
+      expect(parsed.queryParams.token).toBe('[REDACTED]');
+      expect(parsed.queryParams.cvv).toBe('[REDACTED]');
+      expect(parsed.queryParams.user).toBe('admin');
+
+      // rawUri must not leak cleartext credentials
+      expect(parsed.rawUri).not.toContain('SuperSecretPassword123!');
+      expect(parsed.rawUri).not.toContain('sec_abc_9988');
+      expect(parsed.rawUri).toContain('password=[REDACTED]');
+
+      // decodedPayloads passed to detection rules must not contain cleartext credentials
+      expect(parsed.decodedPayloads).not.toContain('SuperSecretPassword123!');
+      expect(parsed.decodedPayloads).not.toContain('sec_abc_9988');
+    });
+
+    it('safely handles missing, NaN, or out-of-range findingCvss without NaN poisoning', () => {
+      // 1. computeVulnerabilityMatchTerm with NaN findingCvss
+      const termNaN = riskEngine.computeVulnerabilityMatchTerm('EXACT', NaN as any, 'CONFIRMED_EXPLOITATION');
+      expect(Number.isNaN(termNaN.termValue)).toBe(false);
+      expect(termNaN.findingCvss).toBe(0);
+      expect(termNaN.termValue).toBe(0);
+
+      // 2. computeVulnerabilityMatchTerm with undefined
+      const termUndef = riskEngine.computeVulnerabilityMatchTerm('PARTIAL', undefined as any, 'PROBABLE_EXPLOITATION');
+      expect(Number.isNaN(termUndef.termValue)).toBe(false);
+      expect(termUndef.findingCvss).toBe(0);
+
+      // 3. calculateRisk with NaN vulnerability overlap
+      const resultWithNaN = riskEngine.calculateRisk({
+        detectionsSeverity: ['HIGH'],
+        eventCount: 5,
+        uniqueAttackTypes: ['SQLI'],
+        highestConfidence: 'ATTEMPT_ONLY',
+        assetEnvironment: 'PRODUCTION',
+        vulnerabilityOverlap: {
+          overlapLevel: 'EXACT',
+          weight: 25,
+          findingCvss: NaN as any,
+          confidenceMultiplier: 0.8,
+          termValue: NaN as any,
+        },
+      });
+
+      expect(Number.isNaN(resultWithNaN.score)).toBe(false);
+      expect(Number.isFinite(resultWithNaN.score)).toBe(true);
+      expect(resultWithNaN.score).toBeGreaterThanOrEqual(0);
+      expect(resultWithNaN.score).toBeLessThanOrEqual(100);
+      expect(resultWithNaN.explanation).not.toContain('NaN');
+    });
+
+    it('prevents false incident consolidation for loopback/generic source IPs', async () => {
+      const baseTime = Date.now();
+      const det1 = {
+        detectionId: 'det-loopback-01',
+        organizationId: orgId,
+        ruleId: 'RULE-101',
+        title: 'SQLi Probe 1',
+        description: 'Probe 1',
+        severity: 'HIGH' as const,
+        detectedAt: new Date(baseTime).toISOString(),
+        evidence: {
+          targetEntity: { type: 'IP' as const, value: '127.0.0.1' },
+          details: { siteId, attackType: 'SQLI', confidenceLevel: 'ATTEMPT_ONLY' },
+        },
+      };
+
+      const det2 = {
+        detectionId: 'det-loopback-02',
+        organizationId: orgId,
+        ruleId: 'RULE-101',
+        title: 'SQLi Probe 2',
+        description: 'Probe 2',
+        severity: 'HIGH' as const,
+        detectedAt: new Date(baseTime + 5000).toISOString(),
+        evidence: {
+          targetEntity: { type: 'IP' as const, value: '127.0.0.1' },
+          details: { siteId, attackType: 'SQLI', confidenceLevel: 'ATTEMPT_ONLY' },
+        },
+      };
+
+      const res1 = await correlationEngine.correlateDetection(det1);
+      const res2 = await correlationEngine.correlateDetection(det2);
+
+      expect(res1).not.toBeNull();
+      expect(res2).not.toBeNull();
+      // Because 127.0.0.1 is generic/local, each gets an isolated incident rather than global collapse
+      expect(res1!.isNewIncident).toBe(true);
+      expect(res2!.isNewIncident).toBe(true);
+      expect(res1!.incident.incidentId).not.toBe(res2!.incident.incidentId);
+    });
+
+    it('ensures correlation idempotency by not duplicating timeline entries on re-evaluation', async () => {
+      const det = {
+        detectionId: 'det-idempotent-01',
+        organizationId: orgId,
+        ruleId: 'RULE-101',
+        title: 'Idempotent SQLi Detection',
+        description: 'Test detection',
+        severity: 'HIGH' as const,
+        detectedAt: new Date().toISOString(),
+        evidence: {
+          targetEntity: { type: 'IP' as const, value: '198.51.100.200' },
+          details: { siteId, attackType: 'SQLI', confidenceLevel: 'ATTEMPT_ONLY' },
+        },
+      };
+
+      const resFirst = await correlationEngine.correlateDetection(det);
+      expect(resFirst!.incident.timeline).toHaveLength(1);
+
+      // Re-correlating the exact same detection
+      const resSecond = await correlationEngine.correlateDetection(det);
+      expect(resSecond!.incident.timeline).toHaveLength(1);
+      expect((resSecond!.incident.timeline[0].details as any)?.detectionId).toBe('det-idempotent-01');
+    });
+
+    it('correlates events spanning across fixed 15-minute bucket boundaries in a true sliding window', async () => {
+      // 10:14:00 UTC falls in bucket Math.floor(timestamp / 900000) = B0
+      // 10:16:00 UTC falls in bucket Math.floor(timestamp / 900000) = B1
+      // In a sliding window of 900 seconds (15 min), events separated by 2 minutes MUST correlate.
+      const t1 = new Date('2026-03-01T10:14:00Z');
+      const t2 = new Date('2026-03-01T10:16:00Z');
+
+      const det1 = {
+        detectionId: 'det-boundary-01',
+        organizationId: orgId,
+        ruleId: 'RULE-101',
+        title: 'SQLi Probe at T=14m',
+        description: 'First probe',
+        severity: 'MEDIUM' as const,
+        detectedAt: t1.toISOString(),
+        evidence: {
+          targetEntity: { type: 'IP' as const, value: '198.51.100.88' },
+          details: { siteId, attackType: 'SQLI', confidenceLevel: 'ATTEMPT_ONLY' },
+        },
+      };
+
+      const det2 = {
+        detectionId: 'det-boundary-02',
+        organizationId: orgId,
+        ruleId: 'RULE-102',
+        title: 'XSS Probe at T=16m',
+        description: 'Second probe across bucket boundary',
+        severity: 'HIGH' as const,
+        detectedAt: t2.toISOString(),
+        evidence: {
+          targetEntity: { type: 'IP' as const, value: '198.51.100.88' },
+          details: { siteId, attackType: 'XSS', confidenceLevel: 'ATTEMPT_ONLY' },
+        },
+      };
+
+      const res1 = await correlationEngine.correlateDetection(det1);
+      expect(res1!.isNewIncident).toBe(true);
+
+      const res2 = await correlationEngine.correlateDetection(det2);
+      expect(res2!.isNewIncident).toBe(false);
+      expect(res2!.incident.incidentId).toBe(res1!.incident.incidentId);
+      expect(res2!.incident.attackTypes).toContain('SQLI');
+      expect(res2!.incident.attackTypes).toContain('XSS');
+      expect(res2!.incident.timeline).toHaveLength(2);
+    });
+
+    it('maintains correct chronological bounds when detections arrive out of order', async () => {
+      const laterTime = new Date('2026-03-01T12:10:00Z');
+      const earlierTime = new Date('2026-03-01T12:05:00Z');
+
+      // Arriving first: event from 12:10
+      const detLater = {
+        detectionId: 'det-ooo-later',
+        organizationId: orgId,
+        ruleId: 'RULE-101',
+        title: 'Later Detection (Arrived First)',
+        description: 'Arrives first',
+        severity: 'HIGH' as const,
+        detectedAt: laterTime.toISOString(),
+        evidence: {
+          targetEntity: { type: 'IP' as const, value: '198.51.100.77' },
+          details: { siteId, attackType: 'SQLI', confidenceLevel: 'ATTEMPT_ONLY' },
+        },
+      };
+
+      // Arriving second: event from 12:05 (out of order)
+      const detEarlier = {
+        detectionId: 'det-ooo-earlier',
+        organizationId: orgId,
+        ruleId: 'RULE-102',
+        title: 'Earlier Detection (Arrived Second)',
+        description: 'Arrives second out of order',
+        severity: 'MEDIUM' as const,
+        detectedAt: earlierTime.toISOString(),
+        evidence: {
+          targetEntity: { type: 'IP' as const, value: '198.51.100.77' },
+          details: { siteId, attackType: 'XSS', confidenceLevel: 'ATTEMPT_ONLY' },
+        },
+      };
+
+      const res1 = await correlationEngine.correlateDetection(detLater);
+      expect(res1!.isNewIncident).toBe(true);
+      expect(res1!.incident.createdAt).toBe(laterTime.toISOString());
+
+      const res2 = await correlationEngine.correlateDetection(detEarlier);
+      expect(res2!.isNewIncident).toBe(false);
+      // Earliest timestamp preserved as createdAt
+      expect(res2!.incident.createdAt).toBe(earlierTime.toISOString());
+      // Latest timestamp preserved as updatedAt
+      expect(res2!.incident.updatedAt).toBe(laterTime.toISOString());
     });
   });
 });

@@ -80,6 +80,35 @@ export function safeDecodeUriComponent(str: string): string {
 }
 
 /**
+ * Sensitive parameter names whose values must be redacted to prevent credential leakage.
+ */
+export const SENSITIVE_PARAM_PATTERN =
+  /^(pass(word)?|passwd|pwd|token|access_token|refresh_token|secret|auth|authorization|bearer|cookie|session|sessionid|apikey|api_key|credit|cvv|ssn)$/i;
+
+/**
+ * Sanitizes a raw URI by replacing sensitive parameter values with '[REDACTED]'.
+ */
+export function sanitizeUriString(uri: string): string {
+  if (!uri || !uri.includes('?')) return uri;
+  const qIdx = uri.indexOf('?');
+  const path = uri.slice(0, qIdx);
+  const qs = uri.slice(qIdx + 1);
+  const pairs = qs.split('&');
+  const sanitizedPairs = pairs.map((pair) => {
+    if (!pair) return pair;
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx === -1) return pair;
+    const rawKey = pair.slice(0, eqIdx);
+    const decodedKey = safeDecodeUriComponent(rawKey).trim();
+    if (SENSITIVE_PARAM_PATTERN.test(decodedKey)) {
+      return `${rawKey}=[REDACTED]`;
+    }
+    return pair;
+  });
+  return `${path}?${sanitizedPairs.join('&')}`;
+}
+
+/**
  * Extracts query parameters into key-value map and returns all raw and decoded values.
  */
 export function extractQueryParams(uri: string): {
@@ -110,9 +139,13 @@ export function extractQueryParams(uri: string): {
     }
 
     if (key) {
-      params[key] = val;
-      if (val) {
-        allValues.push(val);
+      if (SENSITIVE_PARAM_PATTERN.test(key)) {
+        params[key] = '[REDACTED]';
+      } else {
+        params[key] = val;
+        if (val) {
+          allValues.push(val);
+        }
       }
     }
   }
@@ -129,6 +162,7 @@ export function normalizeWebTelemetry(event: SecurityEvent): NormalizedWebTeleme
   const meta = (event.metadata || {}) as WebSecurityEventMetadata;
 
   const rawUri = typeof meta.requestUri === 'string' ? meta.requestUri : '/';
+  const sanitizedRawUri = sanitizeUriString(rawUri);
   const httpMethod = (typeof meta.httpMethod === 'string' ? meta.httpMethod : 'GET').toUpperCase();
   const httpStatus = typeof meta.httpStatus === 'number' ? meta.httpStatus : undefined;
   const userAgent = typeof meta.userAgent === 'string' ? meta.userAgent : undefined;
@@ -139,7 +173,7 @@ export function normalizeWebTelemetry(event: SecurityEvent): NormalizedWebTeleme
   const pathOnly = qIdx === -1 ? rawUri : rawUri.slice(0, qIdx);
   const normalizedPath = safeDecodeUriComponent(pathOnly);
 
-  // Extract query parameters and payload strings
+  // Extract query parameters and payload strings (with sensitive keys sanitized)
   const { params: queryParams, allValues: queryValues } = extractQueryParams(rawUri);
 
   // Collect all searchable payloads (URI path, query parameters, matched patterns)
@@ -231,7 +265,7 @@ export function normalizeWebTelemetry(event: SecurityEvent): NormalizedWebTeleme
     username: event.username,
     sourceSystem: event.sourceSystem,
     httpMethod,
-    rawUri,
+    rawUri: sanitizedRawUri,
     normalizedPath,
     queryParams,
     decodedPayloads,
