@@ -41,6 +41,11 @@ export class Rule005SuspiciousIp extends BaseDetectionRule {
     if (threatIndicators && Array.isArray(threatIndicators)) {
       for (const indicator of threatIndicators) {
         if (indicator.type === 'IP') {
+          // Verify freshness: reject expired threat intelligence indicators
+          const expiresAt = (indicator as unknown as { expiresAt?: string }).expiresAt;
+          if (expiresAt && new Date(expiresAt).getTime() < Date.now()) {
+            continue;
+          }
           suspiciousIps.add(indicator.value);
         }
       }

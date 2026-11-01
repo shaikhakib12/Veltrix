@@ -832,4 +832,338 @@ describe('Phase 5: Threat Detection Engine (TASK-501 through TASK-505)', () => {
       expect(stored.items.length).toBe(0);
     });
   });
+
+  // ==========================================================================
+  // 4. Advanced Boundary, Enrichment & Context Tests
+  // ==========================================================================
+  describe('Rule Advanced Boundary & Enrichment Auditing', () => {
+    it('RULE-001: strictly respects sliding window boundary (5 failures across 121s does NOT trigger)', async () => {
+      const rule = new Rule001BruteForce();
+      const baseTime = Date.now();
+
+      // 5 failed logins spread across 121s (> 120s default window)
+      const events: SecurityEvent[] = [
+        {
+          eventId: 'b-1',
+          orgId: orgA,
+          category: 'AUTHENTICATION',
+          eventType: 'auth.login.failed',
+          severity: 'LOW',
+          timestamp: new Date(baseTime).toISOString(),
+          sourceIp: '198.51.100.111',
+          username: 'victim',
+          sourceSystem: 'auth',
+        },
+        {
+          eventId: 'b-2',
+          orgId: orgA,
+          category: 'AUTHENTICATION',
+          eventType: 'auth.login.failed',
+          severity: 'LOW',
+          timestamp: new Date(baseTime + 30000).toISOString(),
+          sourceIp: '198.51.100.111',
+          username: 'victim',
+          sourceSystem: 'auth',
+        },
+        {
+          eventId: 'b-3',
+          orgId: orgA,
+          category: 'AUTHENTICATION',
+          eventType: 'auth.login.failed',
+          severity: 'LOW',
+          timestamp: new Date(baseTime + 60000).toISOString(),
+          sourceIp: '198.51.100.111',
+          username: 'victim',
+          sourceSystem: 'auth',
+        },
+        {
+          eventId: 'b-4',
+          orgId: orgA,
+          category: 'AUTHENTICATION',
+          eventType: 'auth.login.failed',
+          severity: 'LOW',
+          timestamp: new Date(baseTime + 90000).toISOString(),
+          sourceIp: '198.51.100.111',
+          username: 'victim',
+          sourceSystem: 'auth',
+        },
+        {
+          eventId: 'b-5',
+          orgId: orgA,
+          category: 'AUTHENTICATION',
+          eventType: 'auth.login.failed',
+          severity: 'LOW',
+          timestamp: new Date(baseTime + 121000).toISOString(), // 121 seconds later
+          sourceIp: '198.51.100.111',
+          username: 'victim',
+          sourceSystem: 'auth',
+        },
+      ];
+
+      const detections = await rule.evaluate({
+        organizationId: orgA,
+        events,
+        currentTime: new Date(),
+      });
+
+      expect(detections.length).toBe(0);
+    });
+
+    it('RULE-004: suppresses false positives when corporate VPN or proxy metadata is present', async () => {
+      const rule = new Rule004ImpossibleTravel();
+      const baseTime = Date.now();
+
+      // Logins from different countries, but event has isVpn: true (VPN toggling)
+      const vpnEvents: SecurityEvent[] = [
+        {
+          eventId: 'vpn-1',
+          orgId: orgA,
+          category: 'AUTHENTICATION',
+          eventType: 'auth.login.success',
+          severity: 'LOW',
+          timestamp: new Date(baseTime - 300000).toISOString(),
+          sourceIp: '198.51.100.1',
+          username: 'remote-worker',
+          sourceSystem: 'okta',
+          metadata: { country: 'US', city: 'Dallas' },
+        },
+        {
+          eventId: 'vpn-2',
+          orgId: orgA,
+          category: 'AUTHENTICATION',
+          eventType: 'auth.login.success',
+          severity: 'LOW',
+          timestamp: new Date(baseTime).toISOString(),
+          sourceIp: '203.0.113.1',
+          username: 'remote-worker',
+          sourceSystem: 'okta',
+          metadata: { country: 'JP', city: 'Tokyo', isVpn: true },
+        },
+      ];
+
+      const detections = await rule.evaluate({
+        organizationId: orgA,
+        events: vpnEvents,
+        currentTime: new Date(),
+      });
+
+      expect(detections.length).toBe(0);
+    });
+
+    it('RULE-005: ignores expired threat indicators', async () => {
+      const rule = new Rule005SuspiciousIp();
+
+      const events: SecurityEvent[] = [
+        {
+          eventId: 'exp-1',
+          orgId: orgA,
+          category: 'NETWORK',
+          eventType: 'network.connection',
+          severity: 'MEDIUM',
+          timestamp: new Date().toISOString(),
+          sourceIp: '198.51.100.250',
+          username: 'tester',
+          sourceSystem: 'fw',
+        },
+      ];
+
+      // Expired threat indicator
+      const expiredIndicator = {
+        indicatorId: 'ind-exp',
+        type: 'IP' as const,
+        value: '198.51.100.250',
+        severity: 'HIGH' as const,
+        confidence: 85,
+        source: 'AlienVault',
+        description: 'Expired test indicator',
+        createdAt: new Date(Date.now() - 86400000).toISOString(),
+        expiresAt: new Date(Date.now() - 3600000).toISOString(), // expired 1 hour ago
+      };
+
+      const detections = await rule.evaluate({
+        organizationId: orgA,
+        events,
+        currentTime: new Date(),
+        threatIndicators: [expiredIndicator],
+      });
+
+      expect(detections.length).toBe(0);
+    });
+
+    it('RULE-010: respects organization-configurable timezone offsets', async () => {
+      const rule = new Rule010OffHoursAnomaly();
+
+      // Action executed at 23:30 UTC on Tuesday
+      // For a tenant in US Eastern (UTC-5), local time is 18:30 (during 06:00-22:00 business hours)
+      const event: SecurityEvent = {
+        eventId: 'tz-1',
+        orgId: orgA,
+        category: 'SYSTEM',
+        eventType: 'admin.action',
+        severity: 'MEDIUM',
+        timestamp: '2026-11-03T23:30:00Z', // Tuesday 23:30 UTC = 18:30 EST
+        sourceIp: '10.0.0.10',
+        username: 'est-admin',
+        sourceSystem: 'control-plane',
+      };
+
+      // With EST timezone offset (-5 hours): should NOT trigger
+      const estDetections = await rule.evaluate(
+        { organizationId: orgA, events: [event], currentTime: new Date() },
+        { condition: { startHour: 6, endHour: 22, timezoneOffsetHours: -5 } }
+      );
+      expect(estDetections.length).toBe(0);
+
+      // In UTC (offset 0): 23:30 is outside 06:00-22:00, so it DOES trigger
+      const utcDetections = await rule.evaluate(
+        { organizationId: orgA, events: [event], currentTime: new Date() },
+        { condition: { startHour: 6, endHour: 22, timezoneOffsetHours: 0 } }
+      );
+      expect(utcDetections.length).toBe(1);
+    });
+
+    it('RULE-010: supports IANA timezone identifiers (e.g. America/New_York) with automatic DST calculation', async () => {
+      const rule = new Rule010OffHoursAnomaly();
+
+      // Action at 23:30 UTC on Tuesday (November 3, 2026) -> 18:30 EST in America/New_York (within 06:00-22:00 business hours)
+      const event: SecurityEvent = {
+        eventId: 'tz-iana-1',
+        orgId: orgA,
+        category: 'SYSTEM',
+        eventType: 'admin.action',
+        severity: 'MEDIUM',
+        timestamp: '2026-11-03T23:30:00Z',
+        sourceIp: '10.0.0.10',
+        username: 'ny-admin',
+        sourceSystem: 'control-plane',
+      };
+
+      const detections = await rule.evaluate(
+        { organizationId: orgA, events: [event], currentTime: new Date() },
+        { condition: { startHour: 6, endHour: 22, timezone: 'America/New_York' } }
+      );
+      expect(detections.length).toBe(0);
+
+      // Early morning action at 08:30 UTC (03:30 AM EST in America/New_York): outside business hours, MUST trigger
+      const earlyEvent: SecurityEvent = {
+        eventId: 'tz-iana-2',
+        orgId: orgA,
+        category: 'SYSTEM',
+        eventType: 'admin.action',
+        severity: 'MEDIUM',
+        timestamp: '2026-11-03T08:30:00Z',
+        sourceIp: '10.0.0.10',
+        username: 'ny-admin',
+        sourceSystem: 'control-plane',
+      };
+
+      const earlyDetections = await rule.evaluate(
+        { organizationId: orgA, events: [earlyEvent], currentTime: new Date() },
+        { condition: { startHour: 6, endHour: 22, timezone: 'America/New_York' } }
+      );
+      expect(earlyDetections.length).toBe(1);
+      expect(earlyDetections[0].evidence.details.effectiveTz).toBe('America/New_York');
+      expect(earlyDetections[0].evidence.details.localHour).toBe(3);
+    });
+
+    it('gracefully handles events with completely missing metadata without throwing', async () => {
+      const baseTime = Date.now();
+      const events: SecurityEvent[] = [
+        {
+          eventId: 'null-meta-1',
+          orgId: orgA,
+          category: 'AUTHENTICATION',
+          eventType: 'auth.login.failed',
+          severity: 'LOW',
+          timestamp: new Date(baseTime).toISOString(),
+          sourceIp: '198.51.100.9',
+          username: 'user',
+          sourceSystem: 'sys',
+        },
+      ];
+
+      const rules = engine.getRegisteredRules();
+      for (const r of rules) {
+        await expect(
+          r.evaluate({ organizationId: orgA, events, currentTime: new Date() })
+        ).resolves.toBeDefined();
+      }
+    });
+  });
+
+  // ==========================================================================
+  // 5. Security & RBAC Adversarial Tests
+  // ==========================================================================
+  describe('Security & RBAC Adversarial Verification', () => {
+    it('rejects unauthenticated requests to detection endpoints with 401 Unauthorized', async () => {
+      const runRes = await request(app).post('/api/v1/detections/run').send({});
+      expect(runRes.status).toBe(401);
+
+      const listRes = await request(app).get('/api/v1/detections');
+      expect(listRes.status).toBe(401);
+
+      const rulesRes = await request(app).get('/api/v1/detection-rules');
+      expect(rulesRes.status).toBe(401);
+    });
+
+    it('rejects expired JWT tokens with 401 Unauthorized', async () => {
+      const expiredToken = jwtService.signAccessToken({
+        userId: 'expired-user',
+        email: 'expired@shield.corp',
+        username: 'expired.user',
+        role: 'SECURITY_ANALYST',
+        orgId: orgA,
+      }, { expiresInSeconds: -10 }); // Expired 10 seconds ago
+
+      const res = await request(app)
+        .get('/api/v1/detections')
+        .set('Authorization', `Bearer ${expiredToken}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.error.code).toBe('UNAUTHORIZED_EXPIRED_TOKEN');
+    });
+
+    it('rejects tampered or forged JWT tokens with 401 Unauthorized', async () => {
+      const forgedToken = analystTokenOrgA.slice(0, -6) + 'forged';
+      const res = await request(app)
+        .get('/api/v1/detections')
+        .set('Authorization', `Bearer ${forgedToken}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.error.code).toBe('UNAUTHORIZED_INVALID_TOKEN');
+    });
+
+    it('rejects cross-tenant parameter tampering via x-organization-id with 403 Forbidden', async () => {
+      // User is authenticated for orgA, but passes x-organization-id: orgB
+      const res = await request(app)
+        .get('/api/v1/detections')
+        .set('Authorization', `Bearer ${analystTokenOrgA}`)
+        .set('x-organization-id', orgB);
+
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('FORBIDDEN_CROSS_TENANT_ACCESS');
+    });
+
+    it('rejects READ_ONLY_VIEWER on PATCH /api/v1/detection-rules/:ruleId with 403 Forbidden', async () => {
+      const res = await request(app)
+        .patch('/api/v1/detection-rules/RULE-001')
+        .set('Authorization', `Bearer ${viewerTokenOrgA}`)
+        .send({ threshold: 8 });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('FORBIDDEN_INSUFFICIENT_PERMISSIONS');
+    });
+
+    it('rejects tampered pagination cursor with 400 Bad Request (INVALID_CURSOR)', async () => {
+      const tamperedCursor = 'eyJvcmdJZCI6Im9yZy1jeWJlci1zaGllbGQiLCJvZmZzZXQiOjEwfQ.invalidhmacsignature';
+
+      const res = await request(app)
+        .get(`/api/v1/detections?cursor=${tamperedCursor}`)
+        .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('INVALID_CURSOR');
+    });
+  });
+
 });

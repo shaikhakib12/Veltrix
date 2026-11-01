@@ -47,6 +47,13 @@ export class Rule004ImpossibleTravel extends BaseDetectionRule {
         const curr = userEvents[i];
         if (!prev || !curr) continue;
 
+        // Ignore if either event is flagged as corporate VPN or proxy to account for VPN toggling
+        const isVpnOrProxy = prev.metadata?.isVpn === true || curr.metadata?.isVpn === true ||
+          prev.metadata?.isProxy === true || curr.metadata?.isProxy === true;
+        if (isVpnOrProxy) {
+          continue;
+        }
+
         const deltaMs = new Date(curr.timestamp).getTime() - new Date(prev.timestamp).getTime();
         if (deltaMs > windowMs || deltaMs < 0) {
           continue;

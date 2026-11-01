@@ -50,17 +50,21 @@ export abstract class BaseDetectionRule implements DetectionRuleInterface {
   }
 
   /**
-   * Computes a deterministic SHA-256 deduplication fingerprint for a detection finding
-   * to guarantee that repeated runs over the same underlying events do not generate redundant alerts.
+   * Computes a deterministic SHA-256 deduplication fingerprint:
+   * SHA-256(ruleId:orgId:entityValue:windowBucket)
+   * Guarantees that:
+   * 1. Different organizations are strictly isolated.
+   * 2. Different attack entities (IPs, users, systems) are never merged.
+   * 3. Duplicate alerts within the same temporal window bucket are suppressed.
+   * 4. A legitimate later attack in a subsequent window bucket successfully generates an alert.
    */
-  protected computeDedupKey(
+  public computeDedupKey(
     orgId: string,
     ruleId: string,
-    entityKey: string,
-    eventIds: string[]
+    entityValue: string,
+    windowBucket: number | string
   ): string {
-    const sortedIds = [...eventIds].sort().join(',');
-    const canonical = `${orgId}|${ruleId}|${entityKey}|${sortedIds}`;
+    const canonical = `${ruleId}:${orgId}:${entityValue}:${windowBucket}`;
     return createHash('sha256').update(canonical, 'utf8').digest('hex');
   }
 
@@ -78,17 +82,22 @@ export abstract class BaseDetectionRule implements DetectionRuleInterface {
     detectedAt?: string;
   }): Detection {
     const detectedAt = params.detectedAt || new Date().toISOString();
+    const detectedAtMs = new Date(detectedAt).getTime();
+    const windowSeconds = params.evidence.timeWindowSeconds || this.defaultSlidingWindowSeconds;
+    const windowBucket = Math.floor(detectedAtMs / (windowSeconds * 1000));
+    const entityValue = params.evidence.targetEntity?.value || 'global';
+
     const dedupKey = this.computeDedupKey(
       params.orgId,
       this.id,
-      params.evidence.targetEntity?.value || 'global',
-      params.relatedEventIds
+      entityValue,
+      windowBucket
     );
 
-    const ttlEpoch = Math.floor(new Date(detectedAt).getTime() / 1000) + 90 * 86400; // 90 days retention
+    const ttlEpoch = Math.floor(detectedAtMs / 1000) + 90 * 86400; // 90 days retention
 
     return {
-      detectionId: generateUuidV7(new Date(detectedAt).getTime()),
+      detectionId: generateUuidV7(detectedAtMs),
       ruleId: this.id,
       ruleName: this.name,
       orgId: params.orgId,

@@ -147,7 +147,7 @@ export function createDetectionsRouter(
 
       res.status(200).json(response);
     } catch (err: unknown) {
-      if (err instanceof Error && err.message === 'INVALID_CURSOR') {
+      if (err instanceof Error && err.message.startsWith('INVALID_CURSOR')) {
         const errorResponse: ApiErrorResponse = {
           success: false,
           error: {

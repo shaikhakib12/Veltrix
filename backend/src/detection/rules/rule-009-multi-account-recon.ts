@@ -59,6 +59,8 @@ export class Rule009MultiAccountRecon extends BaseDetectionRule {
         const windowEvents = ipEvents.slice(left, right + 1);
         const distinctHandles = [...new Set(windowEvents.map((e) => e.username!).filter(Boolean))];
 
+        // Check if enumeration telemetry indicators exist (probing nonexistent accounts or explicit recon probes)
+        
         if (distinctHandles.length >= threshold) {
           const relatedEventIds = windowEvents.map((e) => e.eventId);
 

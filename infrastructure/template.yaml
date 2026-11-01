@@ -416,6 +416,13 @@ Resources:
             TableName: !Ref IncidentsTable
         - DynamoDBReadPolicy:
             TableName: !Ref DetectionRulesTable
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          STORAGE_MODE: aws
+          DYNAMODB_EVENTS_TABLE: !Ref SecurityEventsTable
+          DYNAMODB_INCIDENTS_TABLE: !Ref IncidentsTable
+          DYNAMODB_RULES_TABLE: !Ref DetectionRulesTable
       Events:
         SecurityEventStream:
           Type: DynamoDB
@@ -424,6 +431,11 @@ Resources:
             StartingPosition: LATEST
             BatchSize: 25
             MaximumBatchingWindowInSeconds: 2
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT"]}'
+            BisectBatchOnFunctionError: true
+            MaximumRetryAttempts: 3
             FunctionResponseTypes:
               - ReportBatchItemFailures
 

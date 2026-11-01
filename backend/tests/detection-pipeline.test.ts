@@ -14,6 +14,8 @@ import {
 import { DetectionEngine } from '../src/detection/engine.js';
 import { EventService } from '../src/services/event-service.js';
 import { generateUuidV7 } from '../src/utils/uuid.js';
+import { handleSecurityEventStream, type DynamoDBStreamEvent } from '../src/detection/stream-handler.js';
+import { marshall } from '@aws-sdk/util-dynamodb';
 
 describe('Phase 5: Automatic Event-to-Detection Pipeline (TASK-501 to TASK-505)', () => {
   let app: ReturnType<typeof createApp>;
@@ -281,4 +283,160 @@ describe('Phase 5: Automatic Event-to-Detection Pipeline (TASK-501 to TASK-505)'
     expect(resB.body.data.items.length).toBe(1);
     expect(resB.body.data.items[0].orgId).toBe(orgB);
   });
+
+  // ==========================================================================
+  // DynamoDB Streams Production Handler & Secondary Record Filtering
+  // ==========================================================================
+  describe('DynamoDB Streams Production Worker & Stream Filtering', () => {
+    it('STREAM FILTERING: only processes genuine primary events; ignores pointers, idempotency rows, and detections', async () => {
+      const baseTime = Date.now();
+      const testEventId = generateUuidV7();
+
+      // Construct a mixed DynamoDB Stream batch with:
+      // 1. Primary Security Event (should be processed)
+      // 2. Secondary Event ID Pointer (must be ignored)
+      // 3. Idempotency Lock Row (must be ignored)
+      // 4. Incident / Detection Row (must be ignored to prevent recursive loops)
+      const streamBatch: DynamoDBStreamEvent = {
+        Records: [
+          // 1. Primary event record
+          {
+            eventName: 'INSERT',
+            dynamodb: {
+              SequenceNumber: 'seq-001',
+              NewImage: marshall({
+                PK: `ORG#${orgA}#DATE#2026-11-01`,
+                SK: `EVENT#${new Date(baseTime).toISOString()}#${testEventId}`,
+                eventId: testEventId,
+                orgId: orgA,
+                category: 'PRIVILEGE',
+                eventType: 'privilege.escalation',
+                severity: 'CRITICAL',
+                timestamp: new Date(baseTime).toISOString(),
+                sourceIp: '10.0.5.5',
+                username: 'root-probe',
+                sourceSystem: 'iam',
+                metadata: { role: 'Administrator' },
+              }),
+            },
+          },
+          // 2. Secondary ID pointer row (MUST BE FILTERED OUT)
+          {
+            eventName: 'INSERT',
+            dynamodb: {
+              SequenceNumber: 'seq-002',
+              NewImage: marshall({
+                PK: `EVENTID#${testEventId}`,
+                SK: 'POINTER',
+                orgId: orgA,
+                targetPk: `ORG#${orgA}#DATE#2026-11-01`,
+                targetSk: `EVENT#${new Date(baseTime).toISOString()}#${testEventId}`,
+              }),
+            },
+          },
+          // 3. Idempotency row (MUST BE FILTERED OUT)
+          {
+            eventName: 'INSERT',
+            dynamodb: {
+              SequenceNumber: 'seq-003',
+              NewImage: marshall({
+                PK: `ORG#${orgA}#IDEMPOTENCY#token-123`,
+                SK: 'IDEMPOTENCY',
+                payloadHash: 'abc123hash',
+                eventId: testEventId,
+              }),
+            },
+          },
+          // 4. Detection / Incident row (MUST BE FILTERED OUT to prevent recursion)
+          {
+            eventName: 'INSERT',
+            dynamodb: {
+              SequenceNumber: 'seq-004',
+              NewImage: marshall({
+                PK: `ORG#${orgA}`,
+                SK: 'DETECTION#2026-11-01T12:00:00.000Z#det-001',
+                ruleId: 'RULE-001',
+                orgId: orgA,
+              }),
+            },
+          },
+        ],
+      };
+
+      const result = await handleSecurityEventStream(streamBatch);
+
+      // No batch failures reported
+      expect(result.batchItemFailures.length).toBe(0);
+
+      // Verify that the primary event was processed and created the privilege escalation detection
+      const detections = await memoryStore.getDetections(orgA);
+      expect(detections.items.length).toBe(1);
+      expect(detections.items[0].ruleId).toBe('RULE-006');
+    });
+
+    it('STREAM FAULT REPORTING: reports SequenceNumber for failed stream items enabling partial retry', async () => {
+      // Create a record that causes unmarshalling or processing failure
+      const malformedBatch: DynamoDBStreamEvent = {
+        Records: [
+          {
+            eventName: 'INSERT',
+            dynamodb: {
+              SequenceNumber: 'seq-fail-999',
+              NewImage: marshall({
+                PK: `ORG#${orgA}#DATE#2026-11-01`,
+                SK: 'EVENT#malformed',
+                // Missing required eventId, orgId, timestamp, etc.
+              }),
+            },
+          },
+        ],
+      };
+
+      const res = await handleSecurityEventStream(malformedBatch);
+      // Verify SequenceNumber is reported in batchItemFailures for malformed stream item
+      expect(res.batchItemFailures.length).toBe(1);
+      expect(res.batchItemFailures[0].itemIdentifier).toBe('seq-fail-999');
+    });
+
+    it('STREAM REPLAY IDEMPOTENCY: replaying identical stream records does not produce duplicate detections', async () => {
+      const baseTime = Date.now();
+      const replayEventId = generateUuidV7();
+
+      const singleEventRecord: DynamoDBStreamEvent = {
+        Records: [
+          {
+            eventName: 'INSERT',
+            dynamodb: {
+              SequenceNumber: 'seq-replay-001',
+              NewImage: marshall({
+                PK: `ORG#${orgA}#DATE#2026-11-01`,
+                SK: `EVENT#${new Date(baseTime).toISOString()}#${replayEventId}`,
+                eventId: replayEventId,
+                orgId: orgA,
+                category: 'PRIVILEGE',
+                eventType: 'privilege.escalation',
+                severity: 'CRITICAL',
+                timestamp: new Date(baseTime).toISOString(),
+                sourceIp: '10.0.9.99',
+                username: 'intruder',
+                sourceSystem: 'iam',
+                metadata: { role: 'Administrator' },
+              }),
+            },
+          },
+        ],
+      };
+
+      // First stream delivery
+      await handleSecurityEventStream(singleEventRecord);
+
+      // Duplicate / replayed stream delivery
+      await handleSecurityEventStream(singleEventRecord);
+
+      const detections = await memoryStore.getDetections(orgA);
+      // Deduplication guarantees exactly 1 detection exists
+      expect(detections.items.length).toBe(1);
+    });
+  });
+
 });

@@ -7,6 +7,7 @@ export interface DynamoDBStreamRecord {
   eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
   dynamodb?: {
     NewImage?: Record<string, AttributeValue>;
+    SequenceNumber?: string;
     ApproximateCreationDateTime?: number;
     Keys?: Record<string, AttributeValue>;
   };
@@ -72,7 +73,7 @@ export async function handleSecurityEventStream(
       console.error(`[VELTRIX-STREAM] Error processing stream record ${i}:`, err);
       // Report partial failure to DynamoDB stream consumer
       batchItemFailures.push({
-        itemIdentifier: String(i),
+        itemIdentifier: record.dynamodb?.SequenceNumber || String(i),
       });
     }
   }
