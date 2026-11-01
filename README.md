@@ -1,7 +1,7 @@
 # VELTRIX
 
 > **Beyond Detection. Into Defense.**  
-> Autonomous Cyber Threat Detection and Controlled Response Platform
+> Unified Website Security Monitoring & Authorized Vulnerability Assessment Platform
 
 [![CI Pipeline](https://github.com/shaikhakib12/Veltrix/actions/workflows/ci.yml/badge.svg)](https://github.com/shaikhakib12/Veltrix/actions/workflows/ci.yml)
 [![License: UNLICENSED](https://img.shields.io/badge/License-Proprietary-blue.svg)](LICENSE)
@@ -11,7 +11,7 @@
 
 ## 1. System Overview
 
-**VELTRIX** is an event-driven Security Information and Event Management (SIEM) and Security Orchestration, Automation, and Response (SOAR) platform designed for autonomous cyber threat detection and controlled containment.
+**VELTRIX** is a unified website security platform combining **Continuous Website Attack Monitoring** with **Authorized Website Vulnerability Assessment**. It ingests real-time web telemetry from application SDKs, reverse proxies, and cloud firewalls, detects attack patterns (SQLi, XSS, Path Traversal, Brute Force, Bots, API abuse), performs non-destructive policy-governed vulnerability scans (TLS, headers, cookies, CORS, OWASP ZAP), and correlates attacks with known asset vulnerabilities to compute explainable risk scores.
 
 Modern Security Operations Centers (SOC) face crippling alert fatigue, uncoordinated alerts from disparate systems, and delayed manual containment actions. VELTRIX resolves these challenges by:
 1. **High-Precision Telemetry Ingestion:** Ingests and normalizes multi-source events with UUIDv7 atomic idempotency checking to prevent dropping rapid brute-force attacks.

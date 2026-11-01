@@ -1,7 +1,7 @@
 # VELTRIX: Testing & Quality Assurance Strategy (`specs/testing-strategy.md`)
 
-**Document Version:** 2.1.0 (Post-Audit Hardened)  
-**Status:** In Review (Phase 1 Specification)  
+**Document Version:** 3.0.0 (Unified Website Security Platform Expansion)  
+**Status:** Approved Testing Strategy  
 **Testing Frameworks:** Vitest 3.x (Unit & Integration), Playwright (E2E), Node.js Assertions  
 
 ---
@@ -80,6 +80,32 @@ A feature is never considered complete merely because its code was authored; it 
 - **Acceptance Criteria:** Commands execute against backend APIs with formatted tables or valid JSON. Sensitive commands prompt for confirmation.
 - **Integration Tests:** Test all subcommands (`auth`, `events`, `detect`, `incidents`, `intel`, `response`, `simulate`, `status`, `config`).
 - **Exit Code Verification:** $0$ on success, $1$ on operational error, $2$ on unauthorized.
+
+---
+
+### 2.11 Module M: Website Asset Inventory & Domain Verification
+- **Acceptance Criteria:** Assets can be registered, listed, and deleted. Verification succeeds only when DNS TXT or HTTP challenge matches the exact expected token. Unverified assets cannot be scanned.
+- **Unit & Security Tests:**
+  - DNS TXT verification test: Mock DNS resolver returning valid vs mismatched token. Assert transition to `VERIFIED` only on exact match.
+  - HTTP Challenge verification test: Mock HTTPS server returning expected JSON vs 404/500 error.
+  - Expired verification test: Mock asset with `expiresAt < Date.now()`. Assert scan request rejected with `403 Forbidden (DOMAIN_VERIFICATION_EXPIRED)`.
+  - Cross-tenant asset boundary test: Tenant B cannot query, update, or verify Tenant A's websites.
+
+### 2.12 Module N: Website Attack Monitoring & Correlation
+- **Acceptance Criteria:** Web attack rules (`RULE-101` to `RULE-105`) trigger on malicious payloads. Engine classifies blocked probes (`4xx`) vs potential exploitation (`200/500`). Correlates attacks with asset open vulnerabilities.
+- **Unit & Integration Tests:**
+  - SQLi, XSS, Path Traversal payload tests against sliding temporal windows.
+  - Disambiguation test: Assert probe returning 403 generates detection alert but lower incident base severity; request returning 200 with SQL error generates CRITICAL severity.
+  - Vulnerability-weighted correlation test: Asset with open finding for XSS on `/search` receives $1.5\times$ risk multiplier penalty when inbound attack targets `/search`.
+
+### 2.13 Module O: Vulnerability Assessment & Scanner Sandboxing
+- **Acceptance Criteria:** Safe passive assessment identifies missing headers, weak TLS, and cookie flags. Active scanner enforces target scope, rate limits, and circuit breakers.
+- **Safety & Sandboxing Tests:**
+  - Zero-Bypass test: Attempt to launch active scan on unverified domain $\to$ assert `403 Forbidden`.
+  - Out-of-scope drop test: Spider encountering third-party redirect (e.g. `https://auth0.com`) $\to$ assert request dropped and logged as `DROPPED_OUT_OF_SCOPE`.
+  - SSRF private IP egress test: Scanner target pointing to `169.254.169.254` or `10.0.0.1` $\to$ assert egress guard immediately blocks socket connection.
+  - Rate limiting test: Verify scanner never exceeds configured requests per second (e.g. 5 req/s).
+  - Emergency abort test: Trigger `POST /scans/:scanId/abort` $\to$ assert running worker immediately terminates execution.
 
 ---
 

@@ -1,7 +1,7 @@
 # VELTRIX: Implementation Tasks & Verification Tracking (`specs/tasks.md`)
 
-**Document Version:** 2.3.0 (Phase 3 Completed)  
-**Status:** In Progress (Phase 0, 1, 2 & 3 Complete; Awaiting Review for Phase 4)  
+**Document Version:** 3.0.0 (Unified Website Security Platform Expansion)  
+**Status:** In Progress (Phases 0, 1, 2, 3, 4 & 5 Complete; Ready for Phase 6)  
 **Execution Matrix:** Balanced 3-Person Team Allocation  
 - **[P1] Person 1:** Frontend & CLI Presentation Lead (React 18, Vite, Tailwind CSS, Recharts, Lucide, CLI Formatters & Terminal UX)  
 - **[P2] Person 2:** Backend Core & Cybersecurity Intelligence Lead (Node.js, TypeScript, Ingestion, Detection, Correlation, Risk, Threat Intel, CLI API Client)  
@@ -74,89 +74,98 @@
 
 ---
 
-## Phase 6 — Threat Intelligence & Incidents
+## Phase 6 — Website Assets & Integrations
 
-- [ ] Not started **TASK-601 [P2]:** Build embedded offline IOC repository (Tor nodes, botnets, proxies) & IP lookup tool.
-- [ ] Not started **TASK-602 [P2]:** Implement Incident Management CRUD and status state machine (`NEW` $\to$ `INVESTIGATING` $\to$ `CONTAINED` $\to$ `RESOLVED`).
-- [ ] Not started **TASK-603 [P2]:** Write unit tests for incident lifecycle transitions and threat intel enrichment (`backend/tests/incidents.test.ts`).
-
----
-
-## Phase 7 — Defensive Response & Audit Ledger
-
-- [ ] Not started **TASK-701 [P3]:** Implement Automated Defensive Response Engine (SOAR) (`backend/src/response/handler.ts`):
-  - Safe simulated containment: `BLOCK_IP`, `SUSPEND_USER`, `REVOKE_SESSION`, `STEP_UP_AUTH`.
-  - Zero-bypass Human Approval Gates for high-impact actions (`PENDING_APPROVAL`).
-  - Target sandboxing: strict validation against whitelisted test identities/CIDRs.
-  - Operational rollback handlers (`UNBLOCK_IP`, `REINSTATE_USER`).
-- [ ] Not started **TASK-702 [P3]:** Implement Cryptographic Security Audit Logger (`backend/src/audit/integrityChain.ts`):
-  - Append-only SHA-256 hash chaining with SQS FIFO serialization.
-  - One-click cryptographic chain verification API (`POST /api/v1/audit-logs/verify-chain`).
-- [ ] Not started **TASK-703 [P3]:** Write unit tests for containment execution, approval gates, rollback, and tamper detection (`backend/tests/response-audit.test.ts`).
+- [ ] Not started **TASK-601 [P2/P3]:** Website Asset Inventory & Domain Registry: Data models, Zod schemas, and storage methods for `Veltrix-WebsiteAssets`. Support primary domain, approved subdomains, environment (`PROD`/`STAGING`/`DEV`), risk tier, and asset health.
+- [ ] Not started **TASK-602 [P2]:** Domain Ownership Verification Service: Implement DNS TXT challenge resolution (`dns.promises.resolveTxt`) and HTTP challenge endpoint verification (`/.well-known/veltrix-challenge/<token>`). Enforce 90-day verification validity window.
+- [ ] Not started **TASK-603 [P2]:** Website Asset Management REST API: Endpoints (`POST /api/v1/websites`, `GET /api/v1/websites`, `GET /api/v1/websites/:siteId`, `PATCH /api/v1/websites/:siteId`, `POST /api/v1/websites/:siteId/verify`, `DELETE /api/v1/websites/:siteId`) with tenant isolation and RBAC.
+- [ ] Not started **TASK-604 [P1/P2]:** Node.js SDK & Express Middleware Package: Author `@veltrix/sdk-node` with `VeltrixClient` and `veltrixMiddleware`. Implement non-blocking ring buffer, async batching, sensitive parameter sanitization, and fail-open design.
+- [ ] Not started **TASK-605 [P3]:** Reverse Proxy & Edge Ingestion Adapters: FluentBit JSON configuration templates for Nginx and Apache logs, and Cloudflare Worker telemetry forwarder script.
+- [ ] Not started **TASK-606 [ALL]:** Phase 6 Automated Test Suites: Comprehensive unit and integration tests covering website CRUD, DNS/HTTP challenge verification, cross-tenant isolation, SDK ring buffer, and log parsing (`backend/tests/websites.test.ts`, `packages/sdk-node/tests/middleware.test.ts`).
 
 ---
 
-## Phase 8 — Frontend SOC Dashboard
+## Phase 7 — Website Attack Monitoring, Correlation & Risk Scoring
 
-- [ ] Not started **TASK-801 [P1]:** Implement responsive SOC Shell Layout (`Header.tsx`, `Sidebar.tsx`) with Midnight Navy & Electric Cyan styling.
-- [ ] Not started **TASK-802 [P1]:** Build `DashboardOverview.tsx` with Recharts telemetry area chart, severity donut, and MITRE tactic matrix.
-- [ ] Not started **TASK-803 [P1]:** Build `LiveEvents.tsx` with real-time telemetry stream, search, and JSON modal inspector.
-- [ ] Not started **TASK-804 [P1]:** Build `ThreatDetection.tsx` with 10 Sigma rules catalog, toggle controls, and threshold sliders.
-- [ ] Not started **TASK-805 [P1]:** Build `Incidents.tsx` with incident queue, explainable risk breakdown cards, and attack kill-chain timeline.
-- [ ] Not started **TASK-806 [P1]:** Build `ThreatIntelligence.tsx` with IOC database and IP enrichment tool.
-- [ ] Not started **TASK-807 [P1]:** Build `ResponseCenter.tsx` with human approval queue, active blocklist, and rollback buttons.
-- [ ] Not started **TASK-808 [P1]:** Build `SimulationLab.tsx` with 6 interactive scenario cards and live terminal stream.
-- [ ] Not started **TASK-809 [P1]:** Build `AuditLogs.tsx` with SHA-256 hash inspector and interactive "Verify Ledger Integrity" tool.
-- [ ] Not started **TASK-810 [P1]:** Build `Settings.tsx` with organization multi-tenancy controls and RBAC matrix.
-- [ ] Not started **TASK-811 [P1]:** Verify frontend production compilation (`npm --prefix frontend run build`).
+- [ ] Not started **TASK-701 [P2]:** Web Attack Signature & Rule Definitions: Implement website-specific detection rules: `RULE-101` (SQL Injection Probing), `RULE-102` (Cross-Site Scripting Probing), `RULE-103` (Path Traversal / LFI Probing), `RULE-104` (Malicious Bot & Scraper Activity), `RULE-105` (Authentication Flow Tampering).
+- [ ] Not started **TASK-702 [P2]:** Attack Probe vs. Exploitation Disambiguation: Telemetry parser evaluating target HTTP response status (`4xx` = blocked probe vs `200`/`500` = potential exploitation) to assign severity and urgency tiers dynamically.
+- [ ] Not started **TASK-703 [P2]:** Multi-Stage Attack Correlation Engine: Correlate inbound web attack detections across sliding temporal windows (15m default), grouping related alerts by `sourceIp` and `siteId` into unified incidents.
+- [ ] Not started **TASK-704 [P2]:** Explainable Mathematical Risk Scoring Engine: Implement deterministic formula: `RiskScore = min(100, Round(S_base * M_freq * M_asset * M_threat + B_sequence))`. Generate transparent factor breakdowns.
+- [ ] Not started **TASK-705 [P2]:** Vulnerability-Aware Attack Prioritization: Cross-reference attack target URIs with known open vulnerability findings on the asset; apply 1.5x risk multiplier penalty when an attack targets an unmitigated vulnerability.
+- [ ] Not started **TASK-706 [P3]:** Incident Persistence & Storage Harness: Store correlated incidents in `Veltrix-Incidents` with GSI1 status/risk indexing, chronologically ordered attack timelines, and tenant isolation.
+- [ ] Not started **TASK-707 [ALL]:** Phase 7 Automated Test Suite: Test all 5 web attack rules, probe vs. exploit classification, correlation grouping, risk math verification, and vulnerability-weighted scoring (`backend/tests/web-detection-correlation.test.ts`).
 
 ---
 
-## Phase 9 — VELTRIX CLI (`@veltrix/cli`)
+## Phase 8 — Website Vulnerability Assessment
 
-- [ ] Not started **TASK-901 [P3]:** Scaffold `cli/` executable (`bin/veltrix.ts`) and packaging (`package.json`).
-- [ ] Not started **TASK-902 [P2]:** Build CLI API Client (`cli/src/api/client.ts`) connecting to shared backend REST endpoints.
-- [ ] Not started **TASK-903 [P1]:** Implement `veltrix auth login / logout / status` with chalk terminal banners.
-- [ ] Not started **TASK-904 [P1]:** Implement `veltrix events list / show / ingest --dry-run` with table formatting.
-- [ ] Not started **TASK-905 [P2]:** Implement `veltrix detect run / rules list / rules test`.
-- [ ] Not started **TASK-906 [P1]:** Implement `veltrix incidents list / show / update / assign` with risk color badges.
-- [ ] Not started **TASK-907 [P2]:** Implement `veltrix intel ip / indicators list / mitre`.
-- [ ] Not started **TASK-908 [P2/P1]:** Implement `veltrix response policies list / preview / execute / history` with interactive confirmation.
-- [ ] Not started **TASK-909 [P1]:** Implement `veltrix simulate list / run / results` with spinners (`ora`).
-- [ ] Not started **TASK-910 [P1]:** Implement `veltrix status` and `veltrix config show`.
-- [ ] Not started **TASK-911 [P2]:** Write CLI unit and integration tests (`cli/tests/cli.test.ts`).
+- [ ] Not started **TASK-801 [P2]:** Vulnerability Assessment Domain Types & Schemas: Define Zod schemas and TypeScript types for scan configurations, scan jobs, vulnerability findings, CVSS v3.1 scores, and remediation guidance.
+- [ ] Not started **TASK-802 [P2]:** Safe Native Passive Assessment Engine: Implement non-destructive passive checks: TLS cipher suites/versions, HTTP security headers (HSTS, CSP, X-Frame-Options, etc.), cookie flags, CORS configuration, and info disclosure banners.
+- [ ] Not started **TASK-803 [P3]:** Isolated Scanner Worker Daemon & ZAP Runner: Implement queue-polled isolated worker daemon. Evaluate and integrate headless OWASP ZAP container runner via ZAP API with safe non-destructive active scan policies.
+- [ ] Not started **TASK-804 [P3]:** Scanning Governance, Egress Guard & Rate Limiter: Enforce domain verification check, HMAC-signed authorization token validation, private IP egress blocking (SSRF prevention), and token-bucket rate limiting (max 5-10 req/s).
+- [ ] Not started **TASK-805 [P2/P3]:** Vulnerability Findings Registry & State Machine: Implement findings persistence in `Veltrix-VulnerabilityFindings`. Support lifecycle states: `OPEN` -> `CONFIRMED` -> `IN_REMEDIATION` -> `RESOLVED` -> `ACCEPTED_RISK` -> `FALSE_POSITIVE`.
+- [ ] Not started **TASK-806 [P2]:** Vulnerability Scanning & Findings REST API: Endpoints: `POST /api/v1/scans`, `GET /api/v1/scans`, `GET /api/v1/scans/:scanId`, `POST /api/v1/scans/:scanId/abort`, `GET /api/v1/findings`, `PATCH /api/v1/findings/:findingId`.
+- [ ] Not started **TASK-807 [P2]:** Security & Compliance Report Generator: Generate structured Executive Summary, Vulnerability Assessment Detail, and OWASP Top 10 compliance reports in JSON and Markdown formats.
+- [ ] Not started **TASK-808 [ALL]:** Phase 8 Automated Test Suite: Test passive analyzers, rate limiter, SSRF egress guard, unauthorized scan rejection, findings state machine transitions, and report generation (`backend/tests/vulnerability-assessment.test.ts`).
 
 ---
 
-## Phase 10 — Full Integration & Simulation Verification
+## Phase 9 — Threat Intelligence & Incident Management
 
-- [ ] Not started **TASK-1001 [ALL]:** Implement the 6 Synthetic Simulation Scenarios (`backend/src/simulation/runner.ts`).
-- [ ] Not started **TASK-1002 [ALL]:** Test complete end-to-end event progression:
-  Telemetry Ingestion $\to$ Normalization $\to$ Sigma Detection $\to$ Correlation $\to$ Risk Scoring $\to$ Incident Creation $\to$ SOAR Containment $\to$ Audit Logging $\to$ Dashboard & CLI Sync.
-- [ ] Not started **TASK-1003 [ALL]:** Verify that identical incident and event telemetry is visible simultaneously in the Web SOC Console and CLI.
-
----
-
-## Phase 11 — Security & DevSecOps Audit
-
-- [ ] Not started **TASK-1101 [P3]:** Run automated dependency vulnerability scan (`npm audit`).
-- [ ] Not started **TASK-1102 [P3]:** Perform static analysis and zero-secret scan across all files.
-- [ ] Not started **TASK-1103 [P3]:** Conduct cross-tenant data isolation security test.
-- [ ] Not started **TASK-1104 [P3]:** Verify cryptographic audit chain tamper-detection tests.
+- [ ] Not started **TASK-901 [P2]:** Embedded Threat Intelligence IOC Catalog: Offline-capable IOC database containing known Tor exit nodes, malicious proxies, and botnet IPs with periodic feed sync capabilities.
+- [ ] Not started **TASK-902 [P2]:** IP Reputation & Dossier Lookup Tool: Comprehensive IP dossier API returning threat score, ASN, geolocation, known attack history across tenant assets, and flag indicators.
+- [ ] Not started **TASK-903 [P2]:** Incident Lifecycle State Machine: Transition workflow: `NEW` -> `INVESTIGATING` -> `CONTAINED` -> `RESOLVED` (or `FALSE_POSITIVE`). Enforce authorized transition rules and assignee tracking.
+- [ ] Not started **TASK-904 [P2]:** Investigative Notes & Evidence Thread: Multi-user analyst comment thread with chronological evidence attachments and tagging.
+- [ ] Not started **TASK-905 [P2]:** Incident Search & Cursor Pagination API: Query incidents with multi-attribute filtering (status, severity, siteId, time range) using signed HMAC-SHA256 cursors.
+- [ ] Not started **TASK-906 [ALL]:** Phase 9 Automated Test Suite: Unit and integration tests for IOC lookups, incident lifecycle transitions, assignee updates, and query cursor pagination (`backend/tests/incidents.test.ts`).
 
 ---
 
-## Phase 12 — Deployment & AWS Infrastructure Verification
+## Phase 10 — Controlled Response & Audit Trail
 
-- [ ] Not started **TASK-1201 [P3]:** Validate AWS SAM template (`infrastructure/template.yaml`).
-- [ ] Not started **TASK-1202 [P3]:** Verify IAM least-privilege policies.
-- [ ] Not started **TASK-1203 [P3]:** Finalize AWS serverless cost optimization analysis (`docs/aws-cost-analysis.md`).
+- [ ] Not started **TASK-1001 [P3]:** Defensive Response Engine (SOAR): Implement containment actions: `BLOCK_IP` (WAF/Cloudflare), `RATE_LIMIT_IP`, `REVOKE_SESSION`, `SUSPEND_USER`, `STEP_UP_AUTH`.
+- [ ] Not started **TASK-1002 [P3]:** Zero-Bypass Human Approval Gates: High-impact actions (`BLOCK_IP`, `SUSPEND_USER`) queue as `PENDING_APPROVAL`. Execution strictly requires Org Admin approval token.
+- [ ] Not started **TASK-1003 [P3]:** Target Sandboxing & Whitelist Validation: Safeguard preventing containment actions from executing against internal gateways, DNS resolvers, or non-whitelisted target IP ranges.
+- [ ] Not started **TASK-1004 [P3]:** Operational Rollback Registry: Handlers for reverting containment actions (`UNBLOCK_IP`, `REINSTATE_USER`) with complete state restoration.
+- [ ] Not started **TASK-1005 [P3]:** Cryptographic Audit Logger & SHA-256 Ledger: Append-only ledger linking records: `Hash_k = SHA256(Hash_{k-1} || Payload)`. Serialized via SQS FIFO queue with `MessageGroupId = orgId`.
+- [ ] Not started **TASK-1006 [ALL]:** Phase 10 Automated Test Suite: Test automated actions, approval gate rejection, target sandboxing, rollback execution, and cryptographic chain verification/tamper detection (`backend/tests/response-audit.test.ts`).
 
 ---
 
-## Phase 13 — Final Quality Assurance & Competition Readiness
+## Phase 11 — Functional SOC Dashboard
 
-- [ ] Not started **TASK-1301 [ALL]:** Run full test suite across backend, frontend, and CLI.
-- [ ] Not started **TASK-1302 [ALL]:** Compile final test and coverage report.
-- [ ] Not started **TASK-1303 [ALL]:** Finalize comprehensive `README.md`, `docs/api-reference.md`, `docs/deployment-guide.md`, and 5-minute `docs/demo-script.md`.
-- [ ] Not started **TASK-1304 [ALL]:** Verify competition-ready status.
+- [ ] Not started **TASK-1101 [P1]:** Navigation Shell & Global State Refactor: Refactor existing `App.tsx` layout into modular shell with persistent sidebar, top navbar, tenant context switcher, and React Query API state management.
+- [ ] Not started **TASK-1102 [P1]:** SOC Executive Overview Page: Live KPI tiles (events, attack detections, open incidents, active scans, asset health), telemetry velocity chart, and severity donut.
+- [ ] Not started **TASK-1103 [P1]:** Live Security Events & Log Explorer: Real-time paginated table of ingested events with search, severity filter, category filter, and JSON event drawer.
+- [ ] Not started **TASK-1104 [P1]:** Threat Detections & Rules Management: Active threat alerts view and 10 Sigma rules catalog with toggle switches, sensitivity sliders, and threshold tuning.
+- [ ] Not started **TASK-1105 [P1]:** Website Asset Inventory & Domain Verification UI: Registered websites list, add website modal, DNS TXT & HTTP challenge instructions, verification status badges, and asset health indicators.
+- [ ] Not started **TASK-1106 [P1]:** Website Integrations Management: Integration catalog (Node.js SDK, Nginx, Apache, Cloudflare, AWS WAF), API key generation, copy-paste config snippets, and agent heartbeats.
+- [ ] Not started **TASK-1107 [P1]:** Vulnerability Assessment & Scan Runner UI: Scan scheduler, on-demand scan modal (Passive vs. Active toggle), live scan progress bar, and emergency abort button.
+- [ ] Not started **TASK-1108 [P1]:** Vulnerability Findings & Reports View: Findings list with severity badges, CVSS filter, affected URI inspector, remediation guidance tab, and export report button (PDF/MD/JSON).
+- [ ] Not started **TASK-1109 [P1]:** Incidents & Attack Kill-Chain Timeline: Incident triage queue, explainable risk score breakdown card, MITRE kill-chain visualizer, analyst notes thread, and SOAR response buttons.
+- [ ] Not started **TASK-1110 [P1]:** Audit Ledger Inspector & Settings: Cryptographic hash chain viewer with one-click "Verify Ledger Integrity" button, user management, and tenant settings.
+
+---
+
+## Phase 12 — CLI, SDK Packaging & Distribution
+
+- [ ] Not started **TASK-1201 [P3]:** `@veltrix/cli` Command Architecture & Client: Scaffold Commander.js CLI client sharing backend REST contracts with colored table formatters and `--json` support.
+- [ ] Not started **TASK-1202 [P1]:** CLI Authentication & Configuration Commands: Implement `veltrix auth login / logout / status` and `veltrix config show / set`.
+- [ ] Not started **TASK-1203 [P1]:** CLI Websites & Telemetry Commands: Implement `veltrix websites list / add / verify` and `veltrix events list / tail / ingest`.
+- [ ] Not started **TASK-1204 [P2]:** CLI Vulnerability Scanning Commands: Implement `veltrix scan launch / status / abort` and `veltrix findings list / show`.
+- [ ] Not started **TASK-1205 [P1/P2]:** CLI Incidents & Response Commands: Implement `veltrix incidents list / show / update` and `veltrix response block / rollback`.
+- [ ] Not started **TASK-1206 [P3]:** SDK Package Bundling & Distribution Setup: Configure `@veltrix/sdk-node` npm packaging, TypeScript declarations, and documentation guides.
+- [ ] Not started **TASK-1207 [ALL]:** Phase 12 Automated Test Suite: CLI execution tests, exit code verification, table formatting tests, and SDK package build checks (`cli/tests/cli.test.ts`).
+
+---
+
+## Phase 13 — End-to-End Integration, Security Audit & Deployment
+
+- [ ] Not started **TASK-1301 [ALL]:** Full-Lifecycle Attack-to-Defense Simulation Lab: Build 6 realistic attack simulation scenarios (SQLi attack against vulnerable website, credential stuffing, brute force, exfiltration, etc.).
+- [ ] Not started **TASK-1302 [ALL]:** End-to-End System Synchronization Verification: Verify seamless real-time synchronization across Web SOC Console, Terminal CLI, and backend DynamoDB stores.
+- [ ] Not started **TASK-1303 [ALL]:** Independent DevSecOps & Dependency Security Audit: Run `npm audit`, zero-secret scan, and static code analysis across all monorepo workspaces. Document zero high/critical vulnerabilities.
+- [ ] Not started **TASK-1304 [ALL]:** Multi-Tenant Penetration & Cross-Tenant Boundary Test: Comprehensive adversarial penetration test asserting zero cross-tenant data leakage across events, websites, scans, findings, and incidents.
+- [ ] Not started **TASK-1305 [ALL]:** Cryptographic Audit Chain Adversarial Tamper Test: Prove that modifying any historical audit record in memory or storage breaks hash chain verification and identifies the tampered record.
+- [ ] Not started **TASK-1306 [ALL]:** AWS Infrastructure SAM Template & Cloud Verification: Validate `infrastructure/template.yaml` (DynamoDB tables, ECS Fargate scanner task, Cognito User Pool, SQS FIFO queues, IAM least privilege).
+- [ ] Not started **TASK-1307 [ALL]:** Documentation & Competition Presentation Kit: Finalize `README.md`, `docs/api-reference.md`, `docs/deployment-guide.md`, and 5-minute competition presentation demo script.
+- [ ] Not started **TASK-1308 [ALL]:** Final Competition & Enterprise Production Readiness Sign-off: Complete final readiness review matrix confirming 100% test pass rate, clean builds, and zero blockers.

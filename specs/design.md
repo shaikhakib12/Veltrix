@@ -1,8 +1,8 @@
 # VELTRIX: Autonomous Cyber Threat Detection & Response Platform
 ## System Architecture & Technical Design (`specs/design.md`)
 
-**Document Version:** 2.2.0 (Verified & Reliability-Hardened)  
-**Status:** In Review (Phase 1 Final Verification)  
+**Document Version:** 3.0.0 (Unified Website Security Platform Design)  
+**Status:** Approved Technical Design  
 **Brand Palette:** Midnight Navy (`#0B0F19`), Electric Cyan (`#00F5FF`), Royal Blue (`#2563EB`)  
 
 ---
@@ -202,3 +202,28 @@ VELTRIX/
 | **Tier A: Development / Year 1 with Free Tier** | **~$0.10 – $1.50 / month** | Covers early testing within AWS Free Tier limits (1M Lambda calls, 1M API Gateway calls in Year 1, 25 GB DynamoDB free, 50K Cognito MAUs free). |
 | **Tier B: Standard Production (Post-Year 1, No WAF)** | **~$2.50 – $4.50 / month** | Post-12-month standard serverless pricing without Free Tier API Gateway discounts; includes ~2 GB CloudWatch log ingestion ($1.00), DynamoDB on-demand writes/reads ($0.35), SQS FIFO ($0.05), and EventBridge ($0.10). |
 | **Tier C: Enterprise Hardened (With AWS WAF & Archival)** | **~$8.50 – $15.00 / month** | Includes AWS WAF baseline ($5.00/WebACL + $1.00/rule/month), S3 Object Lock compliance archival, and CloudWatch metrics alarms. |
+
+---
+
+## 8. Website Security Architecture & Telemetry Ingestion
+
+VELTRIX unifies website telemetry ingestion and attack detection across three interconnected layers:
+1. **Integration Layer (Layer A):** Ingests real-time HTTP events from in-process middleware (`@veltrix/sdk-node`), reverse proxy logs (Nginx, Apache), edge networks (Cloudflare Workers / Logpush), and cloud firewalls (AWS WAF). Telemetry is normalized into the `@veltrix/shared` `SecurityEvent` schema and ingested via `POST /api/v1/events`.
+2. **Analysis Layer (Layer B):** Processes web-specific detection rules (`RULE-101` SQLi, `RULE-102` XSS, `RULE-103` Path Traversal, `RULE-104` Malicious Bots, `RULE-105` Auth Flow Tampering), distinguishes blocked probes (HTTP 4xx) from potential exploitation (HTTP 200/500), and correlates attack paths with known asset vulnerability findings.
+3. **SOC Management Layer (Layer C):** Multi-tenant website asset inventory (`Veltrix-WebsiteAssets`), domain ownership verification (DNS TXT & HTTP challenge), scan scheduling, incident triage, and defensive SOAR containment.
+
+---
+
+## 9. Isolated Vulnerability Scanner Architecture (OWASP ZAP Integration)
+
+To deliver continuous, policy-governed vulnerability assessments without impacting production availability:
+1. **Isolated Worker Sandbox:** Scanning jobs are decoupled from the synchronous API and processed asynchronously by containerized workers (AWS ECS Fargate or Docker containers) consuming from an Amazon SQS FIFO queue.
+2. **Engine Evaluation (OWASP ZAP):** Evaluated and approved as the primary dynamic scanning engine. Controlled via its JSON REST API in daemon mode.
+3. **Safety & Policy Guardrails:**
+   - **Zero-Bypass Ownership Verification:** Active scanning requires verified domain ownership via DNS TXT or HTTP challenge (valid for 90 days).
+   - **Signed Authorization:** Scan jobs require an HMAC-SHA256 `scanAuthorizationToken` signed by an Organization Administrator.
+   - **Strict Scope Whitelisting:** Egress filter strictly restricts scanning to verified primary domains and approved subdomains; out-of-scope third-party URLs and RFC 1918 private IPs (SSRF prevention) are structurally dropped.
+   - **Rate Limiting & Circuit Breaking:** Scan requests are throttled (default 5-10 req/s). If the target returns 3 consecutive HTTP 429/503 responses, the scanner backs off or aborts.
+   - **Non-Destructive Defaults:** Passive assessment (TLS, headers, cookies, CORS, information exposure) is default. Destructive operations (`DELETE`, `DROP`, DoS floods, state-changing form fuzzing) are strictly prohibited.
+4. **Vulnerability Findings Lifecycle:** Detected findings are normalized with CVSS v3.1 scoring, remediation guidance, and tracked in `Veltrix-VulnerabilityFindings` through the state machine: `OPEN` $\to$ `CONFIRMED` $\to$ `IN_REMEDIATION` $\to$ `RESOLVED`.
+
