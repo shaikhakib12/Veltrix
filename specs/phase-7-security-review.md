@@ -117,12 +117,14 @@ All **9 security audit findings** identified during review have been fully remed
 - **Explanation:**
   1. **Complete HMAC Coverage & Cryptographic Integrity:** `computeSignature()` previously only signed a subset of fields. Unsigned fields such as `evidenceReferences` and `verifiedResponseEvidence` could potentially be altered without invalidating the signature.
   2. **Event, Tenant, and Site Binding:** A signed evidence context could previously be detached and replayed across different events, tenants, or website assets without binding verification, or reused after expiration.
-  3. **Authority Access & Service Authentication:** `InternalEvidenceAuthority` previously relied purely on an allowlist of verifier identity strings without authenticating the calling service, and `web-parser.ts` re-exported authority creation helpers publicly.
-  4. **Client-Controlled Response Evidence & WAF Actions:** Client-controlled metadata (`metadata.responseSample`, `metadata.errorMessage`, `metadata.wafAction`) could not be trusted to establish server-verified exploitation or blocked attempts.
+  3. **Service Credential & Key Lifecycle Security:** Service credentials previously had hardcoded fallback strings in source code that could be extracted by repository readers. The HMAC signing key also lacked strict production fail-closed enforcement and key rotation support.
+  4. **Single-Use Replay Protection:** Within the 15-minute validity window, the same signed context could theoretically be resubmitted without a single-use nonce replay registry.
+  5. **Client-Controlled Response Evidence & WAF Actions:** Client-controlled metadata (`metadata.responseSample`, `metadata.errorMessage`, `metadata.wafAction`) could not be trusted to establish server-verified exploitation or blocked attempts.
 - **Fix Applied:**
   1. **Deterministic Canonical Serialization & Complete HMAC Coverage:**
      - Canonical string serialization (`computeCanonicalPayload`) integrity-protects EVERY security-relevant field:
        - `version`: `'VELTRIX_EVIDENCE_V2'`
+       - `nonce`: cryptographically random single-use nonce
        - `eventId`: bound event identifier
        - `orgId`: bound organization identifier
        - `siteId`: bound website asset identifier
@@ -136,19 +138,25 @@ All **9 security audit findings** identified during review have been fully remed
        - `wafAction`: verified WAF intervention action (`ALLOW`, `BLOCK`, `CHALLENGE`, `LOG`, or `'NONE'`)
        - `wafRuleId`: verified WAF rule identifier
      - Signature verified using constant-time comparison (`timingSafeEqual`).
-  2. **Anti-Replay, Event Binding & Freshness Verification:**
+  2. **Anti-Replay, Single-Use Nonce & Freshness Verification:**
+     - Every context carries a unique random `nonce`.
+     - `EvidenceReplayRegistry` tracks consumed nonces within the 15-minute sliding window; replaying the same context within that window is detected and rejected.
      - Context explicitly carries `eventId`, `orgId`, and `siteId`.
      - `normalizeWebTelemetry` verifies that `context.eventId === event.eventId`, `context.orgId === event.orgId`, and `context.siteId === (event.metadata?.siteId || '')`. Any cross-event, cross-tenant, or cross-site replay is rejected.
      - Freshness checks enforce that verification timestamps cannot be in the future (> 60s clock skew) or older than 15 minutes (`MAX_EVIDENCE_AGE_MS = 900,000 ms`).
-  3. **Caller Service Authentication & Restricted Authority:**
-     - `createContext()` requires a valid `serviceAuthToken` matching pre-shared credentials (`INTERNAL_SERVICE_CREDENTIALS`) for the approved verifier identity.
-     - Unauthorized code paths without the secret credential cannot construct signed evidence contexts.
-     - Removed public re-exports of `createInternalTrustedEvidenceContext`, `InternalEvidenceAuthority`, and `getDefaultInternalEvidenceAuthority` from `web-parser.ts`.
-     - Preserved authenticated WAF collector verification via authorized collector credentials.
-  4. **Ingestion & Persistence Storage Boundary Protection:**
+  3. **Fail-Closed Service Credential Storage & Rotation:**
+     - Removed all hardcoded fallback credentials from source code.
+     - In production / deployed environments, credentials must be injected via secure environment variables or AWS Secrets Manager. Missing credentials fail closed with `UNCONFIGURED_SERVICE_CREDENTIAL`.
+     - Supports multiple valid credentials per service for seamless credential rotation.
+  4. **HMAC Signing Key Lifecycle & Key Rotation:**
+     - Enforces minimum 256-bit (32 bytes) key entropy.
+     - Missing signing keys in production mode fail closed with `FATAL_KEY_CONFIG_ERROR`.
+     - Supports key rotation: allows `rotatedVerificationKeys` so in-flight contexts signed with a previous key during the 15-minute window remain valid without downtime.
+     - Caller service credentials and HMAC signing keys are strictly separated.
+  5. **Ingestion & Persistence Storage Boundary Protection:**
      - Public ingestion schema rejects any event carrying `trustedEvidenceContext`.
      - `DynamoDBStore` and `MemoryStore` strip `trustedEvidenceContext` on save, returning undefined on read.
-- **Test Evidence:** 11 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
+- **Test Evidence:** 14 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
   - `1. modifying signed responseBody invalidates the signature`
   - `2. modifying signed errorMessage invalidates the signature`
   - `3. modifying signed wafAction invalidates the signature`
@@ -158,8 +166,11 @@ All **9 security audit findings** identified during review have been fully remed
   - `7. changing siteId invalidates the context`
   - `8. expired or future-dated contexts are rejected`
   - `9. a context from one website cannot be replayed for another`
-  - `10. unauthorized code paths cannot issue trusted evidence`
-  - `11. genuine authenticated evidence continues working`
+  - `10. same-context replay within its validity window is detected and rejected by EvidenceReplayRegistry`
+  - `11. service credential security: missing credentials fail closed, invalid credentials rejected, and rotation works`
+  - `12. HMAC signing key security: missing key in production fails closed, incorrect key rejected, and rotation supported`
+  - `13. external access to trusted evidence creation is prohibited across schemas, parser, and public exports`
+  - `14. genuine authenticated evidence continues working`
 
 ---
 

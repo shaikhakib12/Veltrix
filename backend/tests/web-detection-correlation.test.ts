@@ -21,8 +21,22 @@ import {
   InternalEvidenceAuthority,
   getDefaultInternalEvidenceAuthority,
   issueTrustedEvidenceContext,
-  INTERNAL_SERVICE_CREDENTIALS,
+  _resetInternalEvidenceAuthorityForTesting,
+  type ApprovedVerifierIdentity,
 } from '../src/detection/evidence-authority.js';
+
+export const TEST_SERVICE_CREDENTIALS: Record<ApprovedVerifierIdentity, string> = {
+  'canary-service:v1': 'test-secret-canary-service-credential-2026',
+  'core-scanner:active-audit': 'test-secret-core-scanner-credential-2026',
+  'internal-audit-worker:core': 'test-secret-audit-worker-credential-2026',
+  'sensor:canary:db': 'test-secret-sensor-db-credential-2026',
+  'sensor:canary:files': 'test-secret-sensor-files-credential-2026',
+  'collector:nginx:authenticated': 'test-secret-collector-nginx-credential-2026',
+  'waf:edge-gateway:authenticated': 'test-secret-waf-edge-credential-2026',
+};
+export const TEST_SIGNING_KEY = 'test-authority-hmac-sha256-signing-key-32bytes!';
+export const INTERNAL_SERVICE_CREDENTIALS = TEST_SERVICE_CREDENTIALS;
+
 import { JwtService } from '../src/auth/jwt-service.js';
 import { LocalAuthProvider } from '../src/auth/local-auth-provider.js';
 import { resetAuthProviderForTesting } from '../src/auth/index.js';
@@ -72,6 +86,12 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
   };
 
   beforeEach(async () => {
+    const testAuthority = new InternalEvidenceAuthority({
+      signingKey: TEST_SIGNING_KEY,
+      serviceCredentials: TEST_SERVICE_CREDENTIALS,
+    });
+    _resetInternalEvidenceAuthorityForTesting(testAuthority);
+
     jwtService = new JwtService('test-secret-phase-7-jwt-key-32chars');
     const localProvider = new LocalAuthProvider(jwtService);
     resetAuthProviderForTesting(localProvider);
@@ -1309,7 +1329,11 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
   });
 
   describe('10. PR #10 Final Cryptographic Integrity & Context Binding Hardening', () => {
-    const authority = getDefaultInternalEvidenceAuthority();
+    let authority: InternalEvidenceAuthority;
+
+    beforeEach(() => {
+      authority = getDefaultInternalEvidenceAuthority();
+    });
 
     // Required Test 1: Modifying signed responseBody invalidates the signature
     it('1. modifying signed responseBody invalidates the signature', () => {
@@ -1686,7 +1710,8 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
           sourceSystem: 'client:external',
           metadata: { siteId: 'site-public-blog', requestUri: "/posts?id=1'" },
         },
-        { trustedContext: genuineSiteAContext }
+        { trustedContext: genuineSiteAContext },
+        authority
       );
 
       // Website mismatch rejects context and falls back to UNTRUSTED_CLIENT
@@ -1695,54 +1720,189 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       expect(parsedReplay.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
     });
 
-    // Required Test 10: Unauthorized code paths cannot issue trusted evidence
-    it('10. unauthorized code paths cannot issue trusted evidence', async () => {
-      // A. Missing serviceAuthToken throws UNAUTHORIZED_SERVICE
+    // Required Test 10: Same-context replay within its validity window is detected and rejected
+    it('10. same-context replay within its validity window is detected and rejected by EvidenceReplayRegistry', () => {
+      const genuineContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId: '01a19700-0000-7000-8000-000000000310r',
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      const event: SecurityEvent = {
+        eventId: '01a19700-0000-7000-8000-000000000310r',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.210',
+        sourceSystem: 'sensor:canary:db',
+        metadata: { siteId },
+      };
+
+      // First evaluation consumes the nonce and successfully elevates confidence
+      const parsedFirst = normalizeWebTelemetry(event, { trustedContext: genuineContext }, authority);
+      expect(parsedFirst.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(parsedFirst.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+
+      // Second submission of the exact same valid context within the 15-minute window:
+      // ReplayRegistry detects nonce reuse and rejects the context!
+      const parsedSecond = normalizeWebTelemetry(event, { trustedContext: genuineContext }, authority);
+      expect(parsedSecond.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsedSecond.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+    });
+
+    // Required Test 11: Service credential security & fail-closed behavior
+    it('11. service credential security: missing credentials fail closed, invalid credentials rejected, and rotation works', () => {
+      // A. Unconfigured service credential throws UNCONFIGURED_SERVICE_CREDENTIAL
+      const unconfiguredAuthority = new InternalEvidenceAuthority({
+        signingKey: TEST_SIGNING_KEY,
+        serviceCredentials: {}, // No credentials configured for any service
+      });
+      expect(() => {
+        unconfiguredAuthority.createContext({
+          serviceAuthToken: 'any-secret-token',
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'canary-service:v1',
+          eventId: '01a19700-0000-7000-8000-000000000311u',
+          orgId,
+          siteId,
+        });
+      }).toThrow(/UNCONFIGURED_SERVICE_CREDENTIAL/);
+
+      // B. Missing serviceAuthToken throws UNAUTHORIZED_SERVICE
       expect(() => {
         authority.createContext({
           serviceAuthToken: '',
           provenance: 'TRUSTED_SERVER_COMPONENT',
           verifierIdentity: 'canary-service:v1',
-          eventId: '01a19700-0000-7000-8000-000000000310a',
+          eventId: '01a19700-0000-7000-8000-000000000311m',
           orgId,
           siteId,
-          verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
         });
       }).toThrow(/UNAUTHORIZED_SERVICE.*Missing service authentication/);
 
-      // B. Invalid serviceAuthToken throws UNAUTHORIZED_SERVICE
+      // C. Invalid serviceAuthToken throws UNAUTHORIZED_SERVICE
       expect(() => {
         authority.createContext({
-          serviceAuthToken: 'forged-invalid-secret-key-12345',
+          serviceAuthToken: 'incorrect-service-secret-token-12345',
           provenance: 'TRUSTED_SERVER_COMPONENT',
           verifierIdentity: 'canary-service:v1',
-          eventId: '01a19700-0000-7000-8000-000000000310b',
+          eventId: '01a19700-0000-7000-8000-000000000311i',
           orgId,
           siteId,
-          verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
         });
       }).toThrow(/UNAUTHORIZED_SERVICE.*Invalid service authentication/);
 
-      // C. Service token for another service cannot be used for a different verifier
+      // D. Token for service A cannot authenticate as service B
       expect(() => {
         authority.createContext({
           serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['collector:nginx:authenticated'],
           provenance: 'TRUSTED_SERVER_COMPONENT',
           verifierIdentity: 'sensor:canary:db',
-          eventId: '01a19700-0000-7000-8000-000000000310c',
+          eventId: '01a19700-0000-7000-8000-000000000311x',
           orgId,
           siteId,
-          verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
         });
       }).toThrow(/UNAUTHORIZED_SERVICE.*Invalid service authentication/);
 
-      // D. web-parser.ts does NOT export createContext or InternalEvidenceAuthority
+      // E. Rotated service credentials: both active and previous tokens authenticate successfully
+      const rotatingAuthority = new InternalEvidenceAuthority({
+        signingKey: TEST_SIGNING_KEY,
+        serviceCredentials: {
+          'canary-service:v1': ['active-new-token-12345678', 'retiring-old-token-87654321'],
+        },
+      });
+
+      expect(() => {
+        rotatingAuthority.createContext({
+          serviceAuthToken: 'retiring-old-token-87654321',
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'canary-service:v1',
+          eventId: '01a19700-0000-7000-8000-000000000311r1',
+          orgId,
+          siteId,
+        });
+      }).not.toThrow();
+
+      expect(() => {
+        rotatingAuthority.createContext({
+          serviceAuthToken: 'active-new-token-12345678',
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'canary-service:v1',
+          eventId: '01a19700-0000-7000-8000-000000000311r2',
+          orgId,
+          siteId,
+        });
+      }).not.toThrow();
+    });
+
+    // Required Test 12: HMAC signing key security, entropy enforcement, and key rotation
+    it('12. HMAC signing key security: missing key in production fails closed, incorrect key rejected, and rotation supported', () => {
+      // A. Missing signing key in production mode throws FATAL_KEY_CONFIG_ERROR
+      expect(() => {
+        new InternalEvidenceAuthority({
+          strictEnforcement: true,
+          // signingKey omitted
+        });
+      }).toThrow(/FATAL_KEY_CONFIG_ERROR/);
+
+      // B. Signing key shorter than 32 bytes (256 bits) throws FATAL_KEY_CONFIG_ERROR
+      expect(() => {
+        new InternalEvidenceAuthority({
+          signingKey: 'short-key-under-32-bytes',
+        });
+      }).toThrow(/FATAL_KEY_CONFIG_ERROR.*at least 32 bytes/);
+
+      // C. Context signed with a different key is rejected
+      const foreignAuthority = new InternalEvidenceAuthority({
+        signingKey: 'foreign-authority-signing-key-32bytes-1',
+        serviceCredentials: INTERNAL_SERVICE_CREDENTIALS,
+      });
+      const foreignContext = foreignAuthority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:db'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'sensor:canary:db',
+        eventId: '01a19700-0000-7000-8000-000000000312f',
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
+      });
+      expect(authority.verifyContext(foreignContext)).toBe(false);
+
+      // D. Key rotation: contexts signed with older key verify successfully against rotatedVerificationKeys
+      const rotatedAuthority = new InternalEvidenceAuthority({
+        signingKey: 'new-primary-signing-key-32bytes-long!',
+        rotatedVerificationKeys: [TEST_SIGNING_KEY],
+        serviceCredentials: INTERNAL_SERVICE_CREDENTIALS,
+      });
+
+      const oldKeyContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:db'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'sensor:canary:db',
+        eventId: '01a19700-0000-7000-8000-000000000312k',
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
+      });
+
+      expect(rotatedAuthority.verifyContext(oldKeyContext)).toBe(true);
+    });
+
+    // Required Test 13: External access to trusted evidence creation is prohibited
+    it('13. external access to trusted evidence creation is prohibited across schemas, parser, and public exports', async () => {
+      // A. web-parser.ts does NOT export createContext or InternalEvidenceAuthority
       const webParserExports = Object.keys(webParser);
       expect(webParserExports).not.toContain('createInternalTrustedEvidenceContext');
       expect(webParserExports).not.toContain('InternalEvidenceAuthority');
       expect(webParserExports).not.toContain('getDefaultInternalEvidenceAuthority');
 
-      // E. Public ingestion schema rejects event containing trustedEvidenceContext
+      // B. Public ingestion schema rejects event containing trustedEvidenceContext
       const eventService = new EventService(storage);
       const payloadWithContext = {
         eventType: 'web.attack.sqli',
@@ -1752,11 +1912,12 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         sourceSystem: 'client:external',
         trustedEvidenceContext: {
           version: 'VELTRIX_EVIDENCE_V2',
+          nonce: 'fake-nonce-001',
           verifiedProvenance: 'TRUSTED_SERVER_COMPONENT',
           verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
           verifierIdentity: 'canary-service:v1',
           verificationTimestamp: new Date().toISOString(),
-          eventId: '01a19700-0000-7000-8000-000000000310e',
+          eventId: '01a19700-0000-7000-8000-000000000313e',
           orgId,
           siteId,
           evidenceReferences: [],
@@ -1766,8 +1927,8 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       await expect(eventService.ingestSingleEvent(payloadWithContext, orgId)).rejects.toThrow();
     });
 
-    // Required Test 11: Genuine authenticated evidence continues working
-    it('11. genuine authenticated evidence continues working', async () => {
+    // Required Test 14: Genuine authenticated evidence continues working
+    it('14. genuine authenticated evidence continues working', async () => {
       // A. Verified canary token breach elevates to CONFIRMED_EXPLOITATION
       const trustedCanary = authority.createContext({
         serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['canary-service:v1'],
