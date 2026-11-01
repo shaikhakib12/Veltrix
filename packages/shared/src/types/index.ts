@@ -49,6 +49,53 @@ export interface IngestionResponseData {
   results: IngestionItemResult[];
 }
 
+
+export interface DetectionEvidence {
+  matchedRuleId: string;
+  matchedThreshold: number;
+  actualCount?: number;
+  timeWindowSeconds?: number;
+  targetEntity?: {
+    type: 'IP' | 'USER' | 'SYSTEM' | 'RESOURCE';
+    value: string;
+  };
+  triggeringEvents: string[]; // eventIds
+  details: Record<string, unknown>;
+}
+
+export interface Detection {
+  detectionId: string;
+  ruleId: string;
+  ruleName: string;
+  orgId: string;
+  severity: Severity;
+  confidence: number; // 0 - 100
+  category: EventCategory;
+  title: string;
+  description: string;
+  detectedAt: string; // ISO 8601 UTC
+  relatedEventIds: string[];
+  evidence: DetectionEvidence;
+  mitreAttack?: {
+    techniqueId: string;
+    techniqueName: string;
+    tactic: string;
+  };
+  status?: 'ACTIVE' | 'RESOLVED' | 'SUPPRESSED';
+  dedupKey?: string;
+  ttl?: number;
+}
+
+export interface DetectionQueryOptions {
+  ruleId?: string;
+  severity?: Severity;
+  status?: 'ACTIVE' | 'RESOLVED' | 'SUPPRESSED';
+  startTime?: string;
+  endTime?: string;
+  limit?: number;
+  cursor?: string;
+}
+
 export interface DetectionRule {
   ruleId: string;
   orgId: string;
@@ -110,6 +157,8 @@ export interface Incident {
   updatedAt: string;
 }
 
+export type IndicatorProvenance = 'VERIFIED_FEED' | 'MANUAL_ANALYST';
+
 export interface ThreatIndicator {
   indicatorId: string;
   type: 'IP' | 'DOMAIN' | 'HASH' | 'USER_AGENT';
@@ -118,8 +167,13 @@ export interface ThreatIndicator {
   severity: Severity;
   confidence: number; // 0 - 100
   source: string;
+  provenance: IndicatorProvenance;
+  orgId?: string; // Tenant-specific for manual indicators, 'global' or undefined for global verified feeds
+  submittedBy?: string; // Verified username of manual analyst
+  retrievedAt?: string; // Retrieval timestamp for external feeds
   firstSeen: string;
   lastSeen: string;
+  expiresAt?: string;
   isFlagged: boolean;
   metadata?: Record<string, unknown>;
 }

@@ -4,6 +4,8 @@ import type {
   IncidentStatus,
   Severity,
   DetectionRule,
+  Detection,
+  DetectionQueryOptions,
   ThreatIndicator,
   ResponseExecution,
   AuditLog,
@@ -34,6 +36,16 @@ export interface StorageInterface {
   ): Promise<{ items: SecurityEvent[]; nextCursor?: string; total?: number }>;
   getEventById(orgId: string, eventId: string): Promise<SecurityEvent | null>;
 
+  // --- Threat Detections ---
+  saveDetection(
+    detection: Detection
+  ): Promise<{ saved: boolean; isDuplicate: boolean }>;
+  getDetections(
+    orgId: string,
+    options?: DetectionQueryOptions
+  ): Promise<{ items: Detection[]; nextCursor?: string; total?: number }>;
+  getDetectionById(orgId: string, detectionId: string): Promise<Detection | null>;
+
   // --- Incidents Management ---
   saveIncident(incident: Incident): Promise<void>;
   getIncidents(
@@ -62,13 +74,30 @@ export interface StorageInterface {
     updates: Partial<DetectionRule>
   ): Promise<DetectionRule | null>;
 
+  saveDetectionRule(rule: DetectionRule): Promise<void>;
+  getDetectionRules(orgId: string): Promise<DetectionRule[]>;
+  getDetectionRuleById(orgId: string, ruleId: string): Promise<DetectionRule | null>;
+  updateDetectionRule(
+    orgId: string,
+    ruleId: string,
+    updates: Partial<DetectionRule>
+  ): Promise<DetectionRule | null>;
+
   // --- Threat Indicators ---
   saveIndicator(indicator: ThreatIndicator): Promise<void>;
   getIndicatorByValue(
     type: ThreatIndicator['type'],
-    value: string
+    value: string,
+    orgId?: string
   ): Promise<ThreatIndicator | null>;
-  listIndicators(limit?: number): Promise<ThreatIndicator[]>;
+  getIndicatorById(indicatorId: string, orgId?: string): Promise<ThreatIndicator | null>;
+  listIndicators(orgId?: string, limit?: number): Promise<ThreatIndicator[]>;
+  updateIndicator(
+    indicatorId: string,
+    updates: Partial<ThreatIndicator>,
+    orgId?: string
+  ): Promise<ThreatIndicator | null>;
+  deleteIndicator(indicatorId: string, orgId?: string): Promise<boolean>;
 
   // --- Defensive Response Executions ---
   saveExecution(execution: ResponseExecution): Promise<void>;

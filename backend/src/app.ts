@@ -3,6 +3,9 @@ import cors from 'cors';
 import { PLATFORM_INFO, type ApiResponse, type ApiErrorResponse } from '@veltrix/shared';
 import { createAuthRouter } from './routes/auth.js';
 import { createEventsRouter } from './routes/events.js';
+import { createDetectionsRouter } from './routes/detections.js';
+import { createDetectionRulesRouter } from './routes/detection-rules.js';
+import { createThreatIndicatorsRouter } from './routes/threat-indicators.js';
 import { authenticate } from './middleware/auth.js';
 import { enforceTenantIsolation } from './middleware/tenant.js';
 import { requireRole } from './middleware/rbac.js';
@@ -70,6 +73,11 @@ export function createApp() {
 
   // Telemetry Ingestion & Query Routes (TASK-401, TASK-402)
   app.use('/api/v1/events', createEventsRouter());
+
+  // Threat Detection & Query Routes (TASK-501 to TASK-504)
+  app.use('/api/v1/detections', createDetectionsRouter());
+  app.use('/api/v1/detection-rules', createDetectionRulesRouter());
+  app.use('/api/v1/threat-indicators', createThreatIndicatorsRouter());
 
   // Multi-Tenant Isolation Verification Route (TASK-303)
   app.get(

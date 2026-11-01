@@ -76,6 +76,8 @@ Resources:
         Enabled: true
       SSESpecification:
         SSEEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_IMAGE
 
   IncidentsTable:
     Type: AWS::DynamoDB::Table
@@ -396,10 +398,55 @@ Resources:
       UserPoolId: !Ref CognitoUserPool
       Precedence: 30
 
+  # ============================================================================
+  # 5. Detection Engine Asynchronous Worker (TASK-501 to TASK-505)
+  # ============================================================================
+
+  DetectionEngineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub 'veltrix-detection-engine-${Environment}'
+      Handler: dist/detection/stream-handler.handleSecurityEventStream
+      CodeUri: ../backend
+      Description: Asynchronous Lambda processor triggered by DynamoDB Streams to evaluate threat detection rules
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SecurityEventsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IncidentsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref DetectionRulesTable
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          STORAGE_MODE: aws
+          DYNAMODB_EVENTS_TABLE: !Ref SecurityEventsTable
+          DYNAMODB_INCIDENTS_TABLE: !Ref IncidentsTable
+          DYNAMODB_RULES_TABLE: !Ref DetectionRulesTable
+      Events:
+        SecurityEventStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt SecurityEventsTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 25
+            MaximumBatchingWindowInSeconds: 2
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT"]}'
+            BisectBatchOnFunctionError: true
+            MaximumRetryAttempts: 3
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
 Outputs:
   SecurityEventsTableName:
     Description: DynamoDB Security Events table
     Value: !Ref SecurityEventsTable
+
+  SecurityEventsTableStreamArn:
+    Description: DynamoDB Security Events table Stream ARN
+    Value: !GetAtt SecurityEventsTable.StreamArn
 
   AuditQueueUrl:
     Description: SQS FIFO Audit Queue URL

@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import type {
   SecurityEvent,
   Incident,
+  Detection,
+  DetectionQueryOptions,
   IncidentStatus,
   Severity,
   DetectionRule,
@@ -18,6 +20,8 @@ export class MemoryStore implements StorageInterface {
   private eventsByOrg: Map<string, SecurityEvent[]> = new Map();
   private eventDeduplicationKeys: Map<string, Set<string>> = new Map();
   private idempotencyRecordsByOrg: Map<string, Map<string, { payloadHash: string; eventId: string }>> = new Map();
+  private detectionsByOrg: Map<string, Detection[]> = new Map();
+  private detectionDedupKeys: Map<string, Set<string>> = new Map();
 
   private incidentsByOrg: Map<string, Map<string, Incident>> = new Map();
   private rulesByOrg: Map<string, Map<string, DetectionRule>> = new Map();
@@ -153,6 +157,112 @@ export class MemoryStore implements StorageInterface {
     return event ? { ...event } : null;
   }
 
+  // --- Threat Detections ---
+
+  async saveDetection(
+    detection: Detection
+  ): Promise<{ saved: boolean; isDuplicate: boolean }> {
+    const orgId = detection.orgId;
+    if (!this.detectionsByOrg.has(orgId)) {
+      this.detectionsByOrg.set(orgId, []);
+      this.detectionDedupKeys.set(orgId, new Set());
+    }
+
+    const dedupKey = detection.dedupKey || detection.detectionId;
+    const orgDedupKeys = this.detectionDedupKeys.get(orgId)!;
+    const orgDetections = this.detectionsByOrg.get(orgId)!;
+
+    if (orgDedupKeys.has(dedupKey) || orgDetections.some((d) => d.detectionId === detection.detectionId)) {
+      return { saved: false, isDuplicate: true };
+    }
+
+    orgDedupKeys.add(dedupKey);
+    orgDetections.push({ ...detection });
+    return { saved: true, isDuplicate: false };
+  }
+
+  async getDetections(
+    orgId: string,
+    options?: DetectionQueryOptions
+  ): Promise<{ items: Detection[]; nextCursor?: string; total?: number }> {
+    const detections = this.detectionsByOrg.get(orgId) || [];
+    let filtered = [...detections];
+
+    if (options?.ruleId) {
+      filtered = filtered.filter((d) => d.ruleId === options.ruleId);
+    }
+    if (options?.severity) {
+      filtered = filtered.filter((d) => d.severity === options.severity);
+    }
+    if (options?.status) {
+      filtered = filtered.filter((d) => d.status === options.status);
+    }
+    if (options?.startTime) {
+      const startMs = new Date(options.startTime).getTime();
+      filtered = filtered.filter((d) => new Date(d.detectedAt).getTime() >= startMs);
+    }
+    if (options?.endTime) {
+      const endMs = new Date(options.endTime).getTime();
+      filtered = filtered.filter((d) => new Date(d.detectedAt).getTime() <= endMs);
+    }
+
+    filtered.sort((a, b) => {
+      const diff = new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime();
+      return diff !== 0 ? diff : b.detectionId.localeCompare(a.detectionId);
+    });
+
+    const total = filtered.length;
+    const limit = options?.limit || 50;
+
+    let startIndex = 0;
+    if (options?.cursor) {
+      try {
+        const verified = verifyCursor(options.cursor, orgId, options as any);
+        startIndex = verified.offset ?? 0;
+      } catch {
+        throw new Error('INVALID_CURSOR');
+      }
+    }
+
+    const paginated = filtered.slice(startIndex, startIndex + limit);
+    const nextOffset = startIndex + limit;
+    const filterHash = computeFilterHash(options as any);
+    const nextCursor =
+      nextOffset < filtered.length
+        ? signCursor({ orgId, filterHash, offset: nextOffset })
+        : undefined;
+
+    return { items: paginated, nextCursor, total };
+  }
+
+  async getDetectionById(orgId: string, detectionId: string): Promise<Detection | null> {
+    const detections = this.detectionsByOrg.get(orgId) || [];
+    const found = detections.find((d) => d.detectionId === detectionId);
+    return found ? { ...found } : null;
+  }
+
+  // --- Detection Rules Aliases for StorageInterface ---
+  async saveDetectionRule(rule: DetectionRule): Promise<void> {
+    return this.saveRule(rule);
+  }
+
+  async getDetectionRules(orgId: string): Promise<DetectionRule[]> {
+    return this.getRules(orgId);
+  }
+
+  async getDetectionRuleById(orgId: string, ruleId: string): Promise<DetectionRule | null> {
+    return this.getRuleById(orgId, ruleId);
+  }
+
+  async updateDetectionRule(
+    orgId: string,
+    ruleId: string,
+    updates: Partial<DetectionRule>
+  ): Promise<DetectionRule | null> {
+    return this.updateRule(orgId, ruleId, updates);
+  }
+
+
   // --- Incidents Management ---
 
   async saveIncident(incident: Incident): Promise<void> {
@@ -254,23 +364,78 @@ export class MemoryStore implements StorageInterface {
   // --- Threat Indicators ---
 
   async saveIndicator(indicator: ThreatIndicator): Promise<void> {
-    const key = `${indicator.type}:${indicator.value}`;
+    const key = indicator.indicatorId || `${indicator.type}:${indicator.value}:${indicator.orgId || 'global'}`;
     this.threatIndicators.set(key, { ...indicator });
+  }
+
+  async getIndicatorById(indicatorId: string, orgId?: string): Promise<ThreatIndicator | null> {
+    for (const ind of this.threatIndicators.values()) {
+      if (ind.indicatorId === indicatorId) {
+        if (orgId && ind.orgId && ind.orgId !== 'global' && ind.orgId !== orgId) {
+          return null; // Cross-tenant isolation
+        }
+        return { ...ind };
+      }
+    }
+    return null;
   }
 
   async getIndicatorByValue(
     type: ThreatIndicator['type'],
-    value: string
+    value: string,
+    orgId?: string
   ): Promise<ThreatIndicator | null> {
-    const key = `${type}:${value}`;
-    const indicator = this.threatIndicators.get(key);
-    return indicator ? { ...indicator } : null;
+    for (const ind of this.threatIndicators.values()) {
+      if (ind.type === type && ind.value === value) {
+        if (orgId && ind.orgId && ind.orgId !== 'global' && ind.orgId !== orgId) {
+          continue; // Skip indicators belonging to another tenant
+        }
+        return { ...ind };
+      }
+    }
+    return null;
   }
 
-  async listIndicators(limit = 100): Promise<ThreatIndicator[]> {
+  async listIndicators(orgId?: string, limit = 100): Promise<ThreatIndicator[]> {
     return Array.from(this.threatIndicators.values())
+      .filter((i) => !orgId || !i.orgId || i.orgId === 'global' || i.orgId === orgId)
       .slice(0, limit)
       .map((i) => ({ ...i }));
+  }
+
+  async updateIndicator(
+    indicatorId: string,
+    updates: Partial<ThreatIndicator>,
+    orgId?: string
+  ): Promise<ThreatIndicator | null> {
+    for (const [key, ind] of this.threatIndicators.entries()) {
+      if (ind.indicatorId === indicatorId) {
+        if (orgId && ind.orgId && ind.orgId !== 'global' && ind.orgId !== orgId) {
+          const err = new Error('FORBIDDEN_CROSS_TENANT_ACCESS');
+          (err as unknown as { code: string }).code = 'FORBIDDEN_CROSS_TENANT_ACCESS';
+          throw err;
+        }
+        const updated = { ...ind, ...updates, indicatorId: ind.indicatorId };
+        this.threatIndicators.set(key, updated);
+        return { ...updated };
+      }
+    }
+    return null;
+  }
+
+  async deleteIndicator(indicatorId: string, orgId?: string): Promise<boolean> {
+    for (const [key, ind] of this.threatIndicators.entries()) {
+      if (ind.indicatorId === indicatorId) {
+        if (orgId && ind.orgId && ind.orgId !== 'global' && ind.orgId !== orgId) {
+          const err = new Error('FORBIDDEN_CROSS_TENANT_ACCESS');
+          (err as unknown as { code: string }).code = 'FORBIDDEN_CROSS_TENANT_ACCESS';
+          throw err;
+        }
+        this.threatIndicators.delete(key);
+        return true;
+      }
+    }
+    return false;
   }
 
   // --- Defensive Response Executions ---
@@ -436,6 +601,8 @@ export class MemoryStore implements StorageInterface {
 
   async clearAll(): Promise<void> {
     this.eventsByOrg.clear();
+    this.detectionsByOrg.clear();
+    this.detectionDedupKeys.clear();
     this.eventDeduplicationKeys.clear();
     this.idempotencyRecordsByOrg.clear();
     this.incidentsByOrg.clear();
