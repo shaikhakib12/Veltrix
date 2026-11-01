@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import type { SecurityEvent, WebsiteAsset, Detection } from '@veltrix/shared';
 import { createApp } from '../src/app.js';
 import { MemoryStore } from '../src/storage/memory-store.js';
 import { DetectionEngine } from '../src/detection/engine.js';
-import { DetectionPipeline } from '../src/detection/pipeline.js';
+import { DetectionPipeline, setDetectionPipelineForTesting } from '../src/detection/pipeline.js';
 import { AttackCorrelationEngine } from '../src/correlation/engine.js';
 import { RiskScoringEngine } from '../src/risk/engine.js';
 import { VulnerabilityCorrelator } from '../src/correlation/vuln-correlator.js';
@@ -20,12 +20,19 @@ import { normalizeWebTelemetry, normalizeWebTelemetryAsync } from '../src/detect
 import {
   InternalEvidenceAuthority,
   getDefaultInternalEvidenceAuthority,
+  initializeDefaultInternalEvidenceAuthority,
+  _initializeDefaultInternalEvidenceAuthorityForTesting,
   issueTrustedEvidenceContext,
   _resetInternalEvidenceAuthorityForTesting,
   type ApprovedVerifierIdentity,
   DynamoDBReplayRegistry,
   MemoryReplayRegistry,
+  EvidenceReplayRegistry,
 } from '../src/detection/evidence-authority.js';
+import { marshall } from '@aws-sdk/util-dynamodb';
+import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { handleSecurityEventStream, type DynamoDBStreamEvent } from '../src/detection/stream-handler.js';
+import { DynamoDBStore } from '../src/storage/dynamodb-store.js';
 import { SecretLoader } from '../src/auth/secret-loader.js';
 
 export const TEST_SERVICE_CREDENTIALS: Record<ApprovedVerifierIdentity, string> = {
@@ -146,6 +153,7 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       engine,
       correlationEngine,
     });
+    setDetectionPipelineForTesting(pipeline);
     app = createApp();
 
     await storage.saveWebsite(dummySite);
@@ -3024,6 +3032,688 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         expect(res.isReplayAttack).toBe(true);
         expect(res.isIdempotentRetry).toBe(false);
       }
+    });
+  });
+
+  // ============================================================================
+  // 13. Asynchronous Evidence Authority Initialization & Secrets Manager Integration (Finding 1)
+  // ============================================================================
+  describe('13. Asynchronous Evidence Authority Initialization & Secrets Manager Integration (Finding 1)', () => {
+    const originalEnv = { ...process.env };
+
+    beforeEach(() => {
+      process.env = { ...originalEnv };
+      _resetInternalEvidenceAuthorityForTesting(undefined);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      process.env = { ...originalEnv };
+      _resetInternalEvidenceAuthorityForTesting(undefined);
+    });
+
+    // Test 1: In production mode, uninitialized default authority throws UNINITIALIZED_EVIDENCE_AUTHORITY
+    it('1. in production mode, uninitialized default authority throws UNINITIALIZED_EVIDENCE_AUTHORITY', () => {
+      process.env.NODE_ENV = 'production';
+      expect(() => {
+        getDefaultInternalEvidenceAuthority();
+      }).toThrow(/UNINITIALIZED_EVIDENCE_AUTHORITY.*Call initializeDefaultInternalEvidenceAuthority/);
+    });
+
+    // Test 2: Test factory allows test dependency injection in non-production
+    it('2. test-only dependency injection works in non-production environments', async () => {
+      process.env.NODE_ENV = 'test';
+      const mockLoader = {
+        loadSecrets: async () => ({
+          signingKey: TEST_SIGNING_KEY,
+          rotatedVerificationKeys: ['rotated-signing-key-32bytes-long!'],
+          serviceCredentials: TEST_SERVICE_CREDENTIALS,
+        }),
+      };
+
+      const authority = await _initializeDefaultInternalEvidenceAuthorityForTesting({
+        secretLoader: mockLoader as any,
+        authorityConfig: {
+          replayRegistry: new MemoryReplayRegistry(),
+        },
+      });
+
+      expect(authority).toBeDefined();
+      expect(getDefaultInternalEvidenceAuthority()).toBe(authority);
+
+      const eventId = '01a19700-0000-7000-8000-000000000601';
+      const ctx = authority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+      });
+
+      expect(authority.verifyContext(ctx, { eventId, orgId, siteId })).toBe(true);
+    });
+
+    // Test 3: Production initialization cannot replace the real Secrets Manager loader
+    it('3. production initialization strictly rejects custom injected secretLoader', async () => {
+      process.env.NODE_ENV = 'production';
+      const mockCustomLoader = {
+        loadSecrets: async () => ({
+          signingKey: TEST_SIGNING_KEY,
+          rotatedVerificationKeys: [],
+          serviceCredentials: TEST_SERVICE_CREDENTIALS,
+        }),
+      };
+
+      await expect(
+        initializeDefaultInternalEvidenceAuthority({
+          secretLoader: mockCustomLoader,
+        } as any)
+      ).rejects.toThrow(/FATAL_CONFIG_ERROR.*Injected secretLoader.*is prohibited in production mode/);
+    });
+
+    // Test 4: Production initialization cannot inject custom secretLoaderConfig through casts
+    it('4. production initialization strictly rejects custom injected secretLoaderConfig', async () => {
+      process.env.NODE_ENV = 'production';
+      await expect(
+        initializeDefaultInternalEvidenceAuthority({
+          secretLoaderConfig: { signingKeySecretId: 'custom-secret-id' },
+        } as any)
+      ).rejects.toThrow(/FATAL_CONFIG_ERROR.*custom secretLoaderConfig is prohibited in production mode/);
+    });
+
+    // Test 5: Production initialization strictly rejects custom authorityConfig injection
+    it('5. production initialization strictly rejects custom authorityConfig injection', async () => {
+      process.env.NODE_ENV = 'production';
+      await expect(
+        initializeDefaultInternalEvidenceAuthority({
+          authorityConfig: { replayRegistry: new MemoryReplayRegistry() },
+        } as any)
+      ).rejects.toThrow(/FATAL_CONFIG_ERROR.*Injected authorityConfig is prohibited in production mode/);
+    });
+
+    // Test 6: Production cannot inject an arbitrary custom fake in-memory replay-registry
+    it('6. production cannot inject arbitrary custom in-memory replay-registry implementation', () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      class FakeCustomInMemoryRegistry {
+        async consumeNonce() { return { success: true, isReplayAttack: false, isIdempotentRetry: false }; }
+        async isNonceSeen() { return false; }
+      }
+
+      expect(() => {
+        new InternalEvidenceAuthority({
+          signingKey: TEST_SIGNING_KEY,
+          replayRegistry: new FakeCustomInMemoryRegistry() as any,
+        });
+      }).toThrow(/FATAL_REGISTRY_CONFIG_ERROR.*Arbitrary or in-memory replay registry injection is prohibited in production mode/);
+    });
+
+    // Test 7: Real exported production initialization path succeeds when Secrets Manager succeeds
+    it('7. real exported production initialization path succeeds with genuine Secrets Manager retrieval', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockImplementation(async (command: any) => {
+        const secretId = command.input?.SecretId || '';
+        if (secretId.includes('signing-key')) {
+          return {
+            SecretString: JSON.stringify({
+              signingKey: TEST_SIGNING_KEY,
+              rotatedKeys: ['rotated-sm-key-32-bytes-minimum-length!'],
+            }),
+          };
+        }
+        if (secretId.includes('service-credentials')) {
+          return {
+            SecretString: JSON.stringify({
+              canaryService: 'sm-canary-token-production-42',
+              collectorNginx: 'sm-nginx-token-production-42',
+            }),
+          };
+        }
+        return {};
+      });
+
+      // Exercises the REAL exported production path: no custom loader, no custom config
+      const authority = await initializeDefaultInternalEvidenceAuthority();
+
+      expect(authority).toBeDefined();
+      expect(getDefaultInternalEvidenceAuthority()).toBe(authority);
+
+      const eventId = '01a19700-0000-7000-8000-000000000607';
+      const ctx = authority.createContext({
+        serviceAuthToken: 'sm-canary-token-production-42',
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+      });
+
+      expect(authority.verifyContext(ctx, { eventId, orgId, siteId })).toBe(true);
+    });
+
+    // Test 8: In production mode, missing signing key fails closed via real path
+    it('8. in production mode, missing signing key from Secrets Manager fails closed via real path', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockResolvedValue({});
+
+      await expect(initializeDefaultInternalEvidenceAuthority()).rejects.toThrow(
+        /FATAL_KEY_CONFIG_ERROR.*(VELTRIX_EVIDENCE_SIGNING_KEY|No valid signing key)/i
+      );
+    });
+
+    // Test 9: In production mode, short signing key fails closed via real path
+    it('9. in production mode, signing key shorter than 32 bytes fails closed via real path', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockResolvedValue({
+        SecretString: JSON.stringify({ signingKey: 'short-key' }),
+      });
+
+      await expect(initializeDefaultInternalEvidenceAuthority()).rejects.toThrow(
+        /FATAL_KEY_CONFIG_ERROR.*(at least 32 bytes|insufficient entropy)/i
+      );
+    });
+
+    // Test 10: In production mode, missing service credentials fails closed via real path
+    it('10. in production mode, missing service credentials fails closed via real path', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockImplementation(async (cmd: any) => {
+        if ((cmd.input?.SecretId || '').includes('signing-key')) {
+          return { SecretString: JSON.stringify({ signingKey: TEST_SIGNING_KEY }) };
+        }
+        return { SecretString: JSON.stringify({}) };
+      });
+
+      await expect(initializeDefaultInternalEvidenceAuthority()).rejects.toThrow(
+        /FATAL_KEY_CONFIG_ERROR.*service credential/i
+      );
+    });
+
+    // Test 11: In production mode, Secrets Manager client failure fails closed via real path
+    it('11. in production mode, Secrets Manager client failure fails closed via real path', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockRejectedValue(
+        new Error('AccessDeniedException: KMS key access denied')
+      );
+
+      await expect(initializeDefaultInternalEvidenceAuthority()).rejects.toThrow(
+        /FATAL_KEY_CONFIG_ERROR.*Failed to load secrets from Secrets Manager in production/i
+      );
+    });
+
+    // Test 12: Test-only factory is strictly blocked in production mode
+    it('12. test-only dependency injection factory is strictly blocked in production mode', async () => {
+      process.env.NODE_ENV = 'production';
+      await expect(
+        _initializeDefaultInternalEvidenceAuthorityForTesting({
+          secretLoader: {} as any,
+        })
+      ).rejects.toThrow(/FATAL_SECURITY_ERROR.*strictly prohibited in production mode/);
+    });
+
+    // Test 13: SecretLoader in production fails closed on Secrets Manager failure without silent fallback
+    it('13. SecretLoader in production fails closed on Secrets Manager failure even if environment variables are set', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.VELTRIX_EVIDENCE_SIGNING_KEY = TEST_SIGNING_KEY;
+
+      const mockFailingClient = {
+        send: async () => {
+          throw new Error('AccessDeniedException: KMS key unauthorized');
+        },
+      };
+
+      const loader = new SecretLoader({
+        client: mockFailingClient as any,
+        strictEnforcement: true,
+      });
+
+      await expect(loader.loadSecrets()).rejects.toThrow(/SECRETS_MANAGER_FETCH_FAILED/);
+    });
+
+    // Test 14: SecretLoader in non-production mode gracefully falls back to environment variables
+    it('14. SecretLoader in non-production mode gracefully falls back to environment variables', async () => {
+      process.env.NODE_ENV = 'test';
+      delete process.env.STORAGE_MODE;
+      delete process.env.VELTRIX_EVIDENCE_SIGNING_KEY_SECRET_ARN;
+      process.env.VELTRIX_EVIDENCE_SIGNING_KEY = TEST_SIGNING_KEY;
+      process.env.VELTRIX_AUTH_CANARY_SERVICE = 'env-canary-token-test-42';
+
+      const mockFailingClient = {
+        send: async () => {
+          throw new Error('NetworkingError: local offline mode');
+        },
+      };
+
+      const loader = new SecretLoader({
+        client: mockFailingClient as any,
+        strictEnforcement: false,
+      });
+
+      const secrets = await loader.loadSecrets();
+      expect(secrets.signingKey).toBe(TEST_SIGNING_KEY);
+      expect(secrets.serviceCredentials['canary-service:v1']).toContain('env-canary-token-test-42');
+    });
+  });
+
+  // ============================================================================
+  // 14. Production Replay Registry Strict Enforcement & Misconfiguration Rejection (Finding 2)
+  // ============================================================================
+  describe('14. Production Replay Registry Strict Enforcement & Misconfiguration Rejection (Finding 2)', () => {
+    const originalEnv = { ...process.env };
+
+    beforeEach(() => {
+      process.env = { ...originalEnv };
+      _resetInternalEvidenceAuthorityForTesting(undefined);
+    });
+
+    afterEach(() => {
+      process.env = { ...originalEnv };
+      _resetInternalEvidenceAuthorityForTesting(undefined);
+    });
+
+    // Test 1: Injected MemoryReplayRegistry is rejected in production mode
+    it('1. explicitly injected MemoryReplayRegistry is rejected in production mode', () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      expect(() => {
+        new InternalEvidenceAuthority({
+          signingKey: TEST_SIGNING_KEY,
+          replayRegistry: new MemoryReplayRegistry(),
+        });
+      }).toThrow(/FATAL_REGISTRY_CONFIG_ERROR.*Injected MemoryReplayRegistry is prohibited in production mode/);
+    });
+
+    // Test 2: Injected EvidenceReplayRegistry is rejected in production mode
+    it('2. explicitly injected EvidenceReplayRegistry is rejected in production mode', () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      expect(() => {
+        new InternalEvidenceAuthority({
+          signingKey: TEST_SIGNING_KEY,
+          replayRegistry: new EvidenceReplayRegistry(),
+        });
+      }).toThrow(/FATAL_REGISTRY_CONFIG_ERROR.*Injected MemoryReplayRegistry is prohibited in production mode/);
+    });
+
+    // Test 3: Missing DYNAMODB_REPLAY_TABLE causes initialization failure in production mode
+    it('3. missing DYNAMODB_REPLAY_TABLE causes initialization failure in production mode', () => {
+      process.env.NODE_ENV = 'production';
+      delete process.env.DYNAMODB_REPLAY_TABLE;
+
+      expect(() => {
+        new InternalEvidenceAuthority({
+          signingKey: TEST_SIGNING_KEY,
+        });
+      }).toThrow(/FATAL_REGISTRY_CONFIG_ERROR.*DYNAMODB_REPLAY_TABLE.*must be configured in production mode/);
+    });
+
+    // Test 4: Missing or incorrect STORAGE_MODE does not activate memory fallback in production
+    it('4. STORAGE_MODE=memory throws FATAL_REGISTRY_CONFIG_ERROR in production mode', () => {
+      process.env.NODE_ENV = 'production';
+      process.env.STORAGE_MODE = 'memory';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      expect(() => {
+        new InternalEvidenceAuthority({
+          signingKey: TEST_SIGNING_KEY,
+        });
+      }).toThrow(/FATAL_REGISTRY_CONFIG_ERROR.*Invalid STORAGE_MODE 'memory' in production/);
+    });
+
+    // Test 5: DynamoDBReplayRegistry constructor strictly enforces table configuration in production
+    it('5. DynamoDBReplayRegistry constructor enforces table configuration in production mode', () => {
+      process.env.NODE_ENV = 'production';
+      delete process.env.DYNAMODB_REPLAY_TABLE;
+
+      expect(() => {
+        new DynamoDBReplayRegistry();
+      }).toThrow(/FATAL_REGISTRY_CONFIG_ERROR.*DYNAMODB_REPLAY_TABLE must be explicitly configured in production mode/);
+    });
+
+    // Test 6: In non-production mode, memory fallback continues to work
+    it('6. in non-production mode, memory fallback continues to function smoothly', () => {
+      process.env.NODE_ENV = 'test';
+      delete process.env.DYNAMODB_REPLAY_TABLE;
+
+      expect(() => {
+        const devAuth = new InternalEvidenceAuthority({
+          signingKey: TEST_SIGNING_KEY,
+          serviceCredentials: TEST_SERVICE_CREDENTIALS,
+        });
+        expect(devAuth).toBeDefined();
+      }).not.toThrow();
+    });
+  });
+
+  // ============================================================================
+  // 15. DynamoDB Stream Reconstruction, End-to-End Persistence & Retry Lifecycle (Finding 3)
+  // ============================================================================
+  describe('15. DynamoDB Stream Reconstruction, End-to-End Persistence & Retry Lifecycle (Finding 3)', () => {
+    let authority: InternalEvidenceAuthority;
+    const originalEnv = { ...process.env };
+
+    beforeEach(() => {
+      process.env = { ...originalEnv };
+      authority = new InternalEvidenceAuthority({
+        signingKey: TEST_SIGNING_KEY,
+        serviceCredentials: TEST_SERVICE_CREDENTIALS,
+        replayRegistry: new MemoryReplayRegistry(),
+      });
+      _resetInternalEvidenceAuthorityForTesting(authority);
+    });
+
+    afterEach(() => {
+      process.env = { ...originalEnv };
+      _resetInternalEvidenceAuthorityForTesting(undefined);
+    });
+
+    // Test 1: Full lifecycle: internal creation -> persistence -> stream emission -> reconstruction -> pipeline -> elevated detection & incident
+    it('1. full lifecycle: internal creation -> persistence -> stream emission -> reconstruction -> pipeline -> elevated detection', async () => {
+      const eventId = '01a19700-0000-7000-8000-000000000701';
+
+      // 1. Internal verifier creates trusted evidence context
+      const trustedContext = authority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        evidenceReferences: ['canary-db-prod-table-42'],
+      });
+
+      const securityEvent: SecurityEvent = {
+        eventId,
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.240',
+        sourceSystem: 'sensor:canary:db',
+        metadata: {
+          siteId,
+          requestUri: '/users?id=1%27+UNION+SELECT+password+FROM+secrets--',
+          httpStatus: 200,
+        },
+        trustedEvidenceContext: trustedContext,
+      };
+
+      // 2. Storage persistence in DynamoDBStore retains trustedEvidenceContext
+      let savedDynamoItem: Record<string, any> | undefined;
+      const mockDocClient = {
+        send: async (cmd: any) => {
+          if (cmd.input?.TransactItems) {
+            savedDynamoItem = cmd.input.TransactItems[0]?.Put?.Item;
+            return {};
+          }
+          return {};
+        },
+      };
+      const dynamoStore = new DynamoDBStore();
+      (dynamoStore as any).docClient = mockDocClient;
+      await dynamoStore.saveEvent(securityEvent);
+
+      expect(savedDynamoItem).toBeDefined();
+      expect(savedDynamoItem!.trustedEvidenceContext).toBeDefined();
+      expect(savedDynamoItem!.trustedEvidenceContext.nonce).toBe(trustedContext.nonce);
+
+      // 3. DynamoDB Stream emission and unmarshalling in stream-handler
+      const streamBatch: DynamoDBStreamEvent = {
+        Records: [
+          {
+            eventName: 'INSERT',
+            dynamodb: {
+              SequenceNumber: 'seq-stream-701',
+              NewImage: marshall(savedDynamoItem as Record<string, any>, { removeUndefinedValues: true }),
+            },
+          },
+        ],
+      };
+
+      // 4. Lambda Stream Handler processes batch
+      const streamResult = await handleSecurityEventStream(streamBatch);
+      expect(streamResult.batchItemFailures).toHaveLength(0);
+
+      // 5. Detection Pipeline generated detection with CONFIRMED_EXPLOITATION
+      const detections = await storage.getDetections(orgId);
+      expect(detections.items.length).toBeGreaterThan(0);
+      const sqliDetection = detections.items.find((d) => d.ruleId === 'RULE-101');
+      expect(sqliDetection).toBeDefined();
+      expect((sqliDetection!.evidence.details as any).confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+      expect((sqliDetection!.evidence.details as any).evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+    });
+
+    // Test 2: External HTTP caller attempting to inject trustedEvidenceContext is rejected
+    it('2. external HTTP caller attempting to inject trustedEvidenceContext is rejected by ingestion validation', async () => {
+      const eventService = new EventService(storage);
+
+      const maliciousPayload = {
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.241',
+        sourceSystem: 'client:external',
+        trustedEvidenceContext: {
+          version: 'VELTRIX_EVIDENCE_V2',
+          nonce: 'forged-external-nonce-001',
+          verifiedProvenance: 'TRUSTED_SERVER_COMPONENT',
+          verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+          verifierIdentity: 'canary-service:v1',
+          verificationTimestamp: new Date().toISOString(),
+          eventId: '01a19700-0000-7000-8000-000000000702',
+          orgId,
+          siteId,
+          evidenceReferences: [],
+          authoritySignature: 'forged-signature',
+        },
+      };
+
+      // Ingestion schema is strict and rejects foreign top-level keys
+      await expect(eventService.ingestSingleEvent(maliciousPayload, orgId)).rejects.toThrow();
+    });
+
+    // Test 3: Never trust DynamoDB metadata merely because it came from DynamoDB
+    it('3. stream record with forged or tampered HMAC signature is rejected and demoted to UNTRUSTED_CLIENT', async () => {
+      const eventId = '01a19700-0000-7000-8000-000000000703';
+
+      const genuineContext = authority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      // Adversary tampers with the context stored in DynamoDB
+      const tamperedContext = {
+        ...genuineContext,
+        authoritySignature: '0000000000000000000000000000000000000000000000000000000000000000',
+      };
+
+      const streamBatch: DynamoDBStreamEvent = {
+        Records: [
+          {
+            eventName: 'INSERT',
+            dynamodb: {
+              SequenceNumber: 'seq-stream-703',
+              NewImage: marshall({
+                PK: 'ORG#' + orgId + '#DATE#2026-11-01',
+                SK: 'EVENT#2026-11-01T12:00:00.000Z#' + eventId,
+                eventId,
+                orgId,
+                category: 'NETWORK',
+                eventType: 'web.attack.sqli',
+                severity: 'CRITICAL',
+                timestamp: new Date().toISOString(),
+                sourceIp: '198.51.100.242',
+                sourceSystem: 'sensor:canary:db',
+                metadata: {
+                  siteId,
+                  requestUri: '/users?id=1%27+UNION+SELECT+password+FROM+secrets--',
+                  httpStatus: 200,
+                },
+                trustedEvidenceContext: tamperedContext,
+              }, { removeUndefinedValues: true }),
+            },
+          },
+        ],
+      };
+
+      // Process through stream handler
+      await handleSecurityEventStream(streamBatch);
+
+      // Verify detection does NOT elevate to CONFIRMED_EXPLOITATION
+      const detections = await storage.getDetections(orgId);
+      const detection = detections.items.find((d) => d.relatedEventIds.includes(eventId));
+      expect(detection).toBeDefined();
+      // Demoted to UNTRUSTED_CLIENT and SUSPICIOUS_ATTEMPT due to failed cryptographic signature
+      expect((detection!.evidence.details as any).evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect((detection!.evidence.details as any).confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+    });
+
+    // Test 4: DynamoDB Stream worker retry does not lose valid evidence or cause duplicate alerts
+    it('4. stream worker retry does not lose valid evidence or cause duplicate alerts', async () => {
+      const eventId = '01a19700-0000-7000-8000-000000000704';
+
+      const trustedContext = authority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      const streamBatch: DynamoDBStreamEvent = {
+        Records: [
+          {
+            eventName: 'INSERT',
+            dynamodb: {
+              SequenceNumber: 'seq-stream-704',
+              NewImage: marshall({
+                PK: 'ORG#' + orgId + '#DATE#2026-11-01',
+                SK: 'EVENT#2026-11-01T12:00:00.000Z#' + eventId,
+                eventId,
+                orgId,
+                category: 'NETWORK',
+                eventType: 'web.attack.sqli',
+                severity: 'CRITICAL',
+                timestamp: new Date().toISOString(),
+                sourceIp: '198.51.100.243',
+                sourceSystem: 'sensor:canary:db',
+                metadata: {
+                  siteId,
+                  requestUri: '/users?id=1%27+UNION+SELECT+password+FROM+secrets--',
+                  httpStatus: 200,
+                },
+                trustedEvidenceContext: trustedContext,
+              }, { removeUndefinedValues: true }),
+            },
+          },
+        ],
+      };
+
+      // First stream execution pass
+      await handleSecurityEventStream(streamBatch);
+
+      const detectionsFirst = await storage.getDetections(orgId);
+      const firstSqli = detectionsFirst.items.find((d) => d.relatedEventIds.includes(eventId));
+      expect(firstSqli).toBeDefined();
+      expect((firstSqli!.evidence.details as any).confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+
+      const incidentsFirst = await storage.getIncidents(orgId);
+      const initialIncidentCount = incidentsFirst.items.length;
+
+      // Second stream execution pass (simulated Lambda stream retry)
+      await handleSecurityEventStream(streamBatch);
+
+      const detectionsSecond = await storage.getDetections(orgId);
+      const sqliDetections = detectionsSecond.items.filter((d) => d.relatedEventIds.includes(eventId));
+      // Detection deduplication ensures no duplicate findings
+      expect(sqliDetections).toHaveLength(1);
+
+      const incidentsSecond = await storage.getIncidents(orgId);
+      // Correlation engine idempotency ensures no duplicate incidents or score inflation
+      expect(incidentsSecond.items.length).toBe(initialIncidentCount);
+    });
+
+    // Test 5: Public API queries sanitize and never expose internal trustedEvidenceContext
+    it('5. public API queries sanitize and never expose internal trustedEvidenceContext to clients', async () => {
+      const eventId = '01a19700-0000-7000-8000-000000000705';
+
+      const trustedContext = authority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      // Internal ingestion saves with trusted context
+      const eventService = new EventService(storage);
+      await eventService.ingestInternalEvent({
+        eventId,
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.244',
+        sourceSystem: 'sensor:canary:db',
+        metadata: { siteId },
+        trustedEvidenceContext: trustedContext,
+      });
+
+      // Retrieve via internal storage: trustedEvidenceContext IS preserved for internal components
+      const internalEvent = await storage.getEventById(orgId, eventId);
+      expect(internalEvent?.trustedEvidenceContext).toBeDefined();
+
+      // Retrieve via public HTTP endpoint: trustedEvidenceContext MUST be omitted from response
+      const analystToken = jwtService.signAccessToken({
+        userId: 'analyst-public-1',
+        username: 'analyst-1',
+        email: 'analyst@cybershield.corp',
+        orgId,
+        role: 'SECURITY_ANALYST',
+      });
+
+      const res = await request(app)
+        .get('/api/v1/events/' + eventId)
+        .set('Authorization', 'Bearer ' + analystToken);
+
+      expect(res.status).toBe(200);
+      expect(res.body.data.trustedEvidenceContext).toBeUndefined();
+      expect(res.body.data.eventId).toBe(eventId);
+
+      // List endpoint also strips trustedEvidenceContext
+      const listRes = await request(app)
+        .get('/api/v1/events')
+        .set('Authorization', 'Bearer ' + analystToken);
+
+      expect(listRes.status).toBe(200);
+      const returnedEvent = listRes.body.data.events.find((e: any) => e.eventId === eventId);
+      expect(returnedEvent).toBeDefined();
+      expect(returnedEvent.trustedEvidenceContext).toBeUndefined();
     });
   });
 });

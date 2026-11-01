@@ -116,7 +116,7 @@ export class SecretLoader {
         }
       } catch (err: unknown) {
         const msg = (err as Error).message || String(err);
-        if (this.isProduction && !envSigningKey) {
+        if (this.isProduction) {
           console.error('[VELTRIX-SECRETS] Failed to fetch signing key from Secrets Manager in production:', msg);
           throw new Error(`SECRETS_MANAGER_FETCH_FAILED: Unable to load signing key: ${msg}`);
         }
@@ -148,39 +148,69 @@ export class SecretLoader {
         }
       } catch (err: unknown) {
         const msg = (err as Error).message || String(err);
-        if (this.isProduction && Object.keys(envServiceCreds).length === 0) {
+        if (this.isProduction) {
           console.error('[VELTRIX-SECRETS] Failed to fetch service credentials from Secrets Manager in production:', msg);
           throw new Error(`SECRETS_MANAGER_FETCH_FAILED: Unable to load service credentials: ${msg}`);
         }
       }
     }
 
-    // Merge env and Secrets Manager results (Secrets Manager takes precedence in AWS mode)
-    const finalSigningKey = smSigningKey || envSigningKey;
-    const finalRotatedKeys = [
-      ...new Set([...smRotatedKeys, ...envRotatedKeys]),
-    ].filter((k) => k !== finalSigningKey && Buffer.from(k).length >= MIN_KEY_BYTE_LENGTH);
-
+    let finalSigningKey: string | undefined;
+    let finalRotatedKeys: string[] = [];
     const finalServiceCreds: Partial<Record<ApprovedVerifierIdentity, string[]>> = {};
-    for (const verifier of APPROVED_INTERNAL_VERIFIERS) {
-      const smTokens = smServiceCreds[verifier] || [];
-      const envTokens = envServiceCreds[verifier] || [];
-      const combined = [...new Set([...smTokens, ...envTokens])];
-      if (combined.length > 0) {
-        finalServiceCreds[verifier] = combined;
-      }
-    }
 
     if (this.isProduction) {
+      /**
+       * Production Policy: Secrets Manager Authoritative Only
+       * - Direct environment variables are prohibited from acting as silent fallbacks in production.
+       * - If Secrets Manager secrets cannot be fetched or do not contain valid credentials, the system fails closed.
+       * - Signing key must be at least 32 bytes (256 bits).
+       * - At least one approved verifier service credential must be loaded.
+       */
+      finalSigningKey = smSigningKey;
+      finalRotatedKeys = smRotatedKeys.filter(
+        (k) => k !== finalSigningKey && Buffer.from(k).length >= MIN_KEY_BYTE_LENGTH
+      );
+      for (const verifier of APPROVED_INTERNAL_VERIFIERS) {
+        if (smServiceCreds[verifier] && smServiceCreds[verifier]!.length > 0) {
+          finalServiceCreds[verifier] = smServiceCreds[verifier];
+        }
+      }
+
       if (!finalSigningKey) {
         throw new Error(
-          'FATAL_KEY_CONFIG_ERROR: No valid signing key found in Secrets Manager or environment for production.'
+          `FATAL_KEY_CONFIG_ERROR: No valid signing key found in Secrets Manager secret '${this.signingKeySecretId}' for production.`
         );
       }
       if (Buffer.from(finalSigningKey).length < MIN_KEY_BYTE_LENGTH) {
         throw new Error(
           `FATAL_KEY_CONFIG_ERROR: Resolved signing key has insufficient entropy (< ${MIN_KEY_BYTE_LENGTH} bytes).`
         );
+      }
+      if (Object.keys(finalServiceCreds).length === 0) {
+        throw new Error(
+          `FATAL_KEY_CONFIG_ERROR: No approved verifier service credentials found in Secrets Manager secret '${this.serviceCredentialsSecretId}' for production.`
+        );
+      }
+    } else {
+      /**
+       * Non-Production Policy: Developer Ergonomics & Local Mocking
+       * - Secrets Manager values take precedence when configured.
+       * - Falls back gracefully to environment variables (e.g. VELTRIX_EVIDENCE_SIGNING_KEY)
+       *   to allow local unit tests and offline development without AWS credentials.
+       */
+      finalSigningKey = smSigningKey || envSigningKey;
+      finalRotatedKeys = [
+        ...new Set([...smRotatedKeys, ...envRotatedKeys]),
+      ].filter((k) => k !== finalSigningKey && Buffer.from(k).length >= MIN_KEY_BYTE_LENGTH);
+
+      for (const verifier of APPROVED_INTERNAL_VERIFIERS) {
+        const smTokens = smServiceCreds[verifier] || [];
+        const envTokens = envServiceCreds[verifier] || [];
+        const combined = [...new Set([...smTokens, ...envTokens])];
+        if (combined.length > 0) {
+          finalServiceCreds[verifier] = combined;
+        }
       }
     }
 

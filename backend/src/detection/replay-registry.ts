@@ -224,12 +224,18 @@ export class DynamoDBReplayRegistry implements IReplayRegistry {
         marshallOptions: { removeUndefinedValues: true },
       });
 
+    const isProduction =
+      process.env.NODE_ENV === 'production' || process.env.STRICT_SECURITY === 'true';
     const env = process.env.ENVIRONMENT || 'dev';
-    this.tableName =
-      options?.tableName ||
-      process.env.DYNAMODB_REPLAY_TABLE ||
-      `Veltrix-EvidenceReplay-${env}`;
+    const configuredTable = options?.tableName || process.env.DYNAMODB_REPLAY_TABLE;
 
+    if (isProduction && (!configuredTable || configuredTable.trim() === '')) {
+      throw new Error(
+        'FATAL_REGISTRY_CONFIG_ERROR: DYNAMODB_REPLAY_TABLE must be explicitly configured in production mode.'
+      );
+    }
+
+    this.tableName = configuredTable || `Veltrix-EvidenceReplay-${env}`;
     this.maxAgeMs = options?.maxAgeMs || MAX_EVIDENCE_AGE_MS;
   }
 

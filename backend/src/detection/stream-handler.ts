@@ -1,7 +1,11 @@
 import { unmarshall } from '@aws-sdk/util-dynamodb';
 import type { AttributeValue } from '@aws-sdk/client-dynamodb';
-import type { SecurityEvent } from '@veltrix/shared';
+import type { SecurityEvent, InternalTrustedEvidenceContext } from '@veltrix/shared';
 import { getDetectionPipeline } from './pipeline.js';
+import {
+  initializeDefaultInternalEvidenceAuthority,
+  isInternalEvidenceAuthorityInitialized,
+} from './evidence-authority.js';
 
 export interface DynamoDBStreamRecord {
   eventName?: 'INSERT' | 'MODIFY' | 'REMOVE';
@@ -28,12 +32,28 @@ export interface StreamHandlerResponse {
 /**
  * AWS Lambda Event Source Mapping handler for DynamoDB Streams.
  * Receives INSERT stream records from Veltrix-SecurityEvents-${Environment},
- * transforms them into normalized SecurityEvents, and triggers automatic threat detection.
+ * transforms them into normalized SecurityEvents with restored internal evidence context,
+ * and triggers automatic threat detection.
  * Returns partial batch failures (batchItemFailures) to enable DynamoDB stream checkpointing.
  */
 export async function handleSecurityEventStream(
   event: DynamoDBStreamEvent
 ): Promise<StreamHandlerResponse> {
+  // Ensure default internal evidence authority is initialized
+  try {
+    if (!isInternalEvidenceAuthorityInitialized()) {
+      await initializeDefaultInternalEvidenceAuthority();
+    }
+  } catch (initErr) {
+    console.error('[VELTRIX-STREAM] Fatal error initializing evidence authority:', initErr);
+    // Report all records as failed to trigger Lambda retry / DLQ
+    return {
+      batchItemFailures: event.Records.map((r, i) => ({
+        itemIdentifier: r.dynamodb?.SequenceNumber || String(i),
+      })),
+    };
+  }
+
   const pipeline = getDetectionPipeline();
   const batchItemFailures: BatchItemFailure[] = [];
 
@@ -66,7 +86,10 @@ export async function handleSecurityEventStream(
         sourceSystem: rawItem.sourceSystem,
         metadata: rawItem.metadata,
         idempotencyKey: rawItem.idempotencyKey,
-              };
+        isSimulated: rawItem.isSimulated,
+        ingestedAt: rawItem.ingestedAt,
+        trustedEvidenceContext: rawItem.trustedEvidenceContext as InternalTrustedEvidenceContext | undefined,
+      };
 
       await pipeline.processEvent(securityEvent);
     } catch (err) {
