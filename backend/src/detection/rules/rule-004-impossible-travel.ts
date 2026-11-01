@@ -47,17 +47,42 @@ export class Rule004ImpossibleTravel extends BaseDetectionRule {
         const curr = userEvents[i];
         if (!prev || !curr) continue;
 
-        // Verify VPN/proxy suppression originates from trusted enrichment provenance or corporate gateway
+        // Verify VPN/proxy suppression originates from trusted enrichment provenance, authenticated integration, or authorized gateway registry.
+        // Security requirement: A client supplying sourceSystem: 'corporate-vpn' or metadata: { isVpn: true } cannot independently suppress detection.
         const isEventTrustedVpnOrProxy = (e: typeof prev): boolean => {
           if (!e.metadata) return false;
           const hasVpnFlag = e.metadata.isVpn === true || e.metadata.isProxy === true;
-          if (!hasVpnFlag) return false;
-          // Provenance check: must possess recognized enrichmentSource or trusted gateway system
+
+          // 1. Verified server-side enrichment provider with provenance
           const source = typeof e.metadata.enrichmentSource === 'string' ? e.metadata.enrichmentSource.toUpperCase() : '';
-          const hasTrustedSource = ['MAXMIND', 'IPINFO', 'INTERNAL_VPN_REGISTRY', 'VPN_GATEWAY'].some((s) => source.includes(s));
-          const isCorporateGateway = typeof e.sourceSystem === 'string' && ['corporate-vpn', 'vpn-gateway', 'ztna-gateway'].includes(e.sourceSystem.toLowerCase());
-          const isExplicitlyTrusted = e.metadata.trustedEnrichment === true;
-          return hasTrustedSource || isCorporateGateway || isExplicitlyTrusted;
+          const hasTrustedEnrichment = ['MAXMIND', 'IPINFO', 'INTERNAL_VPN_REGISTRY', 'VPN_GATEWAY'].some((s) => source.includes(s));
+          if (hasTrustedEnrichment && hasVpnFlag) {
+            return true;
+          }
+
+          // 2. Explicit server-side trusted enrichment flag (injected by internal enrichment pipeline)
+          if (e.metadata.trustedEnrichment === true && hasVpnFlag) {
+            return true;
+          }
+
+          // 3. Authenticated integration identity (e.g. gateway mTLS / corporate gateway integration)
+          if (e.metadata.authenticatedIntegration === 'CORPORATE_VPN' || e.metadata.integrationIdentity === 'AUTHORIZED_GATEWAY') {
+            return true;
+          }
+
+          // 4. Authorized corporate gateway registry (verified source IP matching tenant's registered gateway registry)
+          const condition = (ruleConfig?.condition || {}) as Record<string, unknown>;
+          const authorizedGatewayIps: string[] = Array.isArray(condition.authorizedGatewayIps)
+            ? (condition.authorizedGatewayIps as string[])
+            : Array.isArray(context.customConfig?.authorizedGatewayIps)
+              ? (context.customConfig?.authorizedGatewayIps as string[])
+              : [];
+          if (authorizedGatewayIps.includes(e.sourceIp) && hasVpnFlag) {
+            return true;
+          }
+
+          // Bare client-supplied sourceSystem: 'corporate-vpn' without verified gateway IP or trusted enrichment is NEVER trusted.
+          return false;
         };
 
         const isVpnOrProxy = isEventTrustedVpnOrProxy(prev) || isEventTrustedVpnOrProxy(curr);

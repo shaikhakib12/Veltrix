@@ -1695,28 +1695,215 @@ describe('Phase 5: Threat Detection Engine (TASK-501 through TASK-505)', () => {
         expect(d4.length).toBe(1);
       });
 
-      it('handles invalid/malformed IANA timezones gracefully without throwing or crashing', async () => {
+      it('safely skips evaluation without producing misleading results if invalid timezone reaches engine', async () => {
+        // Event at 03:00 UTC (would be off-hours in UTC)
         const event: SecurityEvent = {
           eventId: generateUuidV7(),
           orgId: orgA,
           category: 'SYSTEM',
           eventType: 'admin.action',
           severity: 'MEDIUM',
-          timestamp: '2026-11-03T12:00:00Z', // 12:00 UTC (business hours)
+          timestamp: '2026-11-03T03:00:00Z',
           sourceIp: '10.0.0.1',
           username: 'safe-admin',
           sourceSystem: 'k8s',
         };
 
-        // Pass completely invalid timezone string
+        // Pass invalid timezone string
         const detections = await rule.evaluate(
           { organizationId: orgA, events: [event], currentTime: new Date() },
           { condition: { startHour: 6, endHour: 22, timezone: 'Invalid/NonExistent_Zone' } }
         );
 
-        // Does not throw RangeError; falls back to UTC
+        // Does not silently evaluate against UTC (which would have produced a false alert); safely skips evaluation
         expect(Array.isArray(detections)).toBe(true);
-        expect(detections.length).toBe(0); // 12:00 UTC is business hours
+        expect(detections.length).toBe(0);
+      });
+    });
+
+    // --- Final Security Sign-off Gate ---
+    describe('Final Security Sign-off: Corporate VPN, Timezone Settings & Threat Intel Provenance', () => {
+      it('RULE-004: client-supplied sourceSystem: corporate-vpn CANNOT suppress impossible travel without authorized gateway IP or trusted enrichment', async () => {
+        const rule = new Rule004ImpossibleTravel();
+        const baseTime = Date.now();
+
+        // Adversary supplies sourceSystem: 'corporate-vpn' and metadata: { isVpn: true }
+        const spoofedVpnEvents: SecurityEvent[] = [
+          {
+            eventId: generateUuidV7(baseTime - 300000),
+            orgId: orgA,
+            category: 'AUTHENTICATION',
+            eventType: 'auth.login.success',
+            severity: 'LOW',
+            timestamp: new Date(baseTime - 300000).toISOString(),
+            sourceIp: '198.51.100.1',
+            username: 'alice',
+            sourceSystem: 'okta',
+            metadata: { country: 'US', city: 'New York' },
+          },
+          {
+            eventId: generateUuidV7(baseTime),
+            orgId: orgA,
+            category: 'AUTHENTICATION',
+            eventType: 'auth.login.success',
+            severity: 'LOW',
+            timestamp: new Date(baseTime).toISOString(),
+            sourceIp: '203.0.113.1',
+            username: 'alice',
+            sourceSystem: 'corporate-vpn', // Spoofed client claim!
+            metadata: { country: 'JP', city: 'Tokyo', isVpn: true }, // Spoofed client claim!
+          },
+        ];
+
+        // Without verified authorizedGatewayIps, detection triggers (attack is NOT suppressed)
+        const unverifiedDetections = await rule.evaluate({
+          organizationId: orgA,
+          events: spoofedVpnEvents,
+          currentTime: new Date(),
+        });
+        expect(unverifiedDetections.length).toBe(1);
+        expect(unverifiedDetections[0].ruleId).toBe('RULE-004');
+
+        // When sourceIp matches an authorized corporate gateway registry IP, suppression is granted
+        const verifiedDetections = await rule.evaluate(
+          { organizationId: orgA, events: spoofedVpnEvents, currentTime: new Date() },
+          { condition: { authorizedGatewayIps: ['203.0.113.1'] } }
+        );
+        expect(verifiedDetections.length).toBe(0);
+      });
+
+      it('PATCH /api/v1/detection-rules/:ruleId validates IANA timezone and rejects invalid timezones with 400 Bad Request', async () => {
+        const res = await request(app)
+          .patch('/api/v1/detection-rules/RULE-010')
+          .set('Authorization', `Bearer ${orgAdminTokenOrgA}`)
+          .send({
+            condition: {
+              timezone: 'Mars/Olympus_Mons', // Invalid IANA timezone
+              startHour: 8,
+              endHour: 18,
+            },
+          });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error.code).toBe('INVALID_TIMEZONE');
+        expect(res.body.error.message).toContain('Invalid IANA timezone identifier');
+
+        // Valid IANA timezone succeeds
+        const validRes = await request(app)
+          .patch('/api/v1/detection-rules/RULE-010')
+          .set('Authorization', `Bearer ${orgAdminTokenOrgA}`)
+          .send({
+            condition: {
+              timezone: 'Europe/London',
+              startHour: 8,
+              endHour: 18,
+            },
+          });
+
+        expect(validRes.status).toBe(200);
+        expect(validRes.body.data.condition.timezone).toBe('Europe/London');
+      });
+
+      it('RULE-005: rejects threat intelligence indicators from unauthorized or unverified sources', async () => {
+        const rule = new Rule005SuspiciousIp();
+        const event: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'NETWORK',
+          eventType: 'network.connection',
+          severity: 'HIGH',
+          timestamp: new Date().toISOString(),
+          sourceIp: '198.51.100.240',
+          username: 'test-user',
+          sourceSystem: 'firewall',
+        };
+
+        // Indicator from unauthorized source
+        const unauthorizedIndicator = {
+          indicatorId: generateUuidV7(),
+          type: 'IP' as const,
+          value: '198.51.100.240',
+          severity: 'HIGH' as const,
+          confidence: 90,
+          source: 'UNVERIFIED_BLOG_FEED', // Unauthorized!
+          firstSeen: new Date().toISOString(),
+          lastSeen: new Date().toISOString(),
+          isFlagged: true,
+          threatType: 'C2',
+        };
+
+        const res1 = await rule.evaluate({
+          organizationId: orgA,
+          events: [event],
+          currentTime: new Date(),
+          threatIndicators: [unauthorizedIndicator],
+        });
+        expect(res1.length).toBe(0);
+
+        // Indicator from authorized source (ABUSE_CH)
+        const authorizedIndicator = {
+          ...unauthorizedIndicator,
+          source: 'ABUSE_CH',
+        };
+
+        const res2 = await rule.evaluate({
+          organizationId: orgA,
+          events: [event],
+          currentTime: new Date(),
+          threatIndicators: [authorizedIndicator],
+        });
+        expect(res2.length).toBe(1);
+        expect(res2[0].ruleId).toBe('RULE-005');
+      });
+
+      it('POST /api/v1/threat-indicators enforces RBAC, validates sources, and prevents unauthorized modification', async () => {
+        const newIndicator = {
+          type: 'IP',
+          value: '198.51.100.199',
+          threatType: 'BOTNET',
+          severity: 'HIGH',
+          confidence: 90,
+          source: 'ABUSE_CH',
+          description: 'Malicious scanner IP',
+        };
+
+        // 1. Unauthenticated request -> 401
+        const unauthRes = await request(app)
+          .post('/api/v1/threat-indicators')
+          .send(newIndicator);
+        expect(unauthRes.status).toBe(401);
+
+        // 2. VIEWER role -> 403 Forbidden
+        const viewerRes = await request(app)
+          .post('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${viewerTokenOrgA}`)
+          .send(newIndicator);
+        expect(viewerRes.status).toBe(403);
+        expect(viewerRes.body.error.code).toBe('FORBIDDEN_INSUFFICIENT_PERMISSIONS');
+
+        // 3. Unauthorized source provider -> 400 Bad Request
+        const badSourceRes = await request(app)
+          .post('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({ ...newIndicator, source: 'RANDOM_SCRAPER' });
+        expect(badSourceRes.status).toBe(400);
+        expect(badSourceRes.body.error.code).toBe('UNAUTHORIZED_INDICATOR_SOURCE');
+
+        // 4. Authorized SECURITY_ANALYST with valid provider -> 201 Created
+        const successRes = await request(app)
+          .post('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send(newIndicator);
+        expect(successRes.status).toBe(201);
+        expect(successRes.body.data.value).toBe('198.51.100.199');
+        expect(successRes.body.data.source).toBe('ABUSE_CH');
+
+        // 5. GET /api/v1/threat-indicators is readable by authenticated users
+        const getRes = await request(app)
+          .get('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${viewerTokenOrgA}`);
+        expect(getRes.status).toBe(200);
+        expect(getRes.body.data.indicators.length).toBeGreaterThanOrEqual(1);
       });
     });
   });

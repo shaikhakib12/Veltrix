@@ -12,6 +12,7 @@ import { requireRole } from '../middleware/rbac.js';
 import type { StorageInterface } from '../storage/storage-interface.js';
 import { getStorage } from '../storage/index.js';
 import { DetectionEngine } from '../detection/engine.js';
+import { isValidIanaTimezone } from '../utils/timezone.js';
 
 export function createDetectionRulesRouter(
   storage?: StorageInterface,
@@ -131,6 +132,23 @@ export function createDetectionRulesRouter(
                 field: e.path.join('.'),
                 message: e.message,
               })),
+            },
+          };
+          res.status(400).json(errorResponse);
+          return;
+        }
+
+        // Validate IANA timezone identifier when rule condition specifies a timezone
+        if (
+          parseResult.data.condition &&
+          typeof parseResult.data.condition.timezone === 'string' &&
+          !isValidIanaTimezone(parseResult.data.condition.timezone)
+        ) {
+          const errorResponse: ApiErrorResponse = {
+            success: false,
+            error: {
+              code: 'INVALID_TIMEZONE',
+              message: `Invalid IANA timezone identifier: '${parseResult.data.condition.timezone}'. Must be a recognized IANA time zone (e.g., 'America/New_York', 'Europe/London', 'Asia/Tokyo', 'UTC').`,
             },
           };
           res.status(400).json(errorResponse);

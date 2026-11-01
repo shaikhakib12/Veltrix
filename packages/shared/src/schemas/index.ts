@@ -225,3 +225,19 @@ export const DetectionRuleTestRequestSchema = z.object({
   slidingWindowSeconds: z.number().int().positive().max(86400).optional(),
   sampleEvents: z.array(SingleEventIngestSchema).min(1).max(100),
 });
+
+
+export const ThreatIndicatorCreateSchema = z.object({
+  type: z.enum(['IP', 'DOMAIN', 'HASH', 'USER_AGENT']),
+  value: z.string().min(1, 'Value is required'),
+  threatType: z.string().min(1, 'Threat type is required'),
+  severity: SeveritySchema,
+  confidence: z.number().int().min(0).max(100),
+  source: z.string().min(1, 'Source is required'),
+  description: z.string().optional(),
+  firstSeen: z.string().datetime({ offset: true }).optional(),
+  lastSeen: z.string().datetime({ offset: true }).optional(),
+  expiresAt: z.string().datetime({ offset: true }).optional(),
+  isFlagged: z.boolean().default(true),
+  metadata: z.record(z.unknown()).optional(),
+}).strict();

@@ -41,8 +41,25 @@ export class Rule005SuspiciousIp extends BaseDetectionRule {
     if (threatIndicators && Array.isArray(threatIndicators)) {
       for (const indicator of threatIndicators) {
         if (indicator.type === 'IP') {
-          // Source provenance verification: reject indicators lacking a valid source
+          // Source provenance verification: reject indicators lacking a valid source or from unauthorized providers
           if (!indicator.source || typeof indicator.source !== 'string' || indicator.source.trim().length === 0) {
+            continue;
+          }
+          const sourceUpper = indicator.source.trim().toUpperCase();
+          const authorizedSources = [
+            'ABUSE_CH',
+            'ALIENVAULT',
+            'ALIENVAULT_OTX',
+            'TOR_PROJECT',
+            'INTERNAL_THREAT_INTEL',
+            'ADMIN_MANAGED',
+            'CISA_KNOWN_EXPLOITED',
+            'MANDIANT',
+            'VIRUSTOTAL',
+          ];
+          const isAuthorized = authorizedSources.some((s) => sourceUpper.includes(s)) ||
+            sourceUpper.startsWith('ADMIN_') || sourceUpper.startsWith('INTERNAL_');
+          if (!isAuthorized) {
             continue;
           }
           // Freshness verification: reject expired threat intelligence indicators

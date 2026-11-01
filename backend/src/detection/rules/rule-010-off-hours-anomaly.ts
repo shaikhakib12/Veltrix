@@ -1,6 +1,7 @@
 import type { Detection, DetectionRule, EventCategory, Severity } from '@veltrix/shared';
 import { BaseDetectionRule } from './base-rule.js';
 import type { RuleEvaluationContext } from '../types.js';
+import { isValidIanaTimezone } from '../../utils/timezone.js';
 
 export class Rule010OffHoursAnomaly extends BaseDetectionRule {
   readonly id = 'RULE-010';
@@ -83,6 +84,15 @@ export class Rule010OffHoursAnomaly extends BaseDetectionRule {
     const businessEndHour = typeof condition.endHour === 'number' ? condition.endHour : 22;
     // IANA timezone identifier (e.g. 'America/New_York', 'Europe/London', 'Asia/Tokyo')
     const timezone = typeof condition.timezone === 'string' ? condition.timezone : undefined;
+
+    // Safety Policy: If tenant configured an invalid timezone, do NOT silently fall back to UTC.
+    // Record a clear configuration error and safely skip evaluation until corrected.
+    if (timezone !== undefined && !isValidIanaTimezone(timezone)) {
+      console.error(
+        `[VELTRIX-RULE-010-CONFIG-ERROR] Tenant '${context.organizationId}' has configured an invalid IANA timezone: '${timezone}'. Skipping off-hours anomaly evaluation to prevent misleading detections until configuration is corrected.`
+      );
+      return [];
+    }
     // Organization-configurable timezone offset in hours relative to UTC (default: 0)
     const timezoneOffsetHours = typeof condition.timezoneOffsetHours === 'number' ? condition.timezoneOffsetHours : 0;
     // Organization-configurable weekend days (default: Sunday=0, Saturday=6)
