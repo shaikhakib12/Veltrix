@@ -252,12 +252,12 @@ All **9 security audit findings** identified during review have been fully remed
 
 ```
 Test Files  8 passed (8 across monorepo)
-     Tests  278 passed (278) - @veltrix/backend
+     Tests  285 passed (285) - @veltrix/backend
      Tests  8 passed (8)     - @veltrix/sdk-node
-  Total:    286 / 286 passed (100% pass rate)
+  Total:    293 / 293 passed (100% pass rate)
 ```
 
-- All 82 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including Section 9 regression tests, Section 10 trust-boundary tests, Section 11 distributed replay / secrets management tests, Section 12 idempotent retry tests, Section 13 asynchronous secret loading tests, Section 14 production replay registry tests, and Section 15 DynamoDB stream reconstruction tests).
+- All 89 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including Section 9 regression tests, Section 10 trust-boundary tests, Section 11 distributed replay / secrets management tests, Section 12 idempotent retry tests, Section 13 asynchronous secret loading tests, Section 14 production replay registry tests, and Section 15 DynamoDB stream reconstruction tests).
 - Full tenant boundary isolation and API key prohibition regression tests pass.
 - False positive suppression verified across all 5 web attack rules.
 
@@ -282,6 +282,20 @@ Test Files  8 passed (8 across monorepo)
   - Public HTTP endpoints (`GET /api/v1/events` and `GET /api/v1/events/:eventId`) explicitly strip `trustedEvidenceContext` from HTTP responses, preventing external leakage of internal cryptographic artifacts.
   - `EventService` introduces `ingestInternalEvent` for authenticated verifier components, while rejecting any client-supplied `trustedEvidenceContext` from untrusted public ingestion.
 
+### 5.4 Finding 4 — Inviolable Authority Configuration & Strict Secrets Policy
+- **Issue:** `initializeDefaultInternalEvidenceAuthority()` permitted `options.authorityConfig` to override loaded credentials and strict enforcement. Additionally, `SecretLoader` in production allowed silent environment variable fallback on Secrets Manager failure.
+- **Remediation:**
+  - Restricted `InitializeAuthorityOptions` to `SafeAuthorityConfigOverrides`, explicitly omitting security-sensitive properties (`signingKey`, `rotatedVerificationKeys`, `serviceCredentials`, `strictEnforcement`).
+  - Authoritative secrets loaded from Secrets Manager are applied strictly after optional non-security configuration, neutralizing any attempted overrides.
+  - `SecretLoader` in production mode enforces an explicit fail-closed policy: if Secrets Manager retrieval fails, it throws `SECRETS_MANAGER_FETCH_FAILED` immediately without silent environment fallback.
+
+### 5.4 Finding 4 — Inviolable Authority Configuration & Strict Secrets Policy
+- **Issue:** `initializeDefaultInternalEvidenceAuthority()` permitted `options.authorityConfig` to override loaded credentials and strict enforcement. Additionally, `SecretLoader` in production allowed silent environment variable fallback on Secrets Manager failure.
+- **Remediation:**
+  - Restricted `InitializeAuthorityOptions` to `SafeAuthorityConfigOverrides`, explicitly omitting security-sensitive properties (`signingKey`, `rotatedVerificationKeys`, `serviceCredentials`, `strictEnforcement`).
+  - Authoritative secrets loaded from Secrets Manager are applied strictly after optional non-security configuration, neutralizing any attempted overrides.
+  - `SecretLoader` in production mode enforces an explicit fail-closed policy: if Secrets Manager retrieval fails, it throws `SECRETS_MANAGER_FETCH_FAILED` immediately without silent environment fallback.
+
 ---
 
 ## 6. Residual Risks & Phase 8 Preparation
@@ -299,4 +313,4 @@ Test Files  8 passed (8 across monorepo)
 
 The Phase 7 implementation fulfills all security, architectural, and quality standards mandated by the VELTRIX project roadmap. All 13 audit findings across all security audits have been remediated, verified, and accompanied by comprehensive regression tests.
 
-The branch `feature/phase-7-distributed-security-hardening` and follow-up Pull Request #11 are certified **SECURE & READY FOR PULL REQUEST REVIEW**.
+The branch `feature/phase-7-runtime-security-hardening` and follow-up Pull Request #12 are certified **SECURE & READY FOR PULL REQUEST REVIEW**.

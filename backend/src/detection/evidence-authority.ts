@@ -715,10 +715,25 @@ export class InternalEvidenceAuthority {
   }
 }
 
+/**
+ * Safe authority configuration overrides permitted during initialization.
+ * Security-sensitive parameters (signingKey, rotatedVerificationKeys, serviceCredentials,
+ * strictEnforcement) are strictly omitted from this type so callers cannot override credentials
+ * loaded from AWS Secrets Manager.
+ */
+export type SafeAuthorityConfigOverrides = Omit<
+  Partial<AuthorityConfig>,
+  'signingKey' | 'rotatedVerificationKeys' | 'serviceCredentials' | 'strictEnforcement'
+>;
+
 export interface InitializeAuthorityOptions {
   secretLoader?: any;
   secretLoaderConfig?: any;
-  authorityConfig?: Partial<AuthorityConfig>;
+  /**
+   * Optional non-security configuration overrides (e.g. custom replayRegistry for isolated tests).
+   * Security credentials and strict enforcement cannot be overridden through this configuration.
+   */
+  authorityConfig?: SafeAuthorityConfigOverrides;
   forceRefresh?: boolean;
 }
 
@@ -738,9 +753,7 @@ let isDefaultAuthorityInitialized = false;
 export async function initializeDefaultInternalEvidenceAuthority(
   options?: InitializeAuthorityOptions
 ): Promise<InternalEvidenceAuthority> {
-  const isProduction =
-    process.env.NODE_ENV === 'production' ||
-    options?.authorityConfig?.strictEnforcement === true;
+  const isProduction = process.env.NODE_ENV === 'production';
 
   const { SecretLoader } = await import('../auth/secret-loader.js');
 
@@ -783,12 +796,36 @@ export async function initializeDefaultInternalEvidenceAuthority(
     }
   }
 
+  // 1. Non-security configuration applied first
+  const nonSecurityConfig: Record<string, any> = options?.authorityConfig
+    ? { ...options.authorityConfig }
+    : {};
+
+  // Strictly sanitize any attempted runtime injection of security properties
+  delete nonSecurityConfig.signingKey;
+  delete nonSecurityConfig.rotatedVerificationKeys;
+  delete nonSecurityConfig.serviceCredentials;
+  delete nonSecurityConfig.strictEnforcement;
+
+  // Enforce production replay registry restrictions
+  if (
+    isProduction &&
+    nonSecurityConfig.replayRegistry &&
+    (nonSecurityConfig.replayRegistry instanceof MemoryReplayRegistry ||
+      nonSecurityConfig.replayRegistry instanceof EvidenceReplayRegistry)
+  ) {
+    throw new Error(
+      'FATAL_REGISTRY_CONFIG_ERROR: Injected MemoryReplayRegistry is prohibited in production mode. Use DynamoDBReplayRegistry.'
+    );
+  }
+
+  // 2. Authoritative security configuration applied afterward from validated Secrets Manager secrets
   const authority = new InternalEvidenceAuthority({
+    ...nonSecurityConfig,
     signingKey: loadedSecrets.signingKey,
     rotatedVerificationKeys: loadedSecrets.rotatedVerificationKeys,
     serviceCredentials: loadedSecrets.serviceCredentials,
     strictEnforcement: isProduction,
-    ...options?.authorityConfig,
   });
 
   defaultAuthority = authority;
