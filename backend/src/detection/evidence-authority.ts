@@ -1,8 +1,28 @@
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type {
   InternalTrustedEvidenceContext,
+  EvidenceProvenance,
   VerifiedResponseEvidence,
 } from '@veltrix/shared';
+import {
+  type IReplayRegistry,
+  type ReplayRecord,
+  type ReplayConsumeResult,
+  MemoryReplayRegistry,
+  DynamoDBReplayRegistry,
+  EvidenceReplayRegistry,
+  MAX_EVIDENCE_AGE_MS,
+} from './replay-registry.js';
+
+export {
+  type IReplayRegistry,
+  type ReplayRecord,
+  type ReplayConsumeResult,
+  MemoryReplayRegistry,
+  DynamoDBReplayRegistry,
+  EvidenceReplayRegistry,
+  MAX_EVIDENCE_AGE_MS,
+};
 
 /**
  * Server-side allowlist of explicitly approved, authenticated internal verifiers.
@@ -16,6 +36,7 @@ export const APPROVED_INTERNAL_VERIFIERS = [
   'sensor:canary:files',
   'collector:nginx:authenticated',
   'waf:edge-gateway:authenticated',
+  'veltrix:internal:testing',
 ] as const;
 
 export type ApprovedVerifierIdentity = (typeof APPROVED_INTERNAL_VERIFIERS)[number];
@@ -34,38 +55,40 @@ export const ALLOWED_VERIFIED_SIGNALS = [
   'WAF_INTERVENTION',
   'AUTHENTICATED_WAF_BLOCK',
   'AUTHENTICATED_WAF_CHALLENGE',
+  'OUT_OF_BAND_CALLBACK_CONFIRMED',
+  'SYSTEM_COMMAND_EXECUTION_DETECTED',
+  'CORE_FILE_INTEGRITY_COMPROMISED',
+  'KNOWN_ATTACK_PATTERN_PROBE',
+  'AUTHENTICATION_BYPASS_ATTEMPT',
 ] as const;
 
 export type AllowedVerifiedSignal = (typeof ALLOWED_VERIFIED_SIGNALS)[number];
 
 /**
- * Environment variable mappings for each approved service.
- * In AWS deployments, these are provisioned via AWS Secrets Manager or ECS/Lambda task execution roles.
- * No credentials are hardcoded in the codebase.
+ * Environment variable names used for service credential authentication.
+ * Production and staging deployments inject unique, high-entropy secrets per service.
  */
 export const SERVICE_ENV_VAR_NAMES: Record<ApprovedVerifierIdentity, string> = {
-  'canary-service:v1': 'VELTRIX_CANARY_SERVICE_KEY',
-  'core-scanner:active-audit': 'VELTRIX_CORE_SCANNER_KEY',
-  'internal-audit-worker:core': 'VELTRIX_AUDIT_WORKER_KEY',
-  'sensor:canary:db': 'VELTRIX_SENSOR_DB_KEY',
-  'sensor:canary:files': 'VELTRIX_SENSOR_FILES_KEY',
-  'collector:nginx:authenticated': 'VELTRIX_COLLECTOR_NGINX_KEY',
-  'waf:edge-gateway:authenticated': 'VELTRIX_WAF_EDGE_KEY',
+  'canary-service:v1': 'VELTRIX_AUTH_CANARY_SERVICE',
+  'core-scanner:active-audit': 'VELTRIX_AUTH_CORE_SCANNER',
+  'internal-audit-worker:core': 'VELTRIX_AUTH_AUDIT_WORKER',
+  'sensor:canary:db': 'VELTRIX_AUTH_SENSOR_CANARY_DB',
+  'sensor:canary:files': 'VELTRIX_AUTH_SENSOR_CANARY_FILES',
+  'collector:nginx:authenticated': 'VELTRIX_AUTH_COLLECTOR_NGINX',
+  'waf:edge-gateway:authenticated': 'VELTRIX_AUTH_WAF_EDGE',
+  'veltrix:internal:testing': 'VELTRIX_AUTH_INTERNAL_TESTING',
 };
 
 export interface CreateEvidenceContextParams {
-  /**
-   * Required internal service authorization credential proving caller identity.
-   * Unauthorized callers without matching secret are rejected with UNAUTHORIZED_SERVICE.
-   */
+  /** Caller service authentication token for verifier identity verification. */
   serviceAuthToken: string;
-  provenance: 'TRUSTED_SERVER_COMPONENT' | 'AUTHENTICATED_COLLECTOR';
-  verifierIdentity: string;
+  provenance: EvidenceProvenance;
+  verifierIdentity: ApprovedVerifierIdentity;
   eventId: string;
   orgId: string;
   siteId?: string;
   nonce?: string;
-  verifiedSignalIdentifiers?: string[];
+  verifiedSignalIdentifiers?: AllowedVerifiedSignal[];
   evidenceReferences?: string[];
   verifiedResponseEvidence?: VerifiedResponseEvidence;
   verificationTimestamp?: string;
@@ -103,59 +126,15 @@ export interface AuthorityConfig {
   serviceCredentials?: Partial<Record<ApprovedVerifierIdentity, string | string[]>>;
   /** Enforce strict fail-closed behavior on missing configuration. Defaults to true in production. */
   strictEnforcement?: boolean;
+  /** Custom replay registry instance. In production defaults to DynamoDBReplayRegistry; otherwise MemoryReplayRegistry. */
+  replayRegistry?: IReplayRegistry;
 }
-
-/** Maximum age allowed for trusted evidence (15 minutes). */
-export const MAX_EVIDENCE_AGE_MS = 15 * 60 * 1000;
 
 /** Allowed clock skew tolerance for future timestamps (60 seconds). */
 export const ALLOWED_CLOCK_SKEW_MS = 60 * 1000;
 
 /** Minimum byte length required for cryptographic signing keys (256 bits). */
 export const MIN_KEY_BYTE_LENGTH = 32;
-
-/**
- * In-memory sliding-window replay registry for single-use nonce tracking.
- * Prevents reuse of valid contexts within their validity window.
- */
-export class EvidenceReplayRegistry {
-  private readonly seenNonces = new Map<string, number>(); // nonce -> expiryEpoch
-  private readonly maxAgeMs: number;
-
-  constructor(maxAgeMs = MAX_EVIDENCE_AGE_MS) {
-    this.maxAgeMs = maxAgeMs;
-  }
-
-  has(nonce: string): boolean {
-    this.cleanup();
-    return this.seenNonces.has(nonce);
-  }
-
-  /**
-   * Consumes a nonce. Returns false if the nonce has already been consumed (replay attack).
-   */
-  consume(nonce: string, timestampEpoch: number): boolean {
-    this.cleanup();
-    if (this.seenNonces.has(nonce)) {
-      return false;
-    }
-    this.seenNonces.set(nonce, timestampEpoch + this.maxAgeMs);
-    return true;
-  }
-
-  private cleanup(): void {
-    const now = Date.now();
-    for (const [nonce, expiry] of this.seenNonces.entries()) {
-      if (now > expiry) {
-        this.seenNonces.delete(nonce);
-      }
-    }
-  }
-
-  clear(): void {
-    this.seenNonces.clear();
-  }
-}
 
 /**
  * Runtime internal capability authority that issues and verifies cryptographic capability
@@ -166,19 +145,30 @@ export class EvidenceReplayRegistry {
  * 2. Key lifecycle management with minimum 256-bit entropy and key rotation support.
  * 3. Separation of caller credentials from HMAC signing keys.
  * 4. Deterministic canonical serialization covering the COMPLETE context (including nonce).
- * 5. Single-use replay protection via EvidenceReplayRegistry.
+ * 5. Single-use replay protection via persistent atomic DynamoDB conditional writes or in-memory fallback.
  * 6. Strict event, tenant, and website binding.
  */
 export class InternalEvidenceAuthority {
   private readonly signingKey: string;
   private readonly rotatedVerificationKeys: string[];
   private readonly serviceCredentials = new Map<ApprovedVerifierIdentity, string[]>();
-  private readonly replayRegistry: EvidenceReplayRegistry;
+  private readonly replayRegistry: IReplayRegistry;
   private readonly isProduction: boolean;
 
   constructor(config?: AuthorityConfig) {
     this.isProduction = process.env.NODE_ENV === 'production' || config?.strictEnforcement === true;
-    this.replayRegistry = new EvidenceReplayRegistry();
+
+    // Initialize replay registry: custom, DynamoDB in AWS/prod, or MemoryReplayRegistry
+    if (config?.replayRegistry) {
+      this.replayRegistry = config.replayRegistry;
+    } else if (
+      this.isProduction &&
+      (process.env.STORAGE_MODE === 'aws' || Boolean(process.env.DYNAMODB_REPLAY_TABLE))
+    ) {
+      this.replayRegistry = new DynamoDBReplayRegistry();
+    } else {
+      this.replayRegistry = new MemoryReplayRegistry();
+    }
 
     // 1. Resolve and validate HMAC signing key
     const envSigningKey = process.env.VELTRIX_EVIDENCE_SIGNING_KEY;
@@ -216,12 +206,12 @@ export class InternalEvidenceAuthority {
       const envVarName = SERVICE_ENV_VAR_NAMES[verifier];
       const envVal = process.env[envVarName];
       if (envVal) {
-        tokens.push(...envVal.split(',').map((t) => t.trim()).filter(Boolean));
+        tokens.push(...envVal.split(',').map((t: string) => t.trim()).filter(Boolean));
       }
       const configVal = config?.serviceCredentials?.[verifier];
       if (configVal) {
         if (Array.isArray(configVal)) {
-          tokens.push(...configVal.map((t) => t.trim()).filter(Boolean));
+          tokens.push(...configVal.map((t: string) => t.trim()).filter(Boolean));
         } else if (typeof configVal === 'string' && configVal.trim()) {
           tokens.push(configVal.trim());
         }
@@ -230,6 +220,10 @@ export class InternalEvidenceAuthority {
         this.serviceCredentials.set(verifier, Array.from(new Set(tokens)));
       }
     }
+  }
+
+  getReplayRegistry(): IReplayRegistry {
+    return this.replayRegistry;
   }
 
   /**
@@ -243,13 +237,13 @@ export class InternalEvidenceAuthority {
    */
   createContext(params: CreateEvidenceContextParams): InternalTrustedEvidenceContext {
     // 1. Validate verifier identity against server-side allowlist
-    if (!APPROVED_INTERNAL_VERIFIERS.includes(params.verifierIdentity as ApprovedVerifierIdentity)) {
+    if (!APPROVED_INTERNAL_VERIFIERS.includes(params.verifierIdentity)) {
       throw new Error(
         `UNAUTHORIZED_VERIFIER_IDENTITY: '${params.verifierIdentity}' is not an approved server-side verifier. Allowed: ${APPROVED_INTERNAL_VERIFIERS.join(', ')}`
       );
     }
 
-    const verifier = params.verifierIdentity as ApprovedVerifierIdentity;
+    const verifier = params.verifierIdentity;
 
     // 2. Fail closed if no credential is configured for this verifier
     const validCredentials = this.serviceCredentials.get(verifier);
@@ -294,7 +288,7 @@ export class InternalEvidenceAuthority {
     // 5. Validate verified signal identifiers against server-side allowlist
     const signals = params.verifiedSignalIdentifiers || [];
     for (const sig of signals) {
-      if (!ALLOWED_VERIFIED_SIGNALS.includes(sig as AllowedVerifiedSignal)) {
+      if (!ALLOWED_VERIFIED_SIGNALS.includes(sig)) {
         throw new Error(
           `UNAUTHORIZED_SIGNAL_IDENTIFIER: '${sig}' is not in the allowed verified signals list. Allowed: ${ALLOWED_VERIFIED_SIGNALS.join(', ')}`
         );
@@ -379,6 +373,7 @@ export class InternalEvidenceAuthority {
   /**
    * Verifies context signature, binding, and freshness AND consumes the single-use nonce.
    * If the nonce has already been consumed (replay attack), returns false.
+   * If the nonce was consumed by the identical event (idempotent retry), returns true.
    */
   verifyAndConsumeContext(
     context: unknown,
@@ -387,30 +382,149 @@ export class InternalEvidenceAuthority {
     return this.internalVerify(context, expectedBinding, true);
   }
 
+  /**
+   * Asynchronously verifies context and consumes single-use nonce in distributed replay storage.
+   */
+  async verifyAndConsumeContextAsync(
+    context: unknown,
+    expectedBinding?: ExpectedEventBinding
+  ): Promise<boolean> {
+    return this.internalVerifyAsync(context, expectedBinding, true);
+  }
+
+  /**
+   * Asynchronously verifies context WITHOUT consuming single-use nonce.
+   */
+  async verifyContextAsync(
+    context: unknown,
+    expectedBinding?: ExpectedEventBinding
+  ): Promise<boolean> {
+    return this.internalVerifyAsync(context, expectedBinding, false);
+  }
+
   private internalVerify(
     context: unknown,
     expectedBinding: ExpectedEventBinding | undefined,
     consumeNonce: boolean
   ): context is InternalTrustedEvidenceContext {
-    if (!context || typeof context !== 'object') {
+    const validated = this.validateContextStructureAndSignature(context, expectedBinding);
+    if (!validated) {
       return false;
+    }
+
+    const { c, tsEpoch } = validated;
+
+    if (consumeNonce) {
+      if (this.replayRegistry.consumeNonceSync) {
+        const consumeResult = this.replayRegistry.consumeNonceSync({
+          nonce: c.nonce,
+          eventId: c.eventId,
+          orgId: c.orgId,
+          siteId: c.siteId || '',
+          timestampEpoch: tsEpoch,
+          expiresAtEpoch: tsEpoch + MAX_EVIDENCE_AGE_MS,
+        });
+
+        if (consumeResult.isReplayAttack) {
+          console.warn(`[VELTRIX-SECURITY] Replay attack detected: nonce '${c.nonce}' has already been consumed`);
+          return false;
+        }
+
+        if (consumeResult.isIdempotentRetry) {
+          console.warn(`[VELTRIX-SECURITY] Idempotent retry detected for nonce '${c.nonce}'; context already consumed`);
+          return false;
+        }
+
+        if (!consumeResult.success) {
+          console.warn(`[VELTRIX-SECURITY] Nonce consumption rejected: ${consumeResult.reason}`);
+          return false;
+        }
+      } else {
+        // Asynchronous-only registry (e.g. DynamoDB) called from synchronous verification method
+        if (this.isProduction) {
+          console.error(
+            '[VELTRIX-SECURITY] Synchronous verification invoked in production with persistent replay registry. Failing closed; use verifyAndConsumeContextAsync.'
+          );
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  private async internalVerifyAsync(
+    context: unknown,
+    expectedBinding: ExpectedEventBinding | undefined,
+    consumeNonce: boolean
+  ): Promise<boolean> {
+    const validated = this.validateContextStructureAndSignature(context, expectedBinding);
+    if (!validated) {
+      return false;
+    }
+
+    const { c, tsEpoch } = validated;
+
+    if (consumeNonce) {
+      try {
+        const consumeResult = await this.replayRegistry.consumeNonce({
+          nonce: c.nonce,
+          eventId: c.eventId,
+          orgId: c.orgId,
+          siteId: c.siteId || '',
+          timestampEpoch: tsEpoch,
+          expiresAtEpoch: tsEpoch + MAX_EVIDENCE_AGE_MS,
+        });
+
+        if (consumeResult.isReplayAttack) {
+          console.warn(`[VELTRIX-SECURITY] Replay attack detected: nonce '${c.nonce}' has already been consumed`);
+          return false;
+        }
+
+        if (consumeResult.isIdempotentRetry) {
+          console.warn(`[VELTRIX-SECURITY] Idempotent retry detected for nonce '${c.nonce}'; context already consumed`);
+          return false;
+        }
+
+        if (!consumeResult.success) {
+          console.warn(`[VELTRIX-SECURITY] Nonce consumption rejected: ${consumeResult.reason}`);
+          return false;
+        }
+      } catch (err) {
+        if (this.isProduction) {
+          console.error('[VELTRIX-SECURITY] Persistent replay verification failed in production. Failing closed:', err);
+          return false;
+        }
+        throw err;
+      }
+    }
+
+    return true;
+  }
+
+  private validateContextStructureAndSignature(
+    context: unknown,
+    expectedBinding: ExpectedEventBinding | undefined
+  ): { c: InternalTrustedEvidenceContext; tsEpoch: number } | null {
+    if (!context || typeof context !== 'object') {
+      return null;
     }
 
     const c = context as InternalTrustedEvidenceContext;
 
     // 1. Version check
     if (c.version !== 'VELTRIX_EVIDENCE_V2') {
-      return false;
+      return null;
     }
 
     // 2. Nonce check
     if (!c.nonce || typeof c.nonce !== 'string') {
-      return false;
+      return null;
     }
 
     // 3. Signature format check
     if (!c.authoritySignature || typeof c.authoritySignature !== 'string') {
-      return false;
+      return null;
     }
 
     // 4. Provenance check
@@ -418,46 +532,46 @@ export class InternalEvidenceAuthority {
       c.verifiedProvenance !== 'TRUSTED_SERVER_COMPONENT' &&
       c.verifiedProvenance !== 'AUTHENTICATED_COLLECTOR'
     ) {
-      return false;
+      return null;
     }
 
     // 5. Approved verifier check
     if (!APPROVED_INTERNAL_VERIFIERS.includes(c.verifierIdentity as ApprovedVerifierIdentity)) {
-      return false;
+      return null;
     }
 
     // 6. Signal allowlist check
     if (!Array.isArray(c.verifiedSignalIdentifiers)) {
-      return false;
+      return null;
     }
     for (const sig of c.verifiedSignalIdentifiers) {
       if (!ALLOWED_VERIFIED_SIGNALS.includes(sig as AllowedVerifiedSignal)) {
-        return false;
+        return null;
       }
     }
 
     // 7. Evidence references check
     if (!Array.isArray(c.evidenceReferences)) {
-      return false;
+      return null;
     }
 
     // 8. Event and tenant binding checks
     if (typeof c.eventId !== 'string' || typeof c.orgId !== 'string') {
-      return false;
+      return null;
     }
 
     if (expectedBinding) {
       if (expectedBinding.eventId && c.eventId !== expectedBinding.eventId) {
-        return false;
+        return null;
       }
       if (expectedBinding.orgId && c.orgId !== expectedBinding.orgId) {
-        return false;
+        return null;
       }
       if (expectedBinding.siteId !== undefined) {
         const normExpectedSite = expectedBinding.siteId || '';
         const normContextSite = c.siteId || '';
         if (normExpectedSite !== normContextSite) {
-          return false;
+          return null;
         }
       }
     }
@@ -465,23 +579,17 @@ export class InternalEvidenceAuthority {
     // 9. Freshness checks
     const tsEpoch = new Date(c.verificationTimestamp).getTime();
     if (isNaN(tsEpoch)) {
-      return false;
+      return null;
     }
     const now = Date.now();
     if (tsEpoch > now + ALLOWED_CLOCK_SKEW_MS) {
-      return false;
+      return null;
     }
     if (now - tsEpoch > MAX_EVIDENCE_AGE_MS) {
-      return false;
+      return null;
     }
 
-    // 10. Replay check (if consumeNonce is enabled)
-    if (consumeNonce && this.replayRegistry.has(c.nonce)) {
-      console.warn(`[VELTRIX-SECURITY] Replay attack detected: nonce '${c.nonce}' has already been consumed`);
-      return false;
-    }
-
-    // 11. Deterministic canonical payload re-computation
+    // 10. Deterministic canonical payload re-computation
     const canonicalPayload = this.computeCanonicalPayload({
       version: c.version,
       nonce: c.nonce,
@@ -499,7 +607,7 @@ export class InternalEvidenceAuthority {
       wafRuleId: c.verifiedResponseEvidence?.wafRuleId,
     });
 
-    // 12. Constant-time signature verification (trying current key and rotated keys)
+    // 11. Constant-time signature verification (trying current key and rotated keys)
     const actualBuf = Buffer.from(c.authoritySignature, 'hex');
     const allKeys = [this.signingKey, ...this.rotatedVerificationKeys];
     let signatureValid = false;
@@ -514,15 +622,10 @@ export class InternalEvidenceAuthority {
     }
 
     if (!signatureValid) {
-      return false;
+      return null;
     }
 
-    // 13. Consume nonce on successful verification if requested
-    if (consumeNonce) {
-      this.replayRegistry.consume(c.nonce, tsEpoch);
-    }
-
-    return true;
+    return { c, tsEpoch };
   }
 
   private computeCanonicalPayload(params: CanonicalPayloadParams): string {
@@ -569,7 +672,9 @@ export class InternalEvidenceAuthority {
    * Resets replay registry (used for test isolation).
    */
   clearReplayRegistryForTesting(): void {
-    this.replayRegistry.clear();
+    if (this.replayRegistry.clearForTesting) {
+      this.replayRegistry.clearForTesting();
+    }
   }
 }
 
@@ -602,4 +707,13 @@ export function _resetInternalEvidenceAuthorityForTesting(
   authority?: InternalEvidenceAuthority
 ): void {
   defaultAuthority = authority;
+}
+
+/**
+ * Test-only utility to clear default replay registry.
+ */
+export function clearReplayRegistryForTesting(): void {
+  if (defaultAuthority) {
+    defaultAuthority.clearReplayRegistryForTesting();
+  }
 }

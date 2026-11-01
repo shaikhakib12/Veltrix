@@ -344,6 +344,27 @@ Resources:
       SSESpecification:
         SSEEnabled: true
 
+  EvidenceReplayTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'Veltrix-EvidenceReplay-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+
   # ============================================================================
   # 2. SQS FIFO Audit Queues
   # ============================================================================
@@ -490,6 +511,15 @@ Resources:
             TableName: !Ref IncidentsTable
         - DynamoDBReadPolicy:
             TableName: !Ref DetectionRulesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref EvidenceReplayTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource:
+                - !Ref EvidenceSigningKeySecret
+                - !Ref EvidenceServiceCredentialsSecret
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment
@@ -497,6 +527,9 @@ Resources:
           DYNAMODB_EVENTS_TABLE: !Ref SecurityEventsTable
           DYNAMODB_INCIDENTS_TABLE: !Ref IncidentsTable
           DYNAMODB_RULES_TABLE: !Ref DetectionRulesTable
+          DYNAMODB_REPLAY_TABLE: !Ref EvidenceReplayTable
+          VELTRIX_EVIDENCE_SIGNING_KEY_SECRET_ARN: !Ref EvidenceSigningKeySecret
+          VELTRIX_SERVICE_CREDENTIALS_SECRET_ARN: !Ref EvidenceServiceCredentialsSecret
       Events:
         SecurityEventStream:
           Type: DynamoDB
@@ -512,6 +545,27 @@ Resources:
             MaximumRetryAttempts: 3
             FunctionResponseTypes:
               - ReportBatchItemFailures
+
+  # ============================================================================
+  # 6. AWS Secrets Manager Secret Provisioning (SEC-P7-010)
+  # ============================================================================
+
+  EvidenceSigningKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'veltrix/evidence-signing-key-${Environment}'
+      Description: Primary 256-bit HMAC signing key for Veltrix evidence capability authority
+      GenerateSecretString:
+        SecretStringTemplate: '{"signingKey": ""}'
+        GenerateStringKey: signingKey
+        PasswordLength: 64
+        ExcludePunctuation: true
+
+  EvidenceServiceCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub 'veltrix/evidence-service-credentials-${Environment}'
+      Description: Authentication credentials for approved internal verifier services
 
 Outputs:
   SecurityEventsTableName:
@@ -537,3 +591,15 @@ Outputs:
   CognitoUserPoolClientId:
     Description: Cognito User Pool App Client ID
     Value: !Ref CognitoUserPoolClient
+
+  EvidenceReplayTableName:
+    Description: DynamoDB Evidence Replay Protection table
+    Value: !Ref EvidenceReplayTable
+
+  EvidenceSigningKeySecretArn:
+    Description: Secrets Manager Secret ARN for Evidence HMAC Signing Key
+    Value: !Ref EvidenceSigningKeySecret
+
+  EvidenceServiceCredentialsSecretArn:
+    Description: Secrets Manager Secret ARN for Evidence Service Credentials
+    Value: !Ref EvidenceServiceCredentialsSecret
