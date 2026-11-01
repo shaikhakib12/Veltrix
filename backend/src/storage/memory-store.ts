@@ -92,8 +92,7 @@ export class MemoryStore implements StorageInterface {
     }
 
     const orgEvents = this.eventsByOrg.get(orgId)!;
-    const { trustedEvidenceContext: _discard, ...cleanEvent } = event;
-    orgEvents.push({ ...cleanEvent } as SecurityEvent);
+    orgEvents.push({ ...event });
 
     return { saved: true, isDuplicate: false, eventId: event.eventId };
   }

@@ -173,14 +173,19 @@ Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` execut
 12. PR #10 Final Credential & Runtime Security Hardening: deterministic canonical serialization signing 14 fields (including single-use nonce), elimination of all hardcoded fallback credentials, fail-closed service authentication, credential rotation, HMAC signing key lifecycle with minimum 256-bit entropy, key rotation (`rotatedVerificationKeys`), sliding-window `EvidenceReplayRegistry` preventing same-context replay within the validity window, and removal of public authority creation exports.
 13. Distributed Replay Protection & AWS Secrets Provisioning (SEC-P7-010): persistent atomic replay protection using AWS DynamoDB (`DynamoDBReplayRegistry` with `attribute_not_exists(PK)` conditional write), application-level 15-minute expiration independent of DynamoDB background TTL, differentiated idempotent retry handling, in-memory test fallback (`MemoryReplayRegistry`), AWS Secrets Manager IaC resource definitions and scoped IAM policies in `infrastructure/template.yaml`, runtime secret loader (`SecretLoader`) with 5-minute in-memory caching and fail-closed production enforcement, and formal permanent invalidation of historical fallback placeholder credentials from commit `28b5079`.
 
+14. PR #11 Runtime Hardening & Stream Evidence Reconstruction:
+    - Asynchronous `initializeDefaultInternalEvidenceAuthority()` integrating `SecretLoader.loadSecrets()` with production fail-closed enforcement.
+    - Strict production rejection of `MemoryReplayRegistry` / `EvidenceReplayRegistry` and enforcement of `DYNAMODB_REPLAY_TABLE`.
+    - DynamoDB Stream `trustedEvidenceContext` retention, Lambda unmarshalling, async rule evaluation, and public endpoint sanitization.
+
 ### Full Monorepo Test Results:
 ```
 > veltrix-monorepo@1.0.0 test
 > npm run test --workspaces --if-present
 
 @veltrix/sdk-node: 8 passed (8 tests)
-@veltrix/backend: 261 passed (261 tests)
-Total: 269 / 269 passed (100% pass rate)
+@veltrix/backend: 278 passed (278 tests)
+Total: 286 / 286 passed (100% pass rate)
 ```
 
 ---
@@ -191,4 +196,4 @@ Phase 7 (TASK-701 through TASK-707) and all subsequent distributed security hard
 Per instructions:
 - Phase 7 is NOT merged into `main`.
 - Phase 8 has NOT been started.
-- All outstanding changes are submitted via a follow-up feature branch (`feature/phase-7-distributed-security-hardening`) targeting `main`.
+- All outstanding changes are submitted via follow-up Pull Request #11 on `feature/phase-7-distributed-security-hardening` targeting `main`.

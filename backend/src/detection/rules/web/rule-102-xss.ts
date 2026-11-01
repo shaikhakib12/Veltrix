@@ -6,7 +6,7 @@ import type {
 } from '@veltrix/shared';
 import { BaseDetectionRule } from '../base-rule.js';
 import type { RuleEvaluationContext } from '../../types.js';
-import { normalizeWebTelemetry } from '../../web-parser.js';
+import { normalizeWebTelemetry, normalizeWebTelemetryAsync } from '../../web-parser.js';
 
 export class Rule102CrossSiteScripting extends BaseDetectionRule {
   readonly id = 'RULE-102';
@@ -80,7 +80,7 @@ export class Rule102CrossSiteScripting extends BaseDetectionRule {
     const eventsByEntity = new Map<string, Array<{ event: (typeof events)[0]; matches: string[]; meta: ReturnType<typeof normalizeWebTelemetry> }>>();
 
     for (const event of events) {
-      const normalized = normalizeWebTelemetry(event);
+      const normalized = await normalizeWebTelemetryAsync(event);
       const matchedSignatures: string[] = [];
 
       for (const payload of normalized.decodedPayloads) {
@@ -195,6 +195,7 @@ export class Rule102CrossSiteScripting extends BaseDetectionRule {
                 httpMethod: latestItem.meta.httpMethod,
                 matchedPatterns,
                 confidenceLevel: highestConfidence,
+                evidenceProvenance: latestItem.meta.evidenceProvenance,
                 corroboratingSignals: latestItem.meta.corroboratingSignals,
                 attackType: 'XSS',
               },

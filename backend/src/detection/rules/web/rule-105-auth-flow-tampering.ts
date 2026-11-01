@@ -6,7 +6,7 @@ import type {
 } from '@veltrix/shared';
 import { BaseDetectionRule } from '../base-rule.js';
 import type { RuleEvaluationContext } from '../../types.js';
-import { normalizeWebTelemetry } from '../../web-parser.js';
+import { normalizeWebTelemetry, normalizeWebTelemetryAsync } from '../../web-parser.js';
 
 export class Rule105AuthFlowTampering extends BaseDetectionRule {
   readonly id = 'RULE-105';
@@ -57,7 +57,7 @@ export class Rule105AuthFlowTampering extends BaseDetectionRule {
     const eventsByEntity = new Map<string, Array<{ event: (typeof events)[0]; meta: ReturnType<typeof normalizeWebTelemetry>; isAuthTampering: boolean }>>();
 
     for (const event of events) {
-      const normalized = normalizeWebTelemetry(event);
+      const normalized = await normalizeWebTelemetryAsync(event);
       const path = normalized.normalizedPath;
 
       const isAuthPath = this.authEndpoints.some((rx) => rx.test(path));

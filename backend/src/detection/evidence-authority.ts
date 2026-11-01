@@ -158,18 +158,6 @@ export class InternalEvidenceAuthority {
   constructor(config?: AuthorityConfig) {
     this.isProduction = process.env.NODE_ENV === 'production' || config?.strictEnforcement === true;
 
-    // Initialize replay registry: custom, DynamoDB in AWS/prod, or MemoryReplayRegistry
-    if (config?.replayRegistry) {
-      this.replayRegistry = config.replayRegistry;
-    } else if (
-      this.isProduction &&
-      (process.env.STORAGE_MODE === 'aws' || Boolean(process.env.DYNAMODB_REPLAY_TABLE))
-    ) {
-      this.replayRegistry = new DynamoDBReplayRegistry();
-    } else {
-      this.replayRegistry = new MemoryReplayRegistry();
-    }
-
     // 1. Resolve and validate HMAC signing key
     const envSigningKey = process.env.VELTRIX_EVIDENCE_SIGNING_KEY;
     const resolvedKey = config?.signingKey || envSigningKey;
@@ -189,6 +177,53 @@ export class InternalEvidenceAuthority {
         );
       }
       this.signingKey = resolvedKey;
+    }
+
+    // 2. Initialize replay registry: strict production enforcement vs development/testing
+    if (this.isProduction) {
+      if (config?.replayRegistry) {
+        // Explicitly injected MemoryReplayRegistry MUST be rejected in production
+        if (
+          config.replayRegistry instanceof MemoryReplayRegistry ||
+          config.replayRegistry instanceof EvidenceReplayRegistry ||
+          config.replayRegistry.constructor.name === 'MemoryReplayRegistry' ||
+          config.replayRegistry.constructor.name === 'EvidenceReplayRegistry'
+        ) {
+          throw new Error(
+            'FATAL_REGISTRY_CONFIG_ERROR: Injected MemoryReplayRegistry is prohibited in production mode. Persistent distributed storage (DynamoDBReplayRegistry) is required.'
+          );
+        }
+        this.replayRegistry = config.replayRegistry;
+      } else {
+        // Missing or incorrect STORAGE_MODE must not activate memory fallback
+        if (process.env.STORAGE_MODE && process.env.STORAGE_MODE !== 'aws') {
+          throw new Error(
+            `FATAL_REGISTRY_CONFIG_ERROR: Invalid STORAGE_MODE '${process.env.STORAGE_MODE}' in production. Memory fallback is prohibited; must use 'aws'.`
+          );
+        }
+
+        // Missing DYNAMODB_REPLAY_TABLE must cause initialization failure
+        const replayTable = process.env.DYNAMODB_REPLAY_TABLE;
+        if (!replayTable || replayTable.trim() === '') {
+          throw new Error(
+            'FATAL_REGISTRY_CONFIG_ERROR: DYNAMODB_REPLAY_TABLE environment variable must be configured in production mode. Memory fallback is prohibited.'
+          );
+        }
+
+        this.replayRegistry = new DynamoDBReplayRegistry({ tableName: replayTable });
+      }
+    } else {
+      // Local development and isolated tests can continue using memory
+      if (config?.replayRegistry) {
+        this.replayRegistry = config.replayRegistry;
+      } else if (
+        process.env.STORAGE_MODE === 'aws' ||
+        Boolean(process.env.DYNAMODB_REPLAY_TABLE)
+      ) {
+        this.replayRegistry = new DynamoDBReplayRegistry();
+      } else {
+        this.replayRegistry = new MemoryReplayRegistry();
+      }
     }
 
     // 2. Resolve rotated verification keys
@@ -680,16 +715,112 @@ export class InternalEvidenceAuthority {
   }
 }
 
+export interface InitializeAuthorityOptions {
+  secretLoader?: any;
+  secretLoaderConfig?: any;
+  authorityConfig?: Partial<AuthorityConfig>;
+  forceRefresh?: boolean;
+}
+
 let defaultAuthority: InternalEvidenceAuthority | undefined;
+let isDefaultAuthorityInitialized = false;
+
+/**
+ * Asynchronously initializes the default InternalEvidenceAuthority singleton by loading
+ * credentials from AWS Secrets Manager (or secure environment in non-production).
+ *
+ * In production mode:
+ * - Must successfully load 256-bit signing key from Secrets Manager.
+ * - Must successfully load service credentials for approved verifiers.
+ * - Fails closed (throws FATAL_KEY_CONFIG_ERROR) if secrets cannot be loaded.
+ * - Never falls back to generated development keys or missing service credentials.
+ */
+export async function initializeDefaultInternalEvidenceAuthority(
+  options?: InitializeAuthorityOptions
+): Promise<InternalEvidenceAuthority> {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    options?.authorityConfig?.strictEnforcement === true;
+
+  const { SecretLoader } = await import('../auth/secret-loader.js');
+
+  const loader =
+    options?.secretLoader ||
+    new SecretLoader({
+      strictEnforcement: isProduction,
+      ...options?.secretLoaderConfig,
+    });
+
+  let loadedSecrets: any;
+  try {
+    loadedSecrets = await loader.loadSecrets(options?.forceRefresh);
+  } catch (err) {
+    if (isProduction) {
+      console.error('[VELTRIX-SECURITY] Failed to load secrets in production:', err);
+      throw new Error(
+        `FATAL_KEY_CONFIG_ERROR: Failed to load secrets from Secrets Manager in production: ${(err as Error).message}`
+      );
+    }
+    throw err;
+  }
+
+  if (isProduction) {
+    if (!loadedSecrets.signingKey) {
+      throw new Error(
+        'FATAL_KEY_CONFIG_ERROR: VELTRIX_EVIDENCE_SIGNING_KEY must be securely loaded from Secrets Manager in production.'
+      );
+    }
+    if (Buffer.from(loadedSecrets.signingKey).length < MIN_KEY_BYTE_LENGTH) {
+      throw new Error(
+        `FATAL_KEY_CONFIG_ERROR: Signing key must be at least ${MIN_KEY_BYTE_LENGTH} bytes (256 bits) for cryptographic security.`
+      );
+    }
+    const configuredServiceCount = Object.keys(loadedSecrets.serviceCredentials || {}).length;
+    if (configuredServiceCount === 0) {
+      throw new Error(
+        'FATAL_KEY_CONFIG_ERROR: At least one approved verifier service credential must be loaded in production mode.'
+      );
+    }
+  }
+
+  const authority = new InternalEvidenceAuthority({
+    signingKey: loadedSecrets.signingKey,
+    rotatedVerificationKeys: loadedSecrets.rotatedVerificationKeys,
+    serviceCredentials: loadedSecrets.serviceCredentials,
+    strictEnforcement: isProduction,
+    ...options?.authorityConfig,
+  });
+
+  defaultAuthority = authority;
+  isDefaultAuthorityInitialized = true;
+  return defaultAuthority;
+}
 
 /**
  * Returns the process-wide internal evidence authority singleton for verification.
+ * In production mode, throws UNINITIALIZED_EVIDENCE_AUTHORITY if called before
+ * initializeDefaultInternalEvidenceAuthority() completes.
  */
 export function getDefaultInternalEvidenceAuthority(): InternalEvidenceAuthority {
+  const isProduction = process.env.NODE_ENV === 'production';
+
   if (!defaultAuthority) {
+    if (isProduction) {
+      throw new Error(
+        'UNINITIALIZED_EVIDENCE_AUTHORITY: Default InternalEvidenceAuthority has not been asynchronously initialized with SecretLoader. Call initializeDefaultInternalEvidenceAuthority() during server/Lambda startup.'
+      );
+    }
     defaultAuthority = new InternalEvidenceAuthority();
+    isDefaultAuthorityInitialized = true;
   }
   return defaultAuthority;
+}
+
+/**
+ * Returns whether the default internal evidence authority has been initialized.
+ */
+export function isInternalEvidenceAuthorityInitialized(): boolean {
+  return isDefaultAuthorityInitialized;
 }
 
 /**
@@ -709,6 +840,7 @@ export function _resetInternalEvidenceAuthorityForTesting(
   authority?: InternalEvidenceAuthority
 ): void {
   defaultAuthority = authority;
+  isDefaultAuthorityInitialized = Boolean(authority);
 }
 
 /**

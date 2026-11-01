@@ -252,18 +252,39 @@ All **9 security audit findings** identified during review have been fully remed
 
 ```
 Test Files  8 passed (8 across monorepo)
-     Tests  254 passed (254) - @veltrix/backend
+     Tests  278 passed (278) - @veltrix/backend
      Tests  8 passed (8)     - @veltrix/sdk-node
-  Total:    262 / 262 passed (100% pass rate)
+  Total:    286 / 286 passed (100% pass rate)
 ```
 
-- All 58 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including Section 9 regression tests, Section 10 trust-boundary tests, and Section 11 distributed replay / secrets management tests).
+- All 82 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including Section 9 regression tests, Section 10 trust-boundary tests, Section 11 distributed replay / secrets management tests, Section 12 idempotent retry tests, Section 13 asynchronous secret loading tests, Section 14 production replay registry tests, and Section 15 DynamoDB stream reconstruction tests).
 - Full tenant boundary isolation and API key prohibition regression tests pass.
 - False positive suppression verified across all 5 web attack rules.
 
 ---
 
-## 5. Residual Risks & Phase 8 Preparation
+## 5. PR #11 Runtime Hardening & Stream Reconstruction Audit Addendum
+
+### 5.1 Finding 1 — Asynchronous SecretLoader Authority Initialization
+- **Issue:** Previously, `getDefaultInternalEvidenceAuthority()` directly instantiated `InternalEvidenceAuthority` synchronously without loading production keys from Secrets Manager.
+- **Remediation:** Added `initializeDefaultInternalEvidenceAuthority()` supporting asynchronous secrets retrieval via `SecretLoader.loadSecrets()`. In production mode, any attempt to invoke `getDefaultInternalEvidenceAuthority()` before initialization throws `UNINITIALIZED_EVIDENCE_AUTHORITY`. Both Express server bootstrap (`backend/src/index.ts`) and AWS Lambda DynamoDB stream handler (`backend/src/detection/stream-handler.ts`) now asynchronously initialize the default authority during startup.
+
+### 5.2 Finding 2 — Strict Replay Registry Enforcement in Production
+- **Issue:** Development in-memory replay registries could theoretically be injected or activated via fallback if configuration variables were missing.
+- **Remediation:** `InternalEvidenceAuthority` and `DynamoDBReplayRegistry` constructors now strictly enforce production requirements: `MemoryReplayRegistry` and `EvidenceReplayRegistry` are explicitly rejected in production mode (`FATAL_REGISTRY_CONFIG_ERROR`). Missing `DYNAMODB_REPLAY_TABLE` or specifying `STORAGE_MODE=memory` in production fails closed immediately. Non-production and test environments continue using in-memory mocks without friction.
+
+### 5.3 Finding 3 — DynamoDB Stream Evidence Reconstruction & Public Sanitization
+- **Issue:** DynamoDB stream ingestion previously dropped `trustedEvidenceContext`, preventing stream-triggered Lambda detection workers from evaluating verified evidence. Additionally, public HTTP endpoints needed explicit sanitization to ensure internal HMAC tokens and nonces are never leaked.
+- **Remediation:**
+  - `DynamoDBStore` and `MemoryStore` preserve `trustedEvidenceContext` on internal event records.
+  - `stream-handler.ts` unmarshalls `trustedEvidenceContext` from the stream's `NewImage` and forwards it to `DetectionPipeline`.
+  - All web detection rules (`Rule101SqlInjection` through `Rule105AuthFlowTampering`) asynchronously evaluate and verify evidence via `normalizeWebTelemetryAsync`.
+  - Public HTTP endpoints (`GET /api/v1/events` and `GET /api/v1/events/:eventId`) explicitly strip `trustedEvidenceContext` from HTTP responses, preventing external leakage of internal cryptographic artifacts.
+  - `EventService` introduces `ingestInternalEvent` for authenticated verifier components, while rejecting any client-supplied `trustedEvidenceContext` from untrusted public ingestion.
+
+---
+
+## 6. Residual Risks & Phase 8 Preparation
 
 1. **Vulnerability Correlation Scope:**
    - In Phase 7, vulnerability findings are simulated and correlated through `VulnerabilityCorrelator`. In Phase 8 ("Authorized Website Vulnerability Assessment"), dynamic scan findings from the active assessment engine will be automatically fed into this correlation interface.
@@ -274,8 +295,8 @@ Test Files  8 passed (8 across monorepo)
 
 ---
 
-## 6. Audit Conclusion
+## 7. Audit Conclusion
 
-The Phase 7 implementation fulfills all security, architectural, and quality standards mandated by the VELTRIX project roadmap. All 10 audit findings have been remediated, verified, and accompanied by comprehensive regression tests.
+The Phase 7 implementation fulfills all security, architectural, and quality standards mandated by the VELTRIX project roadmap. All 13 audit findings across all security audits have been remediated, verified, and accompanied by comprehensive regression tests.
 
-The branch `feature/phase-7-distributed-security-hardening` and follow-up Pull Request are certified **SECURE & READY FOR PULL REQUEST REVIEW**.
+The branch `feature/phase-7-distributed-security-hardening` and follow-up Pull Request #11 are certified **SECURE & READY FOR PULL REQUEST REVIEW**.
