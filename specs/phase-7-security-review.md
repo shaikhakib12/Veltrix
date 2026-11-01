@@ -187,7 +187,7 @@ All **9 security audit findings** identified during review have been fully remed
      - Partition key `PK: NONCE#<nonce>`, sort key `SK: REPLAY_RECORD`.
      - Application-level 15-minute expiration check in code independent of DynamoDB background TTL.
      - DynamoDB TTL attribute set with 1-hour safety buffer for eventual background garbage collection.
-     - Differentiates legitimate idempotent retries (`eventId`, `orgId`, `siteId` identical) from active replay attacks (`eventId` or `orgId` different). In both cases, the single-use nonce is not consumed twice (`verifyAndConsumeContext` returns false).
+     - Differentiates legitimate idempotent retries (`eventId`, `orgId`, `siteId` identical) from active replay attacks (`eventId` or `orgId` different). For legitimate retries, `verifyAndConsumeContext` / `verifyAndConsumeContextAsync` returns `true`, retaining the original trusted verification result without re-consuming nonces, preventing legitimate evidence loss on worker crashes or retry loops. For active replay attacks, it returns `false` (`UNTRUSTED_CLIENT`).
      - Strict fail-closed behavior on persistent storage unavailability in production (`PERSISTENT_STORAGE_UNAVAILABLE`).
      - Provided `MemoryReplayRegistry` for local development and isolated unit test execution.
   2. **AWS Secrets Manager Infrastructure as Code (`infrastructure/template.yaml`):**
@@ -208,17 +208,27 @@ All **9 security audit findings** identified during review have been fully remed
   5. **Unverified Live Deployment Requirements:**
      - The CloudFormation stack deployment to live AWS accounts remains unverified locally (pending live production credentials).
      - Live AWS Secrets Manager secret population and VPC endpoint connectivity (`com.amazonaws.region.secretsmanager`) must be provisioned during AWS infrastructure rollout.
-- **Test Evidence:** 10 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 11:
-  - `1. two separate registry instances receiving the same nonce detect replay`
-  - `2. concurrent attempts to consume the same nonce: exactly one succeeds`
-  - `3. application restart and subsequent replay: persistent storage survives process restart`
-  - `4. cross-tenant and cross-site replay are detected and rejected`
-  - `5. expired nonce behavior: 15-minute expiration enforced in code independently of DynamoDB TTL`
-  - `6. persistent storage unavailable in production fails closed`
-  - `7. legitimate ingestion retries and idempotency: identical event retry is flagged as idempotent retry`
-  - `8. SecretLoader retrieves secrets from environment and caches for TTL`
-  - `9. SecretLoader retrieves and parses JSON secrets from Secrets Manager`
-  - `10. normalizeWebTelemetryAsync correctly authenticates and consumes evidence asynchronously`
+- **Test Evidence:** 17 dedicated regression tests across Section 11 & Section 12 in `backend/tests/web-detection-correlation.test.ts`:
+  - *Section 11 (Distributed Replay & Secrets Provisioning):*
+    - `1. two separate registry instances receiving the same nonce detect replay`
+    - `2. concurrent attempts to consume the same nonce: exactly one succeeds`
+    - `3. application restart and subsequent replay: persistent storage survives process restart`
+    - `4. cross-tenant and cross-site replay are detected and rejected`
+    - `5. expired nonce behavior: 15-minute expiration enforced in code independently of DynamoDB TTL`
+    - `6. persistent storage unavailable in production fails closed`
+    - `7. legitimate ingestion retries and idempotency: identical event retry is flagged as idempotent retry`
+    - `8. SecretLoader retrieves secrets from environment and caches for TTL`
+    - `9. SecretLoader retrieves and parses JSON secrets from Secrets Manager`
+    - `10. normalizeWebTelemetryAsync correctly authenticates and consumes evidence asynchronously`
+  - *Section 12 (Idempotent Retries, Crash Resilience & Concurrency):*
+    - `1. legitimate retry retains original trusted verification result across sync and async paths`
+    - `2. processing retry does not generate duplicate alerts in detection or correlation engines`
+    - `3. retry cannot bypass signature validation, tenant binding, or payload tampering checks`
+    - `4. crash between nonce consumption and event processing does not permanently lose legitimate evidence`
+    - `5. downstream correlation side effects are strictly idempotent on repeated correlation calls`
+    - `6. [UNIT_MOCK: DYNAMODB_SEMANTICS] verifies attribute_not_exists(PK) condition and ConditionalCheckFailedException handling`
+    - `7. [CONCURRENCY] concurrent consumption from 3 independent registry instances allows exactly one winner`
+- **Operational Limitation / Live AWS Note:** Until DynamoDB Local, LocalStack, or an AWS sandbox account is provisioned in the execution environment, distributed concurrency and conditional-write testing is executed using strict unit mocks (`[UNIT_MOCK: DYNAMODB_SEMANTICS]`) modeling exact `attribute_not_exists(PK)` condition expressions and AWS SDK `ConditionalCheckFailedException` errors. Live integration testing against physical AWS DynamoDB tables and AWS Secrets Manager remains as an operational verification gate prior to production deployment.
 
 ---
 

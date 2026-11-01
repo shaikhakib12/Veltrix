@@ -179,8 +179,8 @@ Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` execut
 > npm run test --workspaces --if-present
 
 @veltrix/sdk-node: 8 passed (8 tests)
-@veltrix/backend: 254 passed (254 tests)
-Total: 262 / 262 passed (100% pass rate)
+@veltrix/backend: 261 passed (261 tests)
+Total: 269 / 269 passed (100% pass rate)
 ```
 
 ---

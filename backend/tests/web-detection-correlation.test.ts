@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import request from 'supertest';
-import type { SecurityEvent, WebsiteAsset } from '@veltrix/shared';
+import type { SecurityEvent, WebsiteAsset, Detection } from '@veltrix/shared';
 import { createApp } from '../src/app.js';
 import { MemoryStore } from '../src/storage/memory-store.js';
 import { DetectionEngine } from '../src/detection/engine.js';
@@ -1752,11 +1752,16 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       expect(parsedFirst.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
       expect(parsedFirst.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
 
-      // Second submission of the exact same valid context within the 15-minute window:
-      // ReplayRegistry detects nonce reuse and rejects the context!
-      const parsedSecond = normalizeWebTelemetry(event, { trustedContext: genuineContext }, authority);
-      expect(parsedSecond.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
-      expect(parsedSecond.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+      // Replay attack: submitting the consumed context for a different event is detected and rejected
+      const replayEvent = { ...event, eventId: '01a19700-0000-7000-8000-000000000310r-replay' };
+      const parsedReplay = normalizeWebTelemetry(replayEvent, { trustedContext: genuineContext }, authority);
+      expect(parsedReplay.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsedReplay.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+
+      // Legitimate retry: reprocessing the exact same event retains the original trusted verification result
+      const parsedRetry = normalizeWebTelemetry(event, { trustedContext: genuineContext }, authority);
+      expect(parsedRetry.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(parsedRetry.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
     });
 
     // Required Test 11: Service credential security & fail-closed behavior
@@ -2468,6 +2473,557 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       const parsedReplay = await normalizeWebTelemetryAsync(replayEvent, { trustedContext }, distributedAuthority);
       expect(parsedReplay.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
       expect(parsedReplay.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+    });
+  });
+
+  // ============================================================================
+  // 12. Idempotent Retries, Crash Resilience & Distributed Concurrency Verification (SEC-P7-010-IDEMP)
+  // ============================================================================
+  describe('12. Idempotent Retries, Crash Resilience & Distributed Concurrency Verification (SEC-P7-010-IDEMP)', () => {
+    let authority: InternalEvidenceAuthority;
+
+    beforeEach(() => {
+      authority = getDefaultInternalEvidenceAuthority();
+    });
+    // Test 1: Legitimate retry retains original trusted verification result across sync and async paths
+    it('1. legitimate retry retains original trusted verification result across sync and async paths', async () => {
+      // Synchronous path with in-memory authority
+      const eventIdSync = '01a19700-0000-7000-8000-000000000501';
+      const syncContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId: eventIdSync,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      const eventSync: SecurityEvent = {
+        eventId: eventIdSync,
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.222',
+        sourceSystem: 'sensor:canary:db',
+        metadata: { siteId },
+      };
+
+      // First evaluation consumes the nonce and yields trusted result
+      const syncFirst = normalizeWebTelemetry(eventSync, { trustedContext: syncContext }, authority);
+      expect(syncFirst.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(syncFirst.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+
+      // Second evaluation (idempotent retry of identical event) MUST retain trusted verification result
+      const syncRetry = normalizeWebTelemetry(eventSync, { trustedContext: syncContext }, authority);
+      expect(syncRetry.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(syncRetry.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+
+      // Asynchronous path with persistent DynamoDB mock
+      const persistentTable = new Map<string, any>();
+      const mockDocClient = {
+        send: async (cmd: any) => {
+          if (cmd.input?.Item) {
+            const item = cmd.input.Item;
+            if (persistentTable.has(item.PK)) {
+              const err = new Error('The conditional request failed');
+              err.name = 'ConditionalCheckFailedException';
+              throw err;
+            }
+            persistentTable.set(item.PK, item);
+            return {};
+          }
+          if (cmd.input?.Key) {
+            return { Item: persistentTable.get(cmd.input.Key.PK) };
+          }
+          return {};
+        },
+      };
+
+      const distributedAuthority = new InternalEvidenceAuthority({
+        signingKey: TEST_SIGNING_KEY,
+        serviceCredentials: TEST_SERVICE_CREDENTIALS,
+        replayRegistry: new DynamoDBReplayRegistry({ docClient: mockDocClient as any }),
+      });
+
+      const eventIdAsync = '01a19700-0000-7000-8000-000000000502';
+      const asyncContext = distributedAuthority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId: eventIdAsync,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      const eventAsync: SecurityEvent = {
+        eventId: eventIdAsync,
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.223',
+        sourceSystem: 'sensor:canary:db',
+        metadata: { siteId },
+      };
+
+      // First async normalization consumes nonce
+      const asyncFirst = await normalizeWebTelemetryAsync(eventAsync, { trustedContext: asyncContext }, distributedAuthority);
+      expect(asyncFirst.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(asyncFirst.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+
+      // Legitimate async retry retains trusted verification result
+      const asyncRetry = await normalizeWebTelemetryAsync(eventAsync, { trustedContext: asyncContext }, distributedAuthority);
+      expect(asyncRetry.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(asyncRetry.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+    });
+
+    // Test 2: Processing retry does not generate duplicate alerts
+    it('2. processing retry does not generate duplicate alerts in detection or correlation engines', async () => {
+      const eventId = '01a19700-0000-7000-8000-000000000503';
+      const trustedContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      const event: SecurityEvent = {
+        eventId,
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.224',
+        sourceSystem: 'sensor:canary:db',
+        metadata: {
+          siteId,
+          requestUri: '/api/v1/users?id=1%27+UNION+SELECT+password+FROM+accounts--',
+          httpStatus: 200,
+        },
+      };
+
+      // 1. First processing pass
+      const parsed1 = normalizeWebTelemetry(event, { trustedContext }, authority);
+      expect(parsed1.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+
+      const detections1 = await new Rule101SqlInjection().evaluate({
+        organizationId: orgId,
+        events: [{ ...event, metadata: { ...event.metadata, ...parsed1 } }],
+      });
+      expect(detections1).toHaveLength(1);
+      const detection = detections1[0];
+
+      // Save to storage
+      const saveRes1 = await storage.saveDetection(detection);
+      expect(saveRes1.saved).toBe(true);
+      expect(saveRes1.isDuplicate).toBe(false);
+
+      // Correlate into incident
+      const corrRes1 = await correlationEngine.correlateDetection(detection);
+      expect(corrRes1).not.toBeNull();
+      expect(corrRes1!.isNewIncident).toBe(true);
+      const incidentId = corrRes1!.incident.incidentId;
+      expect(corrRes1!.incident.timeline).toHaveLength(1);
+
+      // 2. Simulated ingestion / worker retry of the exact same event
+      const parsedRetry = normalizeWebTelemetry(event, { trustedContext }, authority);
+      expect(parsedRetry.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+
+      const detectionsRetry = await new Rule101SqlInjection().evaluate({
+        organizationId: orgId,
+        events: [{ ...event, metadata: { ...event.metadata, ...parsedRetry } }],
+      });
+      expect(detectionsRetry).toHaveLength(1);
+
+      // A. Storage deduplication prevents duplicate detection persistence & alerting
+      const saveRes2 = await storage.saveDetection(detectionsRetry[0]);
+      expect(saveRes2.saved).toBe(false);
+      expect(saveRes2.isDuplicate).toBe(true);
+
+      // B. Retried correlation call with the same detection is strictly idempotent (no duplicate timeline or alert)
+      const corrRes2 = await correlationEngine.correlateDetection(detection);
+      expect(corrRes2).not.toBeNull();
+      expect(corrRes2!.isNewIncident).toBe(false);
+      expect(corrRes2!.incident.incidentId).toBe(incidentId);
+      expect(corrRes2!.incident.timeline).toHaveLength(1); // Timeline still has only 1 entry
+    });
+
+    // Test 3: Retry cannot bypass signature validation, tenant binding, or payload tampering checks
+    it('3. retry cannot bypass signature validation, tenant binding, or payload tampering checks', () => {
+      const eventId = '01a19700-0000-7000-8000-000000000504';
+      const validContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      const baseEvent: SecurityEvent = {
+        eventId,
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.225',
+        sourceSystem: 'sensor:canary:db',
+        metadata: { siteId },
+      };
+
+      // Consume valid context first
+      const firstRun = normalizeWebTelemetry(baseEvent, { trustedContext: validContext }, authority);
+      expect(firstRun.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+
+      // A. Tampered payload with valid nonce: modifying verified signals invalidates HMAC signature
+      const tamperedSignals = {
+        ...validContext,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH', 'ARBITRARY_FORGED_SIGNAL'],
+      };
+      const resTamperedSignals = normalizeWebTelemetry(baseEvent, { trustedContext: tamperedSignals }, authority);
+      expect(resTamperedSignals.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(resTamperedSignals.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+
+      // B. Cross-event replay: consumed nonce presented with different eventId is rejected
+      const crossEvent: SecurityEvent = { ...baseEvent, eventId: '01a19700-0000-7000-8000-000000000504-cross' };
+      const resCrossEvent = normalizeWebTelemetry(crossEvent, { trustedContext: validContext }, authority);
+      expect(resCrossEvent.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+
+      // C. Cross-tenant replay: consumed nonce presented with different orgId is rejected
+      const crossTenantEvent: SecurityEvent = { ...baseEvent, orgId: 'org-attacker-tenant' };
+      const resCrossTenant = normalizeWebTelemetry(crossTenantEvent, { trustedContext: validContext }, authority);
+      expect(resCrossTenant.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+
+      // D. Cross-site replay: consumed nonce presented with different siteId is rejected
+      const crossSiteEvent: SecurityEvent = {
+        ...baseEvent,
+        metadata: { siteId: 'site-unauthorized-target-site' },
+      };
+      const resCrossSite = normalizeWebTelemetry(crossSiteEvent, { trustedContext: validContext }, authority);
+      expect(resCrossSite.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+
+      // E. Tampered signature on retry is rejected
+      const tamperedSignature = {
+        ...validContext,
+        authoritySignature: '0000000000000000000000000000000000000000000000000000000000000000',
+      };
+      const resTamperedSig = normalizeWebTelemetry(baseEvent, { trustedContext: tamperedSignature }, authority);
+      expect(resTamperedSig.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+    });
+
+    // Test 4: Crash between nonce consumption and event processing does not permanently lose legitimate evidence
+    it('4. crash between nonce consumption and event processing does not permanently lose legitimate evidence', async () => {
+      const persistentTable = new Map<string, any>();
+      const mockDocClient = {
+        send: async (cmd: any) => {
+          if (cmd.input?.Item) {
+            const item = cmd.input.Item;
+            if (persistentTable.has(item.PK)) {
+              const err = new Error('The conditional request failed');
+              err.name = 'ConditionalCheckFailedException';
+              throw err;
+            }
+            persistentTable.set(item.PK, item);
+            return {};
+          }
+          if (cmd.input?.Key) {
+            return { Item: persistentTable.get(cmd.input.Key.PK) };
+          }
+          return {};
+        },
+      };
+
+      const worker1Authority = new InternalEvidenceAuthority({
+        signingKey: TEST_SIGNING_KEY,
+        serviceCredentials: TEST_SERVICE_CREDENTIALS,
+        replayRegistry: new DynamoDBReplayRegistry({ docClient: mockDocClient as any }),
+      });
+
+      const worker2Authority = new InternalEvidenceAuthority({
+        signingKey: TEST_SIGNING_KEY,
+        serviceCredentials: TEST_SERVICE_CREDENTIALS,
+        replayRegistry: new DynamoDBReplayRegistry({ docClient: mockDocClient as any }),
+      });
+
+      const eventId = '01a19700-0000-7000-8000-000000000505';
+      const genuineContext = worker1Authority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      const event: SecurityEvent = {
+        eventId,
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.226',
+        sourceSystem: 'sensor:canary:db',
+        metadata: { siteId },
+      };
+
+      // 1. Worker 1 verifies and consumes the nonce in DynamoDB
+      const worker1Verified = await worker1Authority.verifyAndConsumeContextAsync(genuineContext, {
+        eventId,
+        orgId,
+        siteId,
+      });
+      expect(worker1Verified).toBe(true);
+
+      // Verify nonce is stored in persistent table
+      expect(persistentTable.has('NONCE#' + genuineContext.nonce)).toBe(true);
+
+      // SIMULATE CRASH: Worker 1 crashes (e.g. OOM or network timeout) before saving detection or finishing pipeline
+      let worker1Crashed = false;
+      try {
+        throw new Error('CRITICAL_WORKER_FAILURE: Process crashed after nonce consumption before persistence');
+      } catch {
+        worker1Crashed = true;
+      }
+      expect(worker1Crashed).toBe(true);
+
+      // 2. Retry mechanism sends the identical message/event to Worker 2
+      // Worker 2 evaluates the event and context:
+      const worker2Parsed = await normalizeWebTelemetryAsync(event, { trustedContext: genuineContext }, worker2Authority);
+
+      // Evidence MUST NOT be lost: idempotent retry maintains TRUSTED_SERVER_COMPONENT and CONFIRMED_EXPLOITATION!
+      expect(worker2Parsed.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(worker2Parsed.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+      expect(worker2Parsed.corroboratingSignals).toContain('CANARY_TOKEN_BREACH');
+    });
+
+    // Test 5: Downstream correlation side effects are strictly idempotent on repeated correlation calls
+    it('5. downstream correlation side effects are strictly idempotent on repeated correlation calls', async () => {
+      const detectionId = 'det-idemp-001';
+      const detection: Detection = {
+        detectionId,
+        orgId,
+        ruleId: 'RULE-101',
+        ruleName: 'Web Attack: SQL Injection Attempt',
+        severity: 'HIGH',
+        status: 'NEW',
+        detectedAt: new Date().toISOString(),
+        relatedEventIds: ['01a19700-0000-7000-8000-000000000506'],
+        evidence: {
+          matchedRule: 'RULE-101',
+          targetEntity: { type: 'IP', value: '198.51.100.227' },
+          details: {
+            siteId,
+            domain: primaryDomain,
+            attackType: 'SQL_INJECTION',
+            requestUri: '/products?id=1',
+            confidenceLevel: 'CONFIRMED_EXPLOITATION',
+          },
+        },
+      };
+
+      // Initial correlation
+      const firstCorr = await correlationEngine.correlateDetection(detection);
+      expect(firstCorr).not.toBeNull();
+      expect(firstCorr!.isNewIncident).toBe(true);
+      const incidentId = firstCorr!.incident.incidentId;
+      const initialScore = firstCorr!.incident.riskScore;
+      const initialTimelineCount = firstCorr!.incident.timeline.length;
+      expect(initialTimelineCount).toBe(1);
+
+      // Repeated correlations of the exact same detection (3 subsequent retries)
+      for (let i = 0; i < 3; i++) {
+        const retryCorr = await correlationEngine.correlateDetection(detection);
+        expect(retryCorr).not.toBeNull();
+        expect(retryCorr!.isNewIncident).toBe(false);
+        expect(retryCorr!.incident.incidentId).toBe(incidentId);
+        // Timeline must not grow with duplicate entries
+        expect(retryCorr!.incident.timeline.length).toBe(initialTimelineCount);
+        // Risk score must not be artificially amplified
+        expect(retryCorr!.incident.riskScore).toBe(initialScore);
+      }
+    });
+
+    // Test 6: [UNIT_MOCK: DYNAMODB_SEMANTICS] verifies attribute_not_exists(PK) condition and ConditionalCheckFailedException handling
+    it('6. [UNIT_MOCK: DYNAMODB_SEMANTICS] verifies attribute_not_exists(PK) condition and ConditionalCheckFailedException handling', async () => {
+      const mockStorage = new Map<string, any>();
+      const executedCommands: { type: string; input: any }[] = [];
+
+      const strictlyValidatedDocClient = {
+        send: async (cmd: any) => {
+          const isPut = cmd.constructor.name === 'PutCommand' || !!cmd.input?.Item;
+          const isGet = cmd.constructor.name === 'GetCommand' || !!cmd.input?.Key;
+
+          executedCommands.push({
+            type: isPut ? 'PutCommand' : isGet ? 'GetCommand' : 'Unknown',
+            input: cmd.input,
+          });
+
+          if (isPut) {
+            // Strictly assert DynamoDB conditional write semantics
+            expect(cmd.input.ConditionExpression).toBe('attribute_not_exists(PK)');
+            expect(cmd.input.Item.PK).toMatch(/^NONCE#/);
+            expect(cmd.input.Item.SK).toBe('REPLAY_RECORD');
+            expect(typeof cmd.input.Item.ttl).toBe('number');
+
+            if (mockStorage.has(cmd.input.Item.PK)) {
+              // Mimic AWS SDK DynamoDB conditional check failed exception
+              const error = new Error('The conditional request failed');
+              error.name = 'ConditionalCheckFailedException';
+              throw error;
+            }
+
+            mockStorage.set(cmd.input.Item.PK, cmd.input.Item);
+            return {};
+          }
+
+          if (isGet) {
+            expect(cmd.input.Key.PK).toMatch(/^NONCE#/);
+            expect(cmd.input.Key.SK).toBe('REPLAY_RECORD');
+            return { Item: mockStorage.get(cmd.input.Key.PK) };
+          }
+
+          return {};
+        },
+      };
+
+      const registry = new DynamoDBReplayRegistry({ docClient: strictlyValidatedDocClient as any });
+      const record = {
+        nonce: 'mock-strict-nonce-001',
+        eventId: '01a19700-0000-7000-8000-000000000507',
+        orgId,
+        siteId,
+        timestampEpoch: Date.now(),
+        expiresAtEpoch: Date.now() + 15 * 60 * 1000,
+      };
+
+      // 1. Initial consume issues PutCommand with attribute_not_exists(PK)
+      const res1 = await registry.consumeNonce(record);
+      expect(res1.success).toBe(true);
+      expect(executedCommands.some((c) => c.type === 'PutCommand' && c.input.ConditionExpression === 'attribute_not_exists(PK)')).toBe(true);
+
+      // 2. Consume with identical record fails condition and reads existing item via GetCommand -> IDEMPOTENT_RETRY
+      executedCommands.length = 0;
+      const resRetry = await registry.consumeNonce(record);
+      expect(resRetry.success).toBe(false);
+      expect(resRetry.isIdempotentRetry).toBe(true);
+      expect(resRetry.isReplayAttack).toBe(false);
+      expect(executedCommands.some((c) => c.type === 'PutCommand')).toBe(true);
+      expect(executedCommands.some((c) => c.type === 'GetCommand')).toBe(true);
+
+      // 3. Consume with mismatched eventId fails condition and reads existing item -> REPLAY_ATTACK_NONCE_REUSED
+      executedCommands.length = 0;
+      const resCrossEvent = await registry.consumeNonce({
+        ...record,
+        eventId: '01a19700-0000-7000-8000-000000000507-attack',
+      });
+      expect(resCrossEvent.success).toBe(false);
+      expect(resCrossEvent.isReplayAttack).toBe(true);
+      expect(resCrossEvent.isIdempotentRetry).toBe(false);
+
+      // 4. Unexpected AWS error (e.g. ProvisionedThroughputExceededException) throws PERSISTENT_STORAGE_UNAVAILABLE
+      const failingClient = {
+        send: async () => {
+          const err = new Error('Throughput exceeded on table');
+          err.name = 'ProvisionedThroughputExceededException';
+          throw err;
+        },
+      };
+      const failingRegistry = new DynamoDBReplayRegistry({ docClient: failingClient as any });
+      await expect(failingRegistry.consumeNonce(record)).rejects.toThrow(/PERSISTENT_STORAGE_UNAVAILABLE/);
+    });
+
+    // Test 7: [CONCURRENCY] concurrent consumption from 3 independent registry instances allows exactly one winner
+    it('7. [CONCURRENCY] concurrent consumption from 3 independent registry instances allows exactly one winner', async () => {
+      // Shared persistent table with simulated atomic check-and-set
+      const sharedStorage = new Map<string, any>();
+
+      const createMockClient = () => ({
+        send: async (cmd: any) => {
+          if (cmd.input?.Item) {
+            // Simulate brief async I/O / thread scheduling
+            await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 10) + 1));
+
+            if (sharedStorage.has(cmd.input.Item.PK)) {
+              const err = new Error('The conditional request failed');
+              err.name = 'ConditionalCheckFailedException';
+              throw err;
+            }
+            sharedStorage.set(cmd.input.Item.PK, cmd.input.Item);
+            return {};
+          }
+
+          if (cmd.input?.Key) {
+            await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * 5) + 1));
+            return { Item: sharedStorage.get(cmd.input.Key.PK) };
+          }
+
+          return {};
+        },
+      });
+
+      // 3 independent registry instances representing 3 distributed worker nodes
+      const nodeA = new DynamoDBReplayRegistry({ docClient: createMockClient() as any });
+      const nodeB = new DynamoDBReplayRegistry({ docClient: createMockClient() as any });
+      const nodeC = new DynamoDBReplayRegistry({ docClient: createMockClient() as any });
+
+      const record = {
+        nonce: 'concurrent-race-nonce-007',
+        eventId: '01a19700-0000-7000-8000-000000000508',
+        orgId,
+        siteId,
+        timestampEpoch: Date.now(),
+        expiresAtEpoch: Date.now() + 15 * 60 * 1000,
+      };
+
+      // Fire 3 simultaneous consume requests
+      const results = await Promise.all([
+        nodeA.consumeNonce(record),
+        nodeB.consumeNonce(record),
+        nodeC.consumeNonce(record),
+      ]);
+
+      const winners = results.filter((r) => r.success);
+      const retries = results.filter((r) => r.isIdempotentRetry);
+      const replays = results.filter((r) => r.isReplayAttack);
+
+      // Exactly ONE node wins the write race
+      expect(winners).toHaveLength(1);
+      // The other two nodes detect the record already exists with matching binding -> IDEMPOTENT_RETRY
+      expect(retries).toHaveLength(2);
+      // None flagged as a replay attack since event, tenant, and site match identically
+      expect(replays).toHaveLength(0);
+
+      // Exactly one item persisted in DynamoDB
+      expect(sharedStorage.size).toBe(1);
+
+      // If an attacker subsequently attempts to replay that same nonce across nodes with a different eventId
+      const attackRecord = {
+        ...record,
+        eventId: '01a19700-0000-7000-8000-000000000508-forged',
+      };
+      const attackResults = await Promise.all([
+        nodeA.consumeNonce(attackRecord),
+        nodeB.consumeNonce(attackRecord),
+      ]);
+
+      for (const res of attackResults) {
+        expect(res.success).toBe(false);
+        expect(res.isReplayAttack).toBe(true);
+        expect(res.isIdempotentRetry).toBe(false);
+      }
     });
   });
 });

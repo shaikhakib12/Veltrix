@@ -431,8 +431,9 @@ export class InternalEvidenceAuthority {
         }
 
         if (consumeResult.isIdempotentRetry) {
-          console.warn(`[VELTRIX-SECURITY] Idempotent retry detected for nonce '${c.nonce}'; context already consumed`);
-          return false;
+          // Legitimate retry of the exact same event: retains original trusted verification result
+          // and prevents legitimate evidence loss on worker crashes or retry loops.
+          return true;
         }
 
         if (!consumeResult.success) {
@@ -482,8 +483,9 @@ export class InternalEvidenceAuthority {
         }
 
         if (consumeResult.isIdempotentRetry) {
-          console.warn(`[VELTRIX-SECURITY] Idempotent retry detected for nonce '${c.nonce}'; context already consumed`);
-          return false;
+          // Legitimate retry of the exact same event: retains original trusted verification result
+          // and prevents legitimate evidence loss on worker crashes or retry loops.
+          return true;
         }
 
         if (!consumeResult.success) {
