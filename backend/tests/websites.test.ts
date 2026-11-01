@@ -7,7 +7,7 @@ import { LocalAuthProvider } from '../src/auth/local-auth-provider.js';
 import { resetAuthProviderForTesting } from '../src/auth/index.js';
 import { MemoryStore } from '../src/storage/memory-store.js';
 import { resetStorageForTesting } from '../src/storage/index.js';
-import type { DnsResolverInterface, HttpFetcherInterface } from '../src/services/domain-verification.js';
+import { isProhibitedIp, isProhibitedIpv4, type DnsResolverInterface, type HttpFetcherInterface } from '../src/services/domain-verification.js';
 
 describe('Phase 6: Website Asset Inventory & Domain Ownership Verification (TASK-601 to TASK-603)', () => {
   let app: any;
@@ -17,6 +17,7 @@ describe('Phase 6: Website Asset Inventory & Domain Ownership Verification (TASK
   let orgAdminTokenA: string;
   let orgAnalystTokenA: string;
   let orgAdminTokenB: string;
+  let auditorTokenA: string;
 
   // Mock DNS Resolver and HTTP Fetcher
   const mockDnsRecords = new Map<string, string[][]>();
@@ -79,6 +80,14 @@ describe('Phase 6: Website Asset Inventory & Domain Ownership Verification (TASK
       email: 'admin@beta.org',
       role: 'ORG_ADMIN',
       orgId: 'org-beta',
+    });
+
+    auditorTokenA = jwtService.signAccessToken({
+      userId: 'usr-auditor-a',
+      username: 'auditor.alpha',
+      email: 'auditor@alpha.org',
+      role: 'AUDITOR',
+      orgId: 'org-alpha',
     });
   });
 
@@ -374,6 +383,140 @@ describe('Phase 6: Website Asset Inventory & Domain Ownership Verification (TASK
 
       expect(nextRes.status).toBe(200);
       expect(nextRes.body.sites.length).toBe(1);
+    });
+  });
+  describe('6. Phase 6 Security & Code Audit Verifications', () => {
+    it('normalizes uppercase, trailing-dots and converts IDN to Punycode', async () => {
+      const res = await request(app)
+        .post('/api/v1/websites')
+        .set('Authorization', `Bearer ${orgAdminTokenA}`)
+        .send({
+          name: 'German Portal',
+          primaryDomain: '  München.DE.  ',
+          approvedSubdomains: ['API.München.DE.'],
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.site.primaryDomain).toBe('xn--mnchen-3ya.de');
+      expect(res.body.site.approvedSubdomains).toEqual(['api.xn--mnchen-3ya.de']);
+    });
+
+    it('rejects subdomains outside the primary domain root apex', async () => {
+      const res = await request(app)
+        .post('/api/v1/websites')
+        .set('Authorization', `Bearer ${orgAdminTokenA}`)
+        .send({
+          name: 'Hijack Attempt',
+          primaryDomain: 'alpha.org',
+          approvedSubdomains: ['evil.com', 'bankofamerica.com'],
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    });
+
+    it('enforces atomic domain uniqueness and rejects duplicate claims with 409 Conflict', async () => {
+      // Org A registers portal.corp.com
+      const res1 = await request(app)
+        .post('/api/v1/websites')
+        .set('Authorization', `Bearer ${orgAdminTokenA}`)
+        .send({ name: 'Corp Portal', primaryDomain: 'portal.corp.com' });
+      expect(res1.status).toBe(201);
+
+      // Org B attempts to claim the same domain concurrently
+      const res2 = await request(app)
+        .post('/api/v1/websites')
+        .set('Authorization', `Bearer ${orgAdminTokenB}`)
+        .send({ name: 'Imposter Portal', primaryDomain: 'portal.corp.com' });
+
+      expect(res2.status).toBe(409);
+      expect(res2.body.error.code).toBe('DOMAIN_ALREADY_CLAIMED');
+    });
+
+    it('prohibits ingestion API keys from accessing website management endpoints', async () => {
+      const res = await request(app)
+        .get('/api/v1/websites')
+        .set('x-api-key', 'vltx_live_some_fake_key_12345');
+
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('FORBIDDEN_API_KEY_SCOPE_PROHIBITED');
+    });
+
+    it('allows AUDITOR role to read websites but blocks registration and revocation', async () => {
+      // Create a site
+      await request(app)
+        .post('/api/v1/websites')
+        .set('Authorization', `Bearer ${orgAdminTokenA}`)
+        .send({ name: 'Audit Test Site', primaryDomain: 'audit.alpha.org' });
+
+      // Auditor can list websites
+      const readRes = await request(app)
+        .get('/api/v1/websites')
+        .set('Authorization', `Bearer ${auditorTokenA}`);
+
+      expect(readRes.status).toBe(200);
+      expect(readRes.body.sites.length).toBeGreaterThan(0);
+
+      // Auditor cannot register websites
+      const createRes = await request(app)
+        .post('/api/v1/websites')
+        .set('Authorization', `Bearer ${auditorTokenA}`)
+        .send({ name: 'Auditor Create Fail', primaryDomain: 'fail.alpha.org' });
+
+      expect(createRes.status).toBe(403);
+      expect(createRes.body.error.code).toBe('FORBIDDEN_INSUFFICIENT_PERMISSIONS');
+    });
+
+    it('validates comprehensive SSRF IP filtering rules across IPv4 and IPv6', () => {
+      // Loopback
+      expect(isProhibitedIp('127.0.0.1')).toBe(true);
+      expect(isProhibitedIp('127.255.255.255')).toBe(true);
+      expect(isProhibitedIp('::1')).toBe(true);
+
+      // Private IPv4
+      expect(isProhibitedIp('10.0.0.1')).toBe(true);
+      expect(isProhibitedIp('172.16.0.1')).toBe(true);
+      expect(isProhibitedIp('172.31.255.255')).toBe(true);
+      expect(isProhibitedIp('192.168.1.1')).toBe(true);
+
+      // Cloud Metadata & Link-Local
+      expect(isProhibitedIp('169.254.169.254')).toBe(true);
+      expect(isProhibitedIp('169.254.1.1')).toBe(true);
+      expect(isProhibitedIp('fe80::1')).toBe(true);
+
+      // IPv4-mapped IPv6
+      expect(isProhibitedIp('::ffff:127.0.0.1')).toBe(true);
+      expect(isProhibitedIp('::ffff:169.254.169.254')).toBe(true);
+      expect(isProhibitedIp('::ffff:10.0.0.1')).toBe(true);
+
+      // Public routable IP is allowed
+      expect(isProhibitedIp('93.184.216.34')).toBe(false);
+      expect(isProhibitedIp('8.8.8.8')).toBe(false);
+    });
+
+    it('rejects expired verification challenges (> 30 days old)', async () => {
+      const regRes = await request(app)
+        .post('/api/v1/websites')
+        .set('Authorization', `Bearer ${orgAdminTokenA}`)
+        .send({ name: 'Expired Challenge Site', primaryDomain: 'expired.alpha.org' });
+
+      const siteId = regRes.body.site.siteId;
+      const storage = getStorage();
+
+      // Tamper tokenCreatedAt to 31 days ago
+      const thirtyOneDaysAgo = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000).toISOString();
+      await storage.updateWebsite('org-alpha', siteId, {
+        tokenCreatedAt: thirtyOneDaysAgo,
+      });
+
+      // Attempt verification
+      const verifyRes = await request(app)
+        .post(`/api/v1/websites/${siteId}/verify`)
+        .set('Authorization', `Bearer ${orgAdminTokenA}`)
+        .send({ method: 'DNS_TXT' });
+
+      expect(verifyRes.status).toBe(400);
+      expect(verifyRes.body.error.code).toBe('CHALLENGE_EXPIRED');
     });
   });
 });

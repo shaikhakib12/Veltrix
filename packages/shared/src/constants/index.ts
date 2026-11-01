@@ -81,6 +81,7 @@ export const USER_ROLES = [
   'ORG_ADMIN',
   'SECURITY_ANALYST',
   'READ_ONLY_VIEWER',
+  'AUDITOR',
 ] as const;
 
 export const AUDIT_ACTION_TYPES = [

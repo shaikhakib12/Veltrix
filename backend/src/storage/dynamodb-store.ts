@@ -1243,26 +1243,66 @@ export class DynamoDBStore implements StorageInterface {
   // --- Website Asset Inventory (TASK-601, TASK-602) ---
 
   async saveWebsite(site: WebsiteAsset): Promise<WebsiteAsset> {
-    const item = {
-      PK: `ORG#${site.orgId}`,
-      SK: `SITE#${site.siteId}`,
-      GSI1_PK: `ORG#${site.orgId}#STATUS#${site.status}`,
-      GSI1_SK: site.primaryDomain,
-      GSI2_PK: `DOMAIN#${site.primaryDomain}`,
-      GSI2_SK: `ORG#${site.orgId}`,
-      ...site,
-    };
+    const normalizedDomain = site.primaryDomain.toLowerCase().trim();
 
-    await this.executeWithRetry(async () => {
-      await this.docClient.send(
-        new PutCommand({
+    // Strongly consistent atomic domain ownership registry lock using TransactWriteItems
+    const transactItems = [
+      // 1. Primary website asset item
+      {
+        Put: {
           TableName: this.websitesTable,
-          Item: item,
-        })
-      );
-    });
+          Item: {
+            PK: `ORG#${site.orgId}`,
+            SK: `SITE#${site.siteId}`,
+            GSI1_PK: `ORG#${site.orgId}#STATUS#${site.status}`,
+            GSI1_SK: normalizedDomain,
+            GSI2_PK: `DOMAIN#${normalizedDomain}`,
+            GSI2_SK: `ORG#${site.orgId}`,
+            ...site,
+            primaryDomain: normalizedDomain,
+          },
+        },
+      },
+      // 2. Strongly consistent atomic domain ownership lock item
+      {
+        Put: {
+          TableName: this.websitesTable,
+          Item: {
+            PK: `DOMAIN#${normalizedDomain}`,
+            SK: 'OWNERSHIP',
+            orgId: site.orgId,
+            siteId: site.siteId,
+            claimedAt: site.createdAt,
+          },
+          ConditionExpression: 'attribute_not_exists(PK) OR orgId = :orgId',
+          ExpressionAttributeValues: {
+            ':orgId': site.orgId,
+          },
+        },
+      },
+    ];
 
-    return { ...site };
+    try {
+      await this.executeWithRetry(() =>
+        this.docClient.send(
+          new TransactWriteCommand({
+            TransactItems: transactItems,
+          })
+        )
+      );
+      return { ...site, primaryDomain: normalizedDomain };
+    } catch (err: unknown) {
+      const errName = (err as { name?: string })?.name;
+      if (
+        errName === 'ConditionalCheckFailedException' ||
+        errName === 'TransactionCanceledException'
+      ) {
+        const conflictErr = new Error(`DOMAIN_ALREADY_CLAIMED: Domain '${normalizedDomain}' is already claimed by another organization.`);
+        (conflictErr as any).name = 'ConditionalCheckFailedException';
+        throw conflictErr;
+      }
+      throw err;
+    }
   }
 
   async getWebsites(
@@ -1381,14 +1421,37 @@ export class DynamoDBStore implements StorageInterface {
   }
 
   async deleteWebsite(orgId: string, siteId: string): Promise<boolean> {
+    const site = await this.getWebsiteById(orgId, siteId);
+    if (!site) return false;
+
+    const normalizedDomain = site.primaryDomain.toLowerCase().trim();
     await this.executeWithRetry(() =>
       this.docClient.send(
-        new DeleteCommand({
-          TableName: this.websitesTable,
-          Key: {
-            PK: `ORG#${orgId}`,
-            SK: `SITE#${siteId}`,
-          },
+        new TransactWriteCommand({
+          TransactItems: [
+            {
+              Delete: {
+                TableName: this.websitesTable,
+                Key: {
+                  PK: `ORG#${orgId}`,
+                  SK: `SITE#${siteId}`,
+                },
+              },
+            },
+            {
+              Delete: {
+                TableName: this.websitesTable,
+                Key: {
+                  PK: `DOMAIN#${normalizedDomain}`,
+                  SK: 'OWNERSHIP',
+                },
+                ConditionExpression: 'orgId = :orgId',
+                ExpressionAttributeValues: {
+                  ':orgId': orgId,
+                },
+              },
+            },
+          ],
         })
       )
     );

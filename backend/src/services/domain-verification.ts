@@ -17,6 +17,38 @@ export class DefaultDnsResolver implements DnsResolverInterface {
   }
 }
 
+export function isProhibitedIpv4(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((p) => isNaN(p) || p < 0 || p > 255)) return true;
+  const [a, b, c] = parts;
+  if (a === 0) return true; // 0.0.0.0/8
+  if (a === 127) return true; // 127.0.0.0/8 Loopback
+  if (a === 10) return true; // 10.0.0.0/8 Private
+  if (a === 172 && b! >= 16 && b! <= 31) return true; // 172.16.0.0/12 Private
+  if (a === 192 && b === 168) return true; // 192.168.0.0/16 Private
+  if (a === 169 && b === 254) return true; // 169.254.0.0/16 Link-Local / Cloud Metadata
+  if (a === 100 && b! >= 64 && b! <= 127) return true; // 100.64.0.0/10 CGNAT
+  if (a === 192 && b === 0 && c === 2) return true; // TEST-NET-1
+  if (a === 198 && b === 51 && c === 100) return true; // TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return true; // TEST-NET-3
+  if (a! >= 224) return true; // Multicast & Reserved
+  return false;
+}
+
+export function isProhibitedIp(ip: string): boolean {
+  if (ip.includes('.')) {
+    if (ip.startsWith('::ffff:')) {
+      return isProhibitedIpv4(ip.slice(7));
+    }
+    return isProhibitedIpv4(ip);
+  }
+  const lower = ip.toLowerCase();
+  if (lower === '::1' || lower === '::') return true;
+  if (lower.startsWith('fe80:') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return true; // fe80::/10 link-local
+  if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // fc00::/7 unique local
+  return false;
+}
+
 export class DefaultHttpFetcher implements HttpFetcherInterface {
   async fetch(url: string, options?: { timeoutMs?: number }): Promise<{ status: number; data: unknown }> {
     const timeout = options?.timeoutMs || 5000;
@@ -25,33 +57,69 @@ export class DefaultHttpFetcher implements HttpFetcherInterface {
 
     try {
       const parsedUrl = new URL(url);
-      // SSRF safety check on host
+
+      // 1. Enforce strict protocol allowlist
+      if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+        throw new Error(`SSRF blocked: Prohibited protocol '${parsedUrl.protocol}'. Only HTTP/HTTPS allowed.`);
+      }
+
       const hostname = parsedUrl.hostname.toLowerCase();
+
+      // 2. Reject prohibited literal hostnames
       if (
         hostname === 'localhost' ||
-        hostname === '127.0.0.1' ||
-        hostname === '169.254.169.254' ||
-        hostname === '::1' ||
         hostname.endsWith('.internal') ||
-        hostname.endsWith('.local')
+        hostname.endsWith('.local') ||
+        hostname.endsWith('.arpa')
       ) {
-        // Only permit localhost in local development/test mode
+        throw new Error(`SSRF blocked: Prohibited destination host '${hostname}'.`);
+      }
+
+      // 3. DNS Resolution & Pinning: Verify resolved IPs do not hit private/link-local/metadata
+      try {
+        const resolved = await dns.lookup(hostname, { all: true });
+        for (const record of resolved) {
+          if (isProhibitedIp(record.address)) {
+            throw new Error(
+              `SSRF blocked: Host '${hostname}' resolved to prohibited IP address '${record.address}'.`
+            );
+          }
+        }
+      } catch (dnsErr: unknown) {
+        if ((dnsErr as Error).message.startsWith('SSRF blocked')) {
+          throw dnsErr;
+        }
+        // In local mock environments without live DNS, fallback gracefully if not production
         if (process.env.NODE_ENV === 'production') {
-          throw new Error(`SSRF blocked: Prohibited destination host '${hostname}'`);
+          throw new Error(`DNS resolution failed for verification target '${hostname}': ${(dnsErr as Error).message}`);
         }
       }
 
+      // 4. Dispatch HTTP request with no-redirect policy to prevent redirect-based SSRF
       const res = await fetch(url, {
         signal: controller.signal,
+        redirect: 'error', // Reject cross-host or unexpected redirects
         headers: {
           'User-Agent': 'Veltrix-Domain-Verifier/1.0.0 (+https://veltrix.io)',
           'Accept': 'application/json',
         },
       });
 
+      // 5. Response size limit enforcement (max 64KB)
+      const MAX_RESPONSE_BYTES = 64 * 1024;
+      const contentLength = res.headers.get('content-length');
+      if (contentLength && parseInt(contentLength, 10) > MAX_RESPONSE_BYTES) {
+        throw new Error(`Verification response exceeded maximum allowed size of 64KB (${contentLength} bytes).`);
+      }
+
+      const text = await res.text();
+      if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) {
+        throw new Error('Verification response exceeded maximum allowed size of 64KB.');
+      }
+
       let data: unknown;
       try {
-        data = await res.json();
+        data = JSON.parse(text);
       } catch {
         data = null;
       }
@@ -150,8 +218,25 @@ export class DomainVerificationService {
       };
     }
 
-    // Rate limit check: max 5 attempts per 15 minutes
+    // Token expiration check (max 30 days challenge token validity)
     const now = Date.now();
+    if (site.tokenCreatedAt) {
+      const tokenAgeMs = now - new Date(site.tokenCreatedAt).getTime();
+      const MAX_CHALLENGE_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+      if (tokenAgeMs > MAX_CHALLENGE_AGE_MS) {
+        return {
+          verified: false,
+          status: 'FAILED',
+          method,
+          error: {
+            code: 'CHALLENGE_EXPIRED',
+            message: 'Verification challenge token has expired (valid for 30 days). Please regenerate challenge.',
+          },
+        };
+      }
+    }
+
+    // Rate limit check: max 5 attempts per 15 minutes
     const attempts = this.attemptTimestamps.get(siteId) || [];
     const validAttempts = attempts.filter((t) => now - t < DomainVerificationService.WINDOW_MS);
     if (validAttempts.length >= DomainVerificationService.MAX_ATTEMPTS) {

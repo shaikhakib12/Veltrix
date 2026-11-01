@@ -279,22 +279,60 @@ export const IntegrationStatusSchema = z.enum(INTEGRATION_STATUSES);
 
 export const FQDN_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
 
+export const normalizeDomain = (val: string): string => {
+  let d = val.trim().toLowerCase().replace(/\.+$/, '');
+  try {
+    const u = new URL(`http://${d}`);
+    d = u.hostname.replace(/\.+$/, '');
+  } catch {
+    // fallback
+  }
+  return d;
+};
+
+export function getBaseDomain(domain: string): string {
+  const parts = domain.split('.');
+  if (parts.length <= 2) return domain;
+  const twoPartTlds = ['co.uk', 'org.uk', 'gov.uk', 'ac.uk', 'com.au', 'net.au', 'co.jp', 'co.nz'];
+  const lastTwo = parts.slice(-2).join('.');
+  if (twoPartTlds.includes(lastTwo) && parts.length >= 3) {
+    return parts.slice(-3).join('.');
+  }
+  return parts.slice(-2).join('.');
+}
+
 export const WebsiteCreateRequestSchema = z.object({
   name: z.string().min(2, 'Name must be at least 2 characters').max(100, 'Name must be at most 100 characters'),
-  primaryDomain: z.string().trim().toLowerCase().regex(FQDN_REGEX, 'Must be a valid FQDN domain (e.g. app.example.com)'),
-  approvedSubdomains: z.array(z.string().trim().toLowerCase().regex(FQDN_REGEX, 'Invalid subdomain FQDN')).default([]),
+  primaryDomain: z.string().transform(normalizeDomain).pipe(z.string().regex(FQDN_REGEX, 'Must be a valid FQDN domain (e.g. app.example.com)')),
+  approvedSubdomains: z.array(z.string().transform(normalizeDomain).pipe(z.string().regex(FQDN_REGEX, 'Invalid subdomain FQDN'))).default([]),
   environment: WebsiteEnvironmentSchema.default('PRODUCTION'),
   riskTier: RiskTierSchema.default('MEDIUM'),
   tags: z.array(z.string().min(1).max(50)).default([]),
-}).strict();
+}).strict().refine(
+  (data) => {
+    const base = getBaseDomain(data.primaryDomain);
+    return data.approvedSubdomains.every(
+      (sub) => sub === data.primaryDomain || sub === base || sub.endsWith(`.${base}`) || sub.endsWith(`.${data.primaryDomain}`)
+    );
+  },
+  {
+    message: 'Approved subdomains must belong to the same apex/root domain as primaryDomain.',
+    path: ['approvedSubdomains'],
+  }
+);
 
 export const WebsiteUpdateRequestSchema = z.object({
   name: z.string().min(2).max(100).optional(),
-  approvedSubdomains: z.array(z.string().trim().toLowerCase().regex(FQDN_REGEX, 'Invalid subdomain FQDN')).optional(),
+  approvedSubdomains: z.array(z.string().transform(normalizeDomain).pipe(z.string().regex(FQDN_REGEX, 'Invalid subdomain FQDN'))).optional(),
   environment: WebsiteEnvironmentSchema.optional(),
   riskTier: RiskTierSchema.optional(),
   tags: z.array(z.string().min(1).max(50)).optional(),
-}).strict();
+}).strict().refine(
+  (data) => {
+    if (!data.approvedSubdomains) return true;
+    return true;
+  }
+);
 
 export const DomainVerifyRequestSchema = z.object({
   method: VerificationMethodSchema,

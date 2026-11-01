@@ -18,6 +18,7 @@ describe('Phase 6: Integration Management, API Key Auth & Log Collectors (TASK-6
 
   let orgAdminTokenA: string;
   let orgAdminTokenB: string;
+  let auditorTokenA: string;
 
   let jwtService: JwtService;
 
@@ -45,6 +46,14 @@ describe('Phase 6: Integration Management, API Key Auth & Log Collectors (TASK-6
       email: 'admin@beta.org',
       role: 'ORG_ADMIN',
       orgId: 'org-beta',
+    });
+
+    auditorTokenA = jwtService.signAccessToken({
+      userId: 'usr-auditor-a',
+      username: 'auditor.alpha',
+      email: 'auditor@alpha.org',
+      role: 'AUDITOR',
+      orgId: 'org-alpha',
     });
   });
 
@@ -385,6 +394,75 @@ describe('Phase 6: Integration Management, API Key Auth & Log Collectors (TASK-6
       expect(healthRes.body.health.status).toBe('HEALTHY');
       expect(healthRes.body.health.eventsReceived).toBe(2);
       expect(healthRes.body.health.lastSuccessAt).toBeDefined();
+    });
+  });
+  describe('6. Phase 6 Security & Code Audit Verifications', () => {
+    it('prohibits ingestion API keys from accessing integration management endpoints', async () => {
+      const res = await request(app)
+        .get('/api/v1/integrations')
+        .set('x-api-key', 'vltx_live_some_fake_key_12345');
+
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('FORBIDDEN_API_KEY_SCOPE_PROHIBITED');
+    });
+
+    it('allows AUDITOR role to read integrations and health, but blocks registration and key rotation', async () => {
+      // Create integration as ORG_ADMIN
+      const createRes = await request(app)
+        .post('/api/v1/integrations')
+        .set('Authorization', `Bearer ${orgAdminTokenA}`)
+        .send({ name: 'Auditor Viewable Integration', type: 'EXPRESS' });
+
+      const integrationId = createRes.body.integration.integrationId;
+
+      // Auditor can list integrations
+      const listRes = await request(app)
+        .get('/api/v1/integrations')
+        .set('Authorization', `Bearer ${auditorTokenA}`);
+
+      expect(listRes.status).toBe(200);
+      expect(listRes.body.integrations.length).toBeGreaterThan(0);
+
+      // Auditor can view health
+      const healthRes = await request(app)
+        .get(`/api/v1/integrations/${integrationId}/health`)
+        .set('Authorization', `Bearer ${auditorTokenA}`);
+
+      expect(healthRes.status).toBe(200);
+
+      // Auditor cannot create new integrations
+      const failCreate = await request(app)
+        .post('/api/v1/integrations')
+        .set('Authorization', `Bearer ${auditorTokenA}`)
+        .send({ name: 'Auditor Unauthorized Create', type: 'EXPRESS' });
+
+      expect(failCreate.status).toBe(403);
+      expect(failCreate.body.error.code).toBe('FORBIDDEN_INSUFFICIENT_PERMISSIONS');
+
+      // Auditor cannot rotate keys
+      const failRotate = await request(app)
+        .post(`/api/v1/integrations/${integrationId}/rotate-key`)
+        .set('Authorization', `Bearer ${auditorTokenA}`);
+
+      expect(failRotate.status).toBe(403);
+      expect(failRotate.body.error.code).toBe('FORBIDDEN_INSUFFICIENT_PERMISSIONS');
+    });
+
+    it('safely handles oversized log lines (> 64KB) without crashing', async () => {
+      const parser = new NginxLogParser();
+      const oversizedLine = '10.0.0.1 - - [01/Nov/2026:10:00:00 +0000] "GET /api?q=' + 'A'.repeat(70000) + ' HTTP/1.1" 200 100';
+      const event = parser.parseLine(oversizedLine, { orgId: 'org-alpha' });
+
+      expect(event).toBeNull();
+    });
+
+    it('normalizes bracketed IPv6 addresses in Nginx and Apache logs', async () => {
+      const parser = new NginxLogParser();
+      const line = '[2001:db8:85a3::8a2e:370:7334] - user [01/Nov/2026:10:00:00 +0000] "GET /api/v1/test HTTP/1.1" 200 512';
+      const event = parser.parseLine(line, { orgId: 'org-alpha' });
+
+      expect(event).not.toBeNull();
+      expect(event?.sourceIp).toBe('2001:db8:85a3::8a2e:370:7334');
     });
   });
 });
