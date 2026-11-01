@@ -5,7 +5,7 @@ import {
   IntegrationUpdateRequestSchema,
   type Integration,
 } from '@veltrix/shared';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, requireBearerAuth } from '../middleware/auth.js';
 import { enforceTenantIsolation } from '../middleware/tenant.js';
 import { requireRole } from '../middleware/rbac.js';
 import { getStorage } from '../storage/index.js';
@@ -15,6 +15,7 @@ export function createIntegrationsRouter() {
   const storage = getStorage();
 
   // All endpoints require authentication and tenant isolation
+  router.use(requireBearerAuth);
   router.use(authenticate);
   router.use(enforceTenantIsolation);
 
@@ -120,7 +121,7 @@ export function createIntegrationsRouter() {
   // 2. List Integrations (GET /api/v1/integrations)
   router.get(
     '/',
-    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER'),
+    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER', 'AUDITOR'),
     async (req: Request, res: Response) => {
       const orgId = req.tenantOrgId!;
       const siteId = req.query.siteId as string | undefined;
@@ -141,7 +142,7 @@ export function createIntegrationsRouter() {
   // 3. Get Integration Details (GET /api/v1/integrations/:integrationId)
   router.get(
     '/:integrationId',
-    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER'),
+    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER', 'AUDITOR'),
     async (req: Request, res: Response) => {
       const orgId = req.tenantOrgId!;
       const integrationId = req.params.integrationId as string;
@@ -314,7 +315,7 @@ export function createIntegrationsRouter() {
   // 7. Get Integration Health (GET /api/v1/integrations/:integrationId/health)
   router.get(
     '/:integrationId/health',
-    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER'),
+    requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST', 'READ_ONLY_VIEWER', 'AUDITOR'),
     async (req: Request, res: Response) => {
       const orgId = req.tenantOrgId!;
       const integrationId = req.params.integrationId as string;

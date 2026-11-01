@@ -43,7 +43,7 @@ export class DataSanitizer {
     return false;
   }
 
-  sanitizeValue(key: string, value: unknown): unknown {
+  sanitizeValue(key: string, value: unknown, visited: WeakSet<object> = new WeakSet()): unknown {
     if (this.isSensitiveKey(key)) {
       return '[REDACTED]';
     }
@@ -54,9 +54,11 @@ export class DataSanitizer {
 
     if (typeof value === 'object') {
       if (Array.isArray(value)) {
-        return value.map((item) => this.sanitizeObject(item));
+        if (visited.has(value)) return '[CIRCULAR]';
+        visited.add(value);
+        return value.map((item) => this.sanitizeValue(key, item, visited));
       }
-      return this.sanitizeObject(value as Record<string, unknown>);
+      return this.sanitizeObject(value as Record<string, unknown>, visited);
     }
 
     // Check if string looks like an authorization Bearer token
@@ -67,20 +69,25 @@ export class DataSanitizer {
     return value;
   }
 
-  sanitizeObject<T>(input: T): T {
+  sanitizeObject<T>(input: T, visited: WeakSet<object> = new WeakSet()): T {
     if (!input || typeof input !== 'object') {
       return input;
     }
 
+    if (visited.has(input as object)) {
+      return '[CIRCULAR]' as unknown as T;
+    }
+    visited.add(input as object);
+
     if (Array.isArray(input)) {
-      return input.map((item) => this.sanitizeObject(item)) as unknown as T;
+      return input.map((item) => this.sanitizeObject(item, visited)) as unknown as T;
     }
 
     const result: Record<string, unknown> = {};
     const record = input as Record<string, unknown>;
 
     for (const [key, val] of Object.entries(record)) {
-      result[key] = this.sanitizeValue(key, val);
+      result[key] = this.sanitizeValue(key, val, visited);
     }
 
     return result as T;

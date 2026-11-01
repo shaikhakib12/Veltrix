@@ -157,8 +157,24 @@ export class VeltrixClient {
           return;
         }
 
+        // Handle HTTP 429 (Rate Limited) with Retry-After header support
+        let retryAfterMs: number | undefined;
+        if (response.status === 429 && response.headers?.get) {
+          const retryHeader = response.headers.get('retry-after');
+          if (retryHeader) {
+            const parsedSeconds = parseInt(retryHeader, 10);
+            if (!isNaN(parsedSeconds) && parsedSeconds > 0) {
+              retryAfterMs = parsedSeconds * 1000;
+            }
+          }
+        }
+
         // Transient error (5xx or 429), retry with backoff
-        throw new Error(`HTTP ${response.status}`);
+        const err = new Error(`HTTP ${response.status}`);
+        if (retryAfterMs !== undefined) {
+          (err as any).retryAfterMs = retryAfterMs;
+        }
+        throw err;
       } catch (err: unknown) {
         attempt++;
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -171,13 +187,19 @@ export class VeltrixClient {
           return;
         }
 
-        // Truncated exponential backoff with jitter
-        const backoff = Math.min(
-          this.config.maxBackoffMs,
-          this.config.baseBackoffMs * Math.pow(2, attempt - 1)
-        );
-        const jitter = backoff * (0.8 + Math.random() * 0.4);
-        await new Promise((resolve) => setTimeout(resolve, jitter));
+        // Use Retry-After duration if supplied, otherwise truncated exponential backoff with jitter
+        const retryAfterMs = (err as { retryAfterMs?: number })?.retryAfterMs;
+        let delayMs: number;
+        if (typeof retryAfterMs === 'number' && retryAfterMs > 0) {
+          delayMs = Math.min(this.config.maxBackoffMs, retryAfterMs);
+        } else {
+          const backoff = Math.min(
+            this.config.maxBackoffMs,
+            this.config.baseBackoffMs * Math.pow(2, attempt - 1)
+          );
+          delayMs = backoff * (0.8 + Math.random() * 0.4);
+        }
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
   }

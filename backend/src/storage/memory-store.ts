@@ -35,6 +35,7 @@ export class MemoryStore implements StorageInterface {
   private websitesByOrg: Map<string, Map<string, WebsiteAsset>> = new Map();
   private integrationsByOrg: Map<string, Map<string, Integration>> = new Map();
   private integrationsByApiKeyHash: Map<string, Integration> = new Map();
+  private domainOwnership: Map<string, string> = new Map();
 
 
   private static readonly GENESIS_HASH = '0'.repeat(64);
@@ -610,12 +611,23 @@ export class MemoryStore implements StorageInterface {
 
   async saveWebsite(site: WebsiteAsset): Promise<WebsiteAsset> {
     const orgId = site.orgId;
+    const normalizedDomain = site.primaryDomain.toLowerCase().trim();
+
+    // Atomic cross-tenant domain ownership check
+    const existingOwnerOrg = this.domainOwnership.get(normalizedDomain);
+    if (existingOwnerOrg && existingOwnerOrg !== orgId) {
+      const err = new Error(`DOMAIN_ALREADY_CLAIMED: Domain '${normalizedDomain}' is already claimed by another organization.`);
+      (err as any).name = 'ConditionalCheckFailedException';
+      throw err;
+    }
+
     if (!this.websitesByOrg.has(orgId)) {
       this.websitesByOrg.set(orgId, new Map());
     }
     const orgSites = this.websitesByOrg.get(orgId)!;
-    orgSites.set(site.siteId, { ...site });
-    return { ...site };
+    orgSites.set(site.siteId, { ...site, primaryDomain: normalizedDomain });
+    this.domainOwnership.set(normalizedDomain, orgId);
+    return { ...site, primaryDomain: normalizedDomain };
   }
 
   async getWebsites(
@@ -712,6 +724,10 @@ export class MemoryStore implements StorageInterface {
   async deleteWebsite(orgId: string, siteId: string): Promise<boolean> {
     const orgSites = this.websitesByOrg.get(orgId);
     if (!orgSites) return false;
+    const site = orgSites.get(siteId);
+    if (site) {
+      this.domainOwnership.delete(site.primaryDomain.toLowerCase().trim());
+    }
     return orgSites.delete(siteId);
   }
 
@@ -805,5 +821,6 @@ export class MemoryStore implements StorageInterface {
     this.websitesByOrg.clear();
     this.integrationsByOrg.clear();
     this.integrationsByApiKeyHash.clear();
+    this.domainOwnership.clear();
   }
 }

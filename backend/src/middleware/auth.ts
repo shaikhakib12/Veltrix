@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import type { ApiErrorResponse } from '@veltrix/shared';
 import { getAuthProvider } from '../auth/index.js';
 import { getStorage } from '../storage/index.js';
@@ -28,6 +28,21 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     const integration = await storage.getIntegrationByApiKeyHash(apiKeyHash);
 
     if (!integration) {
+      const errorResponse: ApiErrorResponse = {
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED_INVALID_API_KEY',
+          message: 'The supplied API key was not found or is invalid.',
+        },
+      };
+      res.status(401).json(errorResponse);
+      return;
+    }
+
+    // Defense-in-depth constant-time hash comparison
+    const computedBuf = Buffer.from(apiKeyHash, 'hex');
+    const storedBuf = Buffer.from(integration.apiKeyHash, 'hex');
+    if (computedBuf.length !== storedBuf.length || !timingSafeEqual(computedBuf, storedBuf)) {
       const errorResponse: ApiErrorResponse = {
         success: false,
         error: {
@@ -144,4 +159,22 @@ export async function authenticate(req: Request, res: Response, next: NextFuncti
     };
     res.status(401).json(errorResponse);
   }
+}
+
+/**
+ * Prohibits ingestion API keys from accessing administrative or management endpoints.
+ * Enforces least-privilege scoping: API keys are strictly restricted to telemetry ingestion.
+ */
+export function requireBearerAuth(req: Request, res: Response, next: NextFunction): void {
+  if (req.integration || req.headers['x-api-key'] || req.headers['x-integration-key']) {
+    res.status(403).json({
+      success: false,
+      error: {
+        code: 'FORBIDDEN_API_KEY_SCOPE_PROHIBITED',
+        message: 'Ingestion API keys cannot be used for administrative or management APIs. Use Bearer token authentication.',
+      },
+    });
+    return;
+  }
+  next();
 }

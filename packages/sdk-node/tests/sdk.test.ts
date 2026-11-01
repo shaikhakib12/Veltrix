@@ -94,6 +94,21 @@ describe('Veltrix Node.js SDK & Express Middleware (TASK-604)', () => {
       expect(cleaned.nested.customSecret).toBe('[REDACTED]');
       expect(cleaned.nested.safeField).toBe('visible_data');
     });
+
+    it('safely redacts circular objects without infinite recursion stack overflow', () => {
+      const sanitizer = new DataSanitizer();
+      const circular: any = { name: 'RootEntity', password: 'secret_root' };
+      circular.self = circular;
+      circular.nested = { childName: 'child', parent: circular };
+
+      const cleaned: any = sanitizer.sanitizeObject(circular);
+
+      expect(cleaned.name).toBe('RootEntity');
+      expect(cleaned.password).toBe('[REDACTED]');
+      expect(cleaned.self).toBe('[CIRCULAR]');
+      expect(cleaned.nested.childName).toBe('child');
+      expect(cleaned.nested.parent).toBe('[CIRCULAR]');
+    });
   });
 
   describe('3. VeltrixClient Batching, Retry & Stable Idempotency', () => {
@@ -256,6 +271,34 @@ describe('Veltrix Node.js SDK & Express Middleware (TASK-604)', () => {
       expect(traversalEvent).toBeDefined();
       expect(traversalEvent.severity).toBe('HIGH');
       expect(traversalEvent.metadata.matchedPatterns).toContain('PATH_TRAVERSAL');
+    });
+
+    it('gracefully handles malformed percent-encoded URIs without throwing or dropping request', async () => {
+      let recordedEvents: any[] = [];
+      const mockFetcher = async (_url: string, init?: RequestInit): Promise<Response> => {
+        recordedEvents.push(...JSON.parse(init?.body as string).events);
+        return new Response(JSON.stringify({ success: true, accepted: 1 }), { status: 202 });
+      };
+
+      const client = new VeltrixClient({
+        apiKey: 'vltx_live_testkey123',
+        orgId: 'org-test-enterprise',
+        endpoint: 'https://telemetry.mock.veltrix.io',
+        fetcher: mockFetcher as any,
+      });
+
+      const app = express();
+      app.use(veltrixMiddleware(client, { captureAllRequests: true }));
+      app.get('/api/test', (req, res) => {
+        res.status(200).json({ ok: true });
+      });
+
+      // Send malformed percent sequence (%E0%A4%A)
+      const res = await request(app).get('/api/test?q=%E0%A4%A');
+      expect(res.status).toBe(200);
+
+      await client.flush();
+      expect(recordedEvents.length).toBe(1);
     });
   });
 });
