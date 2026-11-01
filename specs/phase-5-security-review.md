@@ -108,17 +108,18 @@ Threat intelligence management is strictly bifurcated into two mutually exclusiv
 
 ## 5. Gate 4: GitHub Actions CI Verification
 
-The GitHub Actions API was queried directly for commits `d58ec7b` and `ed27164`:
+The GitHub Actions API was queried directly for commits `d58ec7b`, `ed27164`, and `535f5bd`:
 
 ```
-Check Run ID: 124792830992
-Workflow Run ID: 41287890555
+Check Run ID: 124799836280
+Workflow Run ID: 41290255276
 Check Run Name: Build, Typecheck & Test (22.x)
-Head SHA: ed2716489373cb73ca14a0be2f31ee42a5c9f5e1
+Head SHA: 535f5bd162c4ae065bb82b180e3e234a251273f2
 Status: completed
 Conclusion: success
-Started At: 2026-11-01T09:12:50Z
-Completed At: 2026-11-01T09:13:29Z
+Started At: 2026-11-01T09:46:31Z
+Completed At: 2026-11-01T09:47:06Z
+URL: https://github.com/shaikhakib12/Veltrix/actions/runs/41290255276/job/124799836280
 ```
 
 ### Steps Executed in CI:
