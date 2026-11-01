@@ -9,36 +9,21 @@ import type {
 import {
   InternalEvidenceAuthority,
   getDefaultInternalEvidenceAuthority,
-  resetDefaultInternalEvidenceAuthorityForTesting,
   APPROVED_INTERNAL_VERIFIERS,
   ALLOWED_VERIFIED_SIGNALS,
   type ApprovedVerifierIdentity,
   type AllowedVerifiedSignal,
-  type CreateEvidenceContextParams,
 } from './evidence-authority.js';
 
 export {
   EvidenceProvenance,
   InternalTrustedEvidenceContext,
   VerifiedResponseEvidence,
-  InternalEvidenceAuthority,
-  getDefaultInternalEvidenceAuthority,
-  resetDefaultInternalEvidenceAuthorityForTesting,
   APPROVED_INTERNAL_VERIFIERS,
   ALLOWED_VERIFIED_SIGNALS,
   ApprovedVerifierIdentity,
   AllowedVerifiedSignal,
 };
-
-/**
- * Convenience helper delegating to the process-wide InternalEvidenceAuthority.
- * Strictly intended for internal server-side components.
- */
-export function createInternalTrustedEvidenceContext(
-  params: CreateEvidenceContextParams
-): InternalTrustedEvidenceContext {
-  return getDefaultInternalEvidenceAuthority().createContext(params);
-}
 
 export interface WebTelemetryContext {
   /**
@@ -258,19 +243,25 @@ export function normalizeWebTelemetry(
   let evidenceProvenance: EvidenceProvenance = 'UNTRUSTED_CLIENT';
   let activeTrustedContext: InternalTrustedEvidenceContext | undefined;
 
+  const expectedBinding = {
+    eventId: event.eventId,
+    orgId: event.orgId,
+    siteId: meta.siteId || '',
+  };
+
   if (context?.trustedContext) {
-    if (auth.verifyContext(context.trustedContext)) {
+    if (auth.verifyContext(context.trustedContext, expectedBinding)) {
       evidenceProvenance = context.trustedContext.verifiedProvenance;
       activeTrustedContext = context.trustedContext;
     } else {
-      console.warn('[VELTRIX-SECURITY] Rejected forged or invalid trustedContext in WebTelemetryContext');
+      console.warn('[VELTRIX-SECURITY] Rejected forged, invalid, or replayed trustedContext in WebTelemetryContext');
     }
   } else if (event.trustedEvidenceContext) {
-    if (auth.verifyContext(event.trustedEvidenceContext)) {
+    if (auth.verifyContext(event.trustedEvidenceContext, expectedBinding)) {
       evidenceProvenance = event.trustedEvidenceContext.verifiedProvenance;
       activeTrustedContext = event.trustedEvidenceContext;
     } else {
-      console.warn('[VELTRIX-SECURITY] Rejected forged or unverified event.trustedEvidenceContext');
+      console.warn('[VELTRIX-SECURITY] Rejected forged, invalid, or replayed event.trustedEvidenceContext');
     }
   }
 

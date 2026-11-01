@@ -115,41 +115,51 @@ All **9 security audit findings** identified during review have been fully remed
 - **Severity:** Critical
 - **Affected File:** `backend/src/detection/web-parser.ts`, `backend/src/detection/evidence-authority.ts`, `backend/src/services/event-service.ts`, `backend/src/storage/dynamodb-store.ts`, `backend/src/storage/memory-store.ts`, `packages/shared/src/types/index.ts`
 - **Explanation:**
-  1. **Trusted Context Construction (Finding 1):** `createInternalTrustedEvidenceContext()` previously accepted arbitrary caller-supplied strings without cryptographic verification, and legacy bypass flags (`isTrustedServerComponent`, `trustedProvenance`) existed on `WebTelemetryContext`.
-  2. **Client-Controlled Response Evidence (Finding 2):** Inbound `metadata.responseSample` and `metadata.errorMessage` were scanned and could promote database syntax errors or file leaks into trusted evidence under trusted execution contexts, violating the principle that external client metadata cannot become trustworthy simply because the parser runs inside a trusted server component.
-  3. **WAF Action Provenance (Finding 3):** `metadata.wafAction` was treated as verified based solely on event provenance, allowing forged WAF actions (e.g. client sending `wafAction: 'BLOCK'` on an HTTP 200 event) to influence confidence classifications.
-  4. **Event-Level Trusted Context (Finding 4):** Event-level contexts required strict validation to ensure public ingestion cannot inject them, persisted storage cannot deserialize them, and runtime authority cannot be overridden.
+  1. **Complete HMAC Coverage & Cryptographic Integrity:** `computeSignature()` previously only signed a subset of fields. Unsigned fields such as `evidenceReferences` and `verifiedResponseEvidence` could potentially be altered without invalidating the signature.
+  2. **Event, Tenant, and Site Binding:** A signed evidence context could previously be detached and replayed across different events, tenants, or website assets without binding verification, or reused after expiration.
+  3. **Authority Access & Service Authentication:** `InternalEvidenceAuthority` previously relied purely on an allowlist of verifier identity strings without authenticating the calling service, and `web-parser.ts` re-exported authority creation helpers publicly.
+  4. **Client-Controlled Response Evidence & WAF Actions:** Client-controlled metadata (`metadata.responseSample`, `metadata.errorMessage`, `metadata.wafAction`) could not be trusted to establish server-verified exploitation or blocked attempts.
 - **Fix Applied:**
-  1. **Runtime Cryptographic Capability Authority (`InternalEvidenceAuthority`):**
-     - Implemented in `backend/src/detection/evidence-authority.ts`.
-     - Issues and verifies HMAC-SHA256 capability signatures on `InternalTrustedEvidenceContext` using a private server-side authority secret.
-     - Enforces an explicit server-side allowlist for verifiers (`APPROVED_INTERNAL_VERIFIERS`: `'canary-service:v1'`, `'core-scanner:active-audit'`, `'internal-audit-worker:core'`, `'sensor:canary:db'`, `'sensor:canary:files'`, `'collector:nginx:authenticated'`, `'waf:edge-gateway:authenticated'`).
-     - Enforces an explicit server-side allowlist for verified signal identifiers (`ALLOWED_VERIFIED_SIGNALS`: `'CANARY_TOKEN_BREACH'`, `'DATA_LEAKAGE_INDICATOR'`, `'UNAUTHORIZED_PRIVILEGE_MUTATION'`, `'UNHANDLED_DB_SYNTAX_ERROR'`, `'STACK_TRACE_IN_RESPONSE'`, `'LATENCY_SPIKE_EXPLOIT'`, `'WAF_INTERVENTION'`, `'AUTHENTICATED_WAF_BLOCK'`, `'AUTHENTICATED_WAF_CHALLENGE'`).
-     - Removed all legacy bypass flags (`isTrustedServerComponent`, `trustedProvenance`, `verifiedBy`) from `WebTelemetryContext`.
-  2. **Separate Verified Response Evidence Envelope (`VerifiedResponseEvidence`):**
-     - Defined in `@veltrix/shared` and strictly contained within `InternalTrustedEvidenceContext`.
-     - `metadata.responseSample` and `metadata.errorMessage` are treated strictly as unverified client claims (`CLIENT_CLAIMED_DB_SYNTAX_ERROR`, `CLIENT_CLAIMED_DATA_LEAKAGE`).
-     - The parser ONLY scans independently captured response evidence inside `activeTrustedContext.verifiedResponseEvidence`.
-  3. **Authenticated WAF Action Provenance:**
-     - Client `metadata.wafAction` is isolated in `untrustedClientSignals` (`CLIENT_CLAIMED_WAF_BLOCK`, `CLIENT_CLAIMED_WAF_CHALLENGE`, `CLIENT_CLAIMED_WAF_ALLOW`) and cannot escalate confidence to `BLOCKED_ATTEMPT`.
-     - Effective WAF action is ONLY accepted from `verifiedResponseEvidence.wafAction` authenticated by an approved collector/WAF verifier.
-  4. **Event-Level Context Ingestion & Storage Isolation:**
-     - `SingleEventIngestSchema` is `.strict()` and rejects public events containing `trustedEvidenceContext`.
-     - `EventService.normalizeEvent` explicitly never includes `trustedEvidenceContext`.
-     - `DynamoDBStore` and `MemoryStore` strip `trustedEvidenceContext` on `saveEvent`, and deserialize stored events with `trustedEvidenceContext: undefined`.
-     - Any attached context must pass `authority.verifyContext()` runtime validation.
+  1. **Deterministic Canonical Serialization & Complete HMAC Coverage:**
+     - Canonical string serialization (`computeCanonicalPayload`) integrity-protects EVERY security-relevant field:
+       - `version`: `'VELTRIX_EVIDENCE_V2'`
+       - `eventId`: bound event identifier
+       - `orgId`: bound organization identifier
+       - `siteId`: bound website asset identifier
+       - `provenance`: `'TRUSTED_SERVER_COMPONENT'` or `'AUTHENTICATED_COLLECTOR'`
+       - `verifierIdentity`: verified caller identity
+       - `signals`: sorted list of verified signal identifiers
+       - `evidenceReferences`: sorted list of reference IDs
+       - `timestamp`: ISO 8601 UTC timestamp
+       - `responseBodyHash`: SHA-256 hash of verified response body (or `'NONE'`)
+       - `errorMessageHash`: SHA-256 hash of verified error message (or `'NONE'`)
+       - `wafAction`: verified WAF intervention action (`ALLOW`, `BLOCK`, `CHALLENGE`, `LOG`, or `'NONE'`)
+       - `wafRuleId`: verified WAF rule identifier
+     - Signature verified using constant-time comparison (`timingSafeEqual`).
+  2. **Anti-Replay, Event Binding & Freshness Verification:**
+     - Context explicitly carries `eventId`, `orgId`, and `siteId`.
+     - `normalizeWebTelemetry` verifies that `context.eventId === event.eventId`, `context.orgId === event.orgId`, and `context.siteId === (event.metadata?.siteId || '')`. Any cross-event, cross-tenant, or cross-site replay is rejected.
+     - Freshness checks enforce that verification timestamps cannot be in the future (> 60s clock skew) or older than 15 minutes (`MAX_EVIDENCE_AGE_MS = 900,000 ms`).
+  3. **Caller Service Authentication & Restricted Authority:**
+     - `createContext()` requires a valid `serviceAuthToken` matching pre-shared credentials (`INTERNAL_SERVICE_CREDENTIALS`) for the approved verifier identity.
+     - Unauthorized code paths without the secret credential cannot construct signed evidence contexts.
+     - Removed public re-exports of `createInternalTrustedEvidenceContext`, `InternalEvidenceAuthority`, and `getDefaultInternalEvidenceAuthority` from `web-parser.ts`.
+     - Preserved authenticated WAF collector verification via authorized collector credentials.
+  4. **Ingestion & Persistence Storage Boundary Protection:**
+     - Public ingestion schema rejects any event carrying `trustedEvidenceContext`.
+     - `DynamoDBStore` and `MemoryStore` strip `trustedEvidenceContext` on save, returning undefined on read.
 - **Test Evidence:** 11 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
-  - `1. unauthenticated caller attempting to construct trusted context (unverified signature or missing authority) is rejected`
-  - `2. legacy isTrustedServerComponent: true bypass is blocked and defaults to UNTRUSTED_CLIENT`
-  - `3. legacy trustedProvenance bypass is blocked and defaults to UNTRUSTED_CLIENT`
-  - `4. forged verifier identity outside allowlist is rejected by authority and parser`
-  - `5. forged signal identifiers outside allowlist are rejected by authority and parser`
-  - `6. trusted context combined with forged responseSample in client metadata never promotes it to trusted evidence`
-  - `7. trusted context combined with forged errorMessage in client metadata never promotes it to trusted evidence`
-  - `8. client-submitted forged WAF action (BLOCK, CHALLENGE, ALLOW) never elevates confidence`
-  - `9. public event containing trustedEvidenceContext is rejected by ingestion validation and stripped from persistence`
-  - `10. genuine verified server-side evidence via InternalEvidenceAuthority elevates confidence correctly`
-  - `11. existing SQLi, XSS and traversal detection remains fully functional`
+  - `1. modifying signed responseBody invalidates the signature`
+  - `2. modifying signed errorMessage invalidates the signature`
+  - `3. modifying signed wafAction invalidates the signature`
+  - `4. modifying evidenceReferences invalidates the signature`
+  - `5. changing eventId invalidates the context`
+  - `6. changing orgId invalidates the context`
+  - `7. changing siteId invalidates the context`
+  - `8. expired or future-dated contexts are rejected`
+  - `9. a context from one website cannot be replayed for another`
+  - `10. unauthorized code paths cannot issue trusted evidence`
+  - `11. genuine authenticated evidence continues working`
 
 ---
 

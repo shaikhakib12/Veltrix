@@ -55,10 +55,14 @@ export interface VerifiedResponseEvidence {
  * External clients, SDK users, webhooks, and integrations cannot construct this.
  */
 export interface InternalTrustedEvidenceContext {
+  version: 'VELTRIX_EVIDENCE_V2';
   verifiedProvenance: 'TRUSTED_SERVER_COMPONENT' | 'AUTHENTICATED_COLLECTOR';
-  verifiedSignalIdentifiers: string[];
   verifierIdentity: string;
   verificationTimestamp: string;
+  eventId: string;
+  orgId: string;
+  siteId?: string;
+  verifiedSignalIdentifiers: string[];
   evidenceReferences: string[];
   authoritySignature?: string;
   verifiedResponseEvidence?: VerifiedResponseEvidence;
