@@ -13,6 +13,9 @@ import type {
   VERIFICATION_METHODS,
   INTEGRATION_TYPES,
   INTEGRATION_STATUSES,
+  WEB_CONFIDENCE_TIERS,
+  WEB_ATTACK_TYPES,
+  RISK_BANDS,
 } from '../constants/index.js';
 
 export type EventCategory = (typeof EVENT_CATEGORIES)[number];
@@ -24,6 +27,28 @@ export type ResponseExecutionStatus = (typeof RESPONSE_EXECUTION_STATUSES)[numbe
 export type UserRole = (typeof USER_ROLES)[number];
 export type AuditActionType = (typeof AUDIT_ACTION_TYPES)[number];
 
+export type WebConfidenceTier = (typeof WEB_CONFIDENCE_TIERS)[number];
+export type WebAttackType = (typeof WEB_ATTACK_TYPES)[number];
+export type RiskBand = (typeof RISK_BANDS)[number];
+
+export interface WebSecurityEventMetadata {
+  siteId?: string;
+  domain?: string;
+  httpMethod?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS';
+  requestUri?: string;
+  httpStatus?: number;
+  responseTimeMs?: number;
+  userAgent?: string;
+  clientDeclaredAttackType?: string;
+  matchedPatterns?: string[];
+  wafAction?: 'ALLOW' | 'BLOCK' | 'CHALLENGE' | 'LOG';
+  isBot?: boolean;
+  ja3Fingerprint?: string;
+  confidenceLevel?: WebConfidenceTier;
+  corroboratingSignals?: string[];
+  [key: string]: unknown;
+}
+
 export interface SecurityEvent {
   eventId: string;
   orgId: string;
@@ -34,7 +59,7 @@ export interface SecurityEvent {
   sourceIp: string;
   username?: string;
   sourceSystem: string;
-  metadata?: Record<string, unknown>;
+  metadata?: WebSecurityEventMetadata | Record<string, unknown>;
   isSimulated?: boolean;
   idempotencyKey?: string;
   ingestedAt?: string; // Server-side ISO 8601 UTC receipt timestamp
@@ -54,7 +79,6 @@ export interface IngestionResponseData {
   rejected: number;
   results: IngestionItemResult[];
 }
-
 
 export interface DetectionEvidence {
   matchedRuleId: string;
@@ -96,6 +120,7 @@ export interface DetectionQueryOptions {
   ruleId?: string;
   severity?: Severity;
   status?: 'ACTIVE' | 'RESOLVED' | 'SUPPRESSED';
+  siteId?: string;
   startTime?: string;
   endTime?: string;
   limit?: number;
@@ -131,6 +156,26 @@ export interface RiskScoreFactors {
   finalScore: number;
 }
 
+export interface WebRiskFactors extends RiskScoreFactors {
+  vulnerabilityMatchTerm: number;
+  riskBand: RiskBand;
+  calculationExplanation: string;
+  contributingFactors: {
+    eventCount: number;
+    detectedAttackTypes: string[];
+    highestConfidence: WebConfidenceTier;
+    assetEnvironment: string;
+    threatIntelStatus: string;
+    vulnerabilityOverlap?: {
+      overlapLevel: 'EXACT' | 'PATH' | 'ASSET' | 'NONE';
+      weight: number;
+      findingCvss: number;
+      confidenceMultiplier: number;
+      termValue: number;
+    };
+  };
+}
+
 export interface TimelineEntry {
   timestamp: string;
   eventType: string;
@@ -138,6 +183,18 @@ export interface TimelineEntry {
   sourceIp?: string;
   username?: string;
   mitreTactic?: string;
+  details?: Record<string, unknown>;
+}
+
+export interface VulnerabilityFindingSummary {
+  findingId: string;
+  siteId: string;
+  vulnType: string;
+  targetUri: string;
+  targetParameter?: string;
+  cvssScore: number;
+  severity: Severity;
+  status: 'OPEN' | 'CONFIRMED' | 'IN_REMEDIATION' | 'RESOLVED' | 'ACCEPTED_RISK' | 'FALSE_POSITIVE';
 }
 
 export interface Incident {
@@ -147,7 +204,7 @@ export interface Incident {
   description: string;
   severity: Severity;
   riskScore: number;
-  riskFactors: RiskScoreFactors;
+  riskFactors: RiskScoreFactors | WebRiskFactors;
   status: IncidentStatus;
   assignedTo?: string;
   associatedEventIds: string[];
@@ -161,6 +218,15 @@ export interface Incident {
   }>;
   createdAt: string;
   updatedAt: string;
+
+  // Website Asset Monitoring extensions (Phase 7)
+  siteId?: string;
+  domain?: string;
+  sourceIp?: string;
+  attackTypes?: string[];
+  highestConfidence?: WebConfidenceTier;
+  riskBand?: RiskBand;
+  webRiskFactors?: WebRiskFactors;
 }
 
 export type IndicatorProvenance = 'VERIFIED_FEED' | 'MANUAL_ANALYST';

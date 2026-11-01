@@ -55,6 +55,7 @@ export interface StorageInterface {
     options?: {
       status?: IncidentStatus;
       severity?: Severity;
+      siteId?: string;
       limit?: number;
       cursor?: string;
     }

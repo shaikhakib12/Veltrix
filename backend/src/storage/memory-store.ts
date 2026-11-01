@@ -204,6 +204,9 @@ export class MemoryStore implements StorageInterface {
     if (options?.status) {
       filtered = filtered.filter((d) => d.status === options.status);
     }
+    if (options?.siteId) {
+      filtered = filtered.filter((d) => (d.evidence?.details as { siteId?: string } | undefined)?.siteId === options.siteId);
+    }
     if (options?.startTime) {
       const startMs = new Date(options.startTime).getTime();
       filtered = filtered.filter((d) => new Date(d.detectedAt).getTime() >= startMs);
@@ -285,6 +288,7 @@ export class MemoryStore implements StorageInterface {
     options?: {
       status?: IncidentStatus;
       severity?: Severity;
+      siteId?: string;
       limit?: number;
       cursor?: string;
     }
@@ -297,6 +301,9 @@ export class MemoryStore implements StorageInterface {
     }
     if (options?.severity) {
       filtered = filtered.filter((i) => i.severity === options.severity);
+    }
+    if (options?.siteId) {
+      filtered = filtered.filter((i) => i.siteId === options.siteId);
     }
 
     filtered.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());

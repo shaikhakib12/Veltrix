@@ -8,6 +8,7 @@ import { createDetectionRulesRouter } from './routes/detection-rules.js';
 import { createThreatIndicatorsRouter } from './routes/threat-indicators.js';
 import { createWebsitesRouter } from './routes/websites.js';
 import { createIntegrationsRouter } from './routes/integrations.js';
+import { createIncidentsRouter } from './routes/incidents.js';
 import { authenticate } from './middleware/auth.js';
 import { enforceTenantIsolation } from './middleware/tenant.js';
 import { requireRole } from './middleware/rbac.js';
@@ -84,6 +85,9 @@ export function createApp() {
   // Website Asset Inventory & Integration Routes (TASK-601 to TASK-603)
   app.use('/api/v1/websites', createWebsitesRouter());
   app.use('/api/v1/integrations', createIntegrationsRouter());
+
+  // Correlated Incident Management Routes (TASK-706, TASK-707)
+  app.use('/api/v1/incidents', createIncidentsRouter());
 
   // Multi-Tenant Isolation Verification Route (TASK-303)
   app.get(

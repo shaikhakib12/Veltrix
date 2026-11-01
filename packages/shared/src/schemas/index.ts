@@ -12,6 +12,9 @@ import {
   VERIFICATION_METHODS,
   INTEGRATION_TYPES,
   INTEGRATION_STATUSES,
+  WEB_CONFIDENCE_TIERS,
+  WEB_ATTACK_TYPES,
+  RISK_BANDS,
 } from '../constants/index.js';
 
 export const SeveritySchema = z.enum(SEVERITIES);
@@ -350,3 +353,24 @@ export const IntegrationUpdateRequestSchema = z.object({
   status: IntegrationStatusSchema.optional(),
   description: z.string().max(500).optional(),
 }).strict();
+
+export const WebConfidenceTierSchema = z.enum(WEB_CONFIDENCE_TIERS);
+export const WebAttackTypeSchema = z.enum(WEB_ATTACK_TYPES);
+export const RiskBandSchema = z.enum(RISK_BANDS);
+
+export const WebSecurityEventMetadataSchema = z.object({
+  siteId: z.string().optional(),
+  domain: z.string().optional(),
+  httpMethod: z.enum(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']).optional(),
+  requestUri: z.string().optional(),
+  httpStatus: z.number().int().min(100).max(599).optional(),
+  responseTimeMs: z.number().nonnegative().optional(),
+  userAgent: z.string().optional(),
+  clientDeclaredAttackType: z.string().optional(),
+  matchedPatterns: z.array(z.string()).optional(),
+  wafAction: z.enum(['ALLOW', 'BLOCK', 'CHALLENGE', 'LOG']).optional(),
+  isBot: z.boolean().optional(),
+  ja3Fingerprint: z.string().optional(),
+  confidenceLevel: WebConfidenceTierSchema.optional(),
+  corroboratingSignals: z.array(z.string()).optional(),
+}).passthrough();

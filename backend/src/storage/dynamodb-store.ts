@@ -702,6 +702,12 @@ export class DynamoDBStore implements StorageInterface {
       notes: incident.notes,
       createdAt: incident.createdAt,
       updatedAt: incident.updatedAt,
+      siteId: incident.siteId,
+      domain: incident.domain,
+      sourceIp: incident.sourceIp,
+      attackTypes: incident.attackTypes,
+      highestConfidence: incident.highestConfidence,
+      webRiskFactors: incident.webRiskFactors,
       ttl: ttlEpoch,
     };
 
@@ -720,6 +726,7 @@ export class DynamoDBStore implements StorageInterface {
     options?: {
       status?: IncidentStatus;
       severity?: Severity;
+      siteId?: string;
       limit?: number;
       cursor?: string;
     }
