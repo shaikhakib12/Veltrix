@@ -1,7 +1,7 @@
 # VELTRIX: Implementation Tasks & Verification Tracking (`specs/tasks.md`)
 
 **Document Version:** 3.0.0 (Unified Website Security Platform Expansion)  
-**Status:** In Progress (Phases 0, 1, 2, 3, 4 & 5 Complete; Ready for Phase 6)  
+**Status:** PROPOSED / IN REVIEW (Phases 0–5 Merged; Phase 6–13 Planning Under Review in PR #4)  
 **Execution Matrix:** Balanced 3-Person Team Allocation  
 - **[P1] Person 1:** Frontend & CLI Presentation Lead (React 18, Vite, Tailwind CSS, Recharts, Lucide, CLI Formatters & Terminal UX)  
 - **[P2] Person 2:** Backend Core & Cybersecurity Intelligence Lead (Node.js, TypeScript, Ingestion, Detection, Correlation, Risk, Threat Intel, CLI API Client)  
@@ -77,9 +77,9 @@
 ## Phase 6 — Website Assets & Integrations
 
 - [ ] Not started **TASK-601 [P2/P3]:** Website Asset Inventory & Domain Registry: Data models, Zod schemas, and storage methods for `Veltrix-WebsiteAssets`. Support primary domain, approved subdomains, environment (`PROD`/`STAGING`/`DEV`), risk tier, and asset health.
-- [ ] Not started **TASK-602 [P2]:** Domain Ownership Verification Service: Implement DNS TXT challenge resolution (`dns.promises.resolveTxt`) and HTTP challenge endpoint verification (`/.well-known/veltrix-challenge/<token>`). Enforce 90-day verification validity window.
+- [ ] Not started **TASK-602 [P2]:** Domain Ownership Verification & Grace Period Freeze: Implement DNS TXT challenge resolution (`dns.promises.resolveTxt`) and HTTP challenge endpoint verification (`/.well-known/veltrix-challenge/<token>`). Enforce 90-day validity window. Implement immediate scan freeze upon `GRACE_PERIOD`: cancel queued/scheduled scans, emit worker abort signal, and require successful re-verification before resuming scans.
 - [ ] Not started **TASK-603 [P2]:** Website Asset Management REST API: Endpoints (`POST /api/v1/websites`, `GET /api/v1/websites`, `GET /api/v1/websites/:siteId`, `PATCH /api/v1/websites/:siteId`, `POST /api/v1/websites/:siteId/verify`, `DELETE /api/v1/websites/:siteId`) with tenant isolation and RBAC.
-- [ ] Not started **TASK-604 [P1/P2]:** Node.js SDK & Express Middleware Package: Author `@veltrix/sdk-node` with `VeltrixClient` and `veltrixMiddleware`. Implement non-blocking ring buffer, async batching, sensitive parameter sanitization, and fail-open design.
+- [ ] Not started **TASK-604 [P1/P2]:** Node.js SDK & Express Middleware Package: Author `@veltrix/sdk-node` with `VeltrixClient` and `veltrixMiddleware`. Implement strictly non-blocking async execution (never blocks host requests), bounded in-memory ring buffer (default 500 events / 5MB cap), drop-oldest overflow policy with `droppedEventsCount`, exponential backoff with jitter, duplicate suppression via `idempotencyKey`, and optional disk WAL/SQLite spool (`DurableSpoolStorage`) for zero-loss compliance.
 - [ ] Not started **TASK-605 [P3]:** Reverse Proxy & Edge Ingestion Adapters: FluentBit JSON configuration templates for Nginx and Apache logs, and Cloudflare Worker telemetry forwarder script.
 - [ ] Not started **TASK-606 [ALL]:** Phase 6 Automated Test Suites: Comprehensive unit and integration tests covering website CRUD, DNS/HTTP challenge verification, cross-tenant isolation, SDK ring buffer, and log parsing (`backend/tests/websites.test.ts`, `packages/sdk-node/tests/middleware.test.ts`).
 
@@ -88,10 +88,10 @@
 ## Phase 7 — Website Attack Monitoring, Correlation & Risk Scoring
 
 - [ ] Not started **TASK-701 [P2]:** Web Attack Signature & Rule Definitions: Implement website-specific detection rules: `RULE-101` (SQL Injection Probing), `RULE-102` (Cross-Site Scripting Probing), `RULE-103` (Path Traversal / LFI Probing), `RULE-104` (Malicious Bot & Scraper Activity), `RULE-105` (Authentication Flow Tampering).
-- [ ] Not started **TASK-702 [P2]:** Attack Probe vs. Exploitation Disambiguation: Telemetry parser evaluating target HTTP response status (`4xx` = blocked probe vs `200`/`500` = potential exploitation) to assign severity and urgency tiers dynamically.
+- [ ] Not started **TASK-702 [P2]:** Attack vs. Exploitation Confidence Classification: Telemetry parser implementing four evidence-based confidence tiers (`SUSPICIOUS_ATTEMPT`, `BLOCKED_ATTEMPT`, `POTENTIAL_EXPLOITATION`, `CONFIRMED_EXPLOITATION`). Require corroborating application/WAF error signals (DB syntax exceptions, latency spikes, canary triggers); prohibit automatic Critical alerts from status code or response size alone.
 - [ ] Not started **TASK-703 [P2]:** Multi-Stage Attack Correlation Engine: Correlate inbound web attack detections across sliding temporal windows (15m default), grouping related alerts by `sourceIp` and `siteId` into unified incidents.
-- [ ] Not started **TASK-704 [P2]:** Explainable Mathematical Risk Scoring Engine: Implement deterministic formula: `RiskScore = min(100, Round(S_base * M_freq * M_asset * M_threat + B_sequence))`. Generate transparent factor breakdowns.
-- [ ] Not started **TASK-705 [P2]:** Vulnerability-Aware Attack Prioritization: Cross-reference attack target URIs with known open vulnerability findings on the asset; apply 1.5x risk multiplier penalty when an attack targets an unmitigated vulnerability.
+- [ ] Not started **TASK-704 [P2]:** Explainable Mathematical Risk Scoring Engine: Implement deterministic formula: `RiskScore = min(100, Round(S_base * M_freq * M_asset * M_threat + C_vuln_match + B_sequence))`. Generate transparent factor breakdowns and risk tier classification.
+- [ ] Not started **TASK-705 [P2]:** Configurable Risk Contribution Model & Calibration: Implement additive vulnerability term $C_{vuln_match}$ based on attack surface overlap ($w_{overlap}$ for exact URI+parameter vs path match), CVSS severity, and confidence tier. Implement empirical calibration and testing harness.
 - [ ] Not started **TASK-706 [P3]:** Incident Persistence & Storage Harness: Store correlated incidents in `Veltrix-Incidents` with GSI1 status/risk indexing, chronologically ordered attack timelines, and tenant isolation.
 - [ ] Not started **TASK-707 [ALL]:** Phase 7 Automated Test Suite: Test all 5 web attack rules, probe vs. exploit classification, correlation grouping, risk math verification, and vulnerability-weighted scoring (`backend/tests/web-detection-correlation.test.ts`).
 
@@ -102,7 +102,7 @@
 - [ ] Not started **TASK-801 [P2]:** Vulnerability Assessment Domain Types & Schemas: Define Zod schemas and TypeScript types for scan configurations, scan jobs, vulnerability findings, CVSS v3.1 scores, and remediation guidance.
 - [ ] Not started **TASK-802 [P2]:** Safe Native Passive Assessment Engine: Implement non-destructive passive checks: TLS cipher suites/versions, HTTP security headers (HSTS, CSP, X-Frame-Options, etc.), cookie flags, CORS configuration, and info disclosure banners.
 - [ ] Not started **TASK-803 [P3]:** Isolated Scanner Worker Daemon & ZAP Runner: Implement queue-polled isolated worker daemon. Evaluate and integrate headless OWASP ZAP container runner via ZAP API with safe non-destructive active scan policies.
-- [ ] Not started **TASK-804 [P3]:** Scanning Governance, Egress Guard & Rate Limiter: Enforce domain verification check, HMAC-signed authorization token validation, private IP egress blocking (SSRF prevention), and token-bucket rate limiting (max 5-10 req/s).
+- [ ] Not started **TASK-804 [P3]:** Comprehensive SSRF Guard, Rate Limiter & Emergency Cancellation: Enforce domain verification check, HMAC authorization tokens, connection-time IP validation and socket pinning (defeating DNS rebinding), recursive CNAME inspection, redirect re-validation, complete IPv4/IPv6/IPv4-mapped prohibited matrix, token-bucket rate limiting (max 5-10 req/s with backoff), and emergency abort kill-switch targeting 500ms SLO for socket termination.
 - [ ] Not started **TASK-805 [P2/P3]:** Vulnerability Findings Registry & State Machine: Implement findings persistence in `Veltrix-VulnerabilityFindings`. Support lifecycle states: `OPEN` -> `CONFIRMED` -> `IN_REMEDIATION` -> `RESOLVED` -> `ACCEPTED_RISK` -> `FALSE_POSITIVE`.
 - [ ] Not started **TASK-806 [P2]:** Vulnerability Scanning & Findings REST API: Endpoints: `POST /api/v1/scans`, `GET /api/v1/scans`, `GET /api/v1/scans/:scanId`, `POST /api/v1/scans/:scanId/abort`, `GET /api/v1/findings`, `PATCH /api/v1/findings/:findingId`.
 - [ ] Not started **TASK-807 [P2]:** Security & Compliance Report Generator: Generate structured Executive Summary, Vulnerability Assessment Detail, and OWASP Top 10 compliance reports in JSON and Markdown formats.

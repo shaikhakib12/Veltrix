@@ -2,7 +2,7 @@
 ## System Requirements Specification (`specs/requirements.md`)
 
 **Document Version:** 3.0.0 (Unified Website Security Platform Expansion)  
-**Status:** Approved Specification  
+**Status:** PROPOSED / IN REVIEW (PR #4 Architecture Review)  
 **Project:** VELTRIX  
 **Tagline:** Beyond Detection. Into Defense.  
 **Classification:** Enterprise Cyber Threat Detection & Controlled Response Platform  
@@ -144,20 +144,29 @@ VELTRIX enforces strict organization-level data isolation backed by Amazon Cogni
 - **FR-ASSET-02 (Domain Ownership Verification):** Software-enforced cryptographic proof of ownership before allowing any vulnerability scans via:
   1. DNS TXT record challenge: `_veltrix-challenge.<domain>` = `veltrix-verify=<orgId>.<token>`
   2. HTTP challenge endpoint: `https://<domain>/.well-known/veltrix-challenge/<token>` returning valid JSON payload over HTTPS.
-- **FR-ASSET-03:** Verification validity window: Domain verification expires after 90 days. Continuous daily re-check transitions unverified/modified records to `GRACE_PERIOD` (7 days) then `REVOKED`.
+- **FR-ASSET-03 (Ownership Revocation & Grace Period Safety Freeze):** Verification expires after 90 days. Daily background re-checks transition modified records to `GRACE_PERIOD` (7 days) then `REVOKED`.
+  - **Scan Freeze:** Entering `GRACE_PERIOD` immediately blocks new scans, cancels queued/scheduled scans, and signals running workers to abort.
+  - The 7-day grace period is strictly an administrative renewal period for alerting the domain owner; it is never permission to continue scanning. Successful re-verification is strictly required to resume scans.
 - **FR-ASSET-04:** Asset & integration health tracking: Real-time telemetry velocity, last event received timestamp, integration agent heartbeat, and delivery error rates.
 
 ### Module N — Website Attack Monitoring & Correlation
 - **FR-WAM-01:** Dedicated web attack detection rules covering SQL injection (`RULE-101`), Cross-Site Scripting (`RULE-102`), Path Traversal / LFI (`RULE-103`), Malicious Bot / Scraper activity (`RULE-104`), and Authentication Flow Abuse (`RULE-105`).
-- **FR-WAM-02 (Probe vs. Exploitation Disambiguation):** Explicit classification distinguishing blocked/attempted probes (`HTTP 4xx` client response) from potential exploitation (`HTTP 200/500` with anomalous response size or database error traceback).
-- **FR-WAM-03 (Vulnerability-Aware Correlation):** Cross-reference inbound attack URIs with active open vulnerability findings on the target asset, dynamically applying a $1.5\times$ risk multiplier penalty when an attack targets an unmitigated vulnerability.
+- **FR-WAM-02 (Attack vs. Exploitation Confidence Classification):** HTTP status codes (200, 4xx, 5xx) alone must not establish successful exploitation. The engine enforces four evidence-based confidence tiers:
+  1. `SUSPICIOUS_ATTEMPT`: Inbound pattern detected; unverified impact.
+  2. `BLOCKED_ATTEMPT`: Verified security control (WAF/middleware) intercepted the attack (e.g. 403 Forbidden with WAF rule match).
+  3. `POTENTIAL_EXPLOITATION`: Inbound attack reached application accompanied by corroborating signals (unhandled DB syntax error traceback in error logs, database timeout spike, anomalous latency).
+  4. `CONFIRMED_EXPLOITATION`: Multi-source proof (verified data leakage in payload, unauthorized privilege change, canary token trigger).
+  - No automatic Critical incidents are created solely from response status or response size without corroborating evidence.
+- **FR-WAM-03 (Configurable Risk Contribution Model):** Evaluates risk through a transparent, explainable additive model:
+  $\text{RiskScore} = \min\left(100, \text{Round}\left(S_{\text{base}} \times M_{\text{freq}} \times M_{\text{asset}} \times M_{\text{threat}} + C_{\text{vuln\_match}} + B_{\text{sequence}}\right)\right)$
+  where $C_{\text{vuln\_match}}$ is calibrated by attack surface overlap (exact path and parameter match vs open finding) and confidence tier.
 
 ### Module O — Authorized Website Vulnerability Assessment
 - **FR-VULN-01 (Isolated Scanner Architecture):** Decoupled scanning execution using containerized workers (evaluating OWASP ZAP) communicating via SQS FIFO queues with rate limiting (max 5-10 req/s).
 - **FR-VULN-02 (Safe Passive Assessment):** Non-destructive inspection of TLS configuration, HTTP security headers (HSTS, CSP, X-Frame-Options, etc.), cookie flags (`Secure`, `HttpOnly`, `SameSite`), CORS headers, and information disclosure banners.
-- **FR-VULN-03 (Controlled Active Assessment):** Strict opt-in active probing requiring valid `scanAuthorizationToken`, confirmed domain ownership, approved FQDN scope, and emergency abort kill-switch.
+- **FR-VULN-03 (Controlled Active Assessment & Emergency Abort):** Strict opt-in active probing requiring valid `scanAuthorizationToken`, confirmed domain ownership, approved FQDN scope, and emergency abort kill-switch targeting a 500ms Service Level Objective (SLO) for socket termination.
 - **FR-VULN-04 (Vulnerability Findings Lifecycle):** Persistent finding state machine (`OPEN` $\to$ `CONFIRMED` $\to$ `IN_REMEDIATION` $\to$ `RESOLVED` $\to$ `ACCEPTED_RISK` $\to$ `FALSE_POSITIVE`) with CVSS v3.1 scoring, remediation guidance, and automated re-scan verification.
-- **FR-VULN-05 (Absolute Prohibitions):** Strictly prohibit DoS/DDoS testing, destructive data modification, automated brute-forcing of production forms, and out-of-scope/private IP scanning (SSRF prevention).
+- **FR-VULN-05 (Comprehensive SSRF Egress Safeguards & Prohibitions):** Prohibit DoS/DDoS testing, destructive data modification, automated brute-forcing of production forms, and out-of-scope scanning. Enforce socket-level connection-time IP validation and network egress security groups blocking IPv4 private (RFC 1918), loopback, link-local (169.254.169.254), IPv6 loopback (::1), unique-local, link-local, IPv4-mapped IPv6 (::ffff:0:0/96), unspecified, DNS rebinding, and recursive CNAME bypasses.
 
 ---
 

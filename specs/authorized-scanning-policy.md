@@ -1,7 +1,7 @@
 # VELTRIX: Authorized Website Scanning & Security Assessment Policy (`specs/authorized-scanning-policy.md`)
 
-**Document Version:** 1.0.0  
-**Status:** Approved Security Policy  
+**Document Version:** 1.1.0 (Post-Safety Review Hardened)  
+**Status:** PROPOSED / IN REVIEW (PR #4 Architecture Review)  
 **Classification:** Operational Governance, Legal Authorization & Rules of Engagement  
 **Applies To:** All Vulnerability Assessment Scans, Automated Workers & SOC Operators  
 
@@ -28,7 +28,7 @@ flowchart TD
     G1 -->|NOT VERIFIED| REJECT1["REJECT: 403 Domain Ownership Unverified"]
     G1 -->|VERIFIED| G2{"Gate 2: Active Re-Check<br/>(Within 90-Day Validity Window)"}
 
-    G2 -->|EXPIRED / REVOKED| REJECT2["REJECT: 403 Verification Expired (Re-check Required)"]
+    G2 -->|EXPIRED / REVOKED / GRACE| REJECT2["REJECT: 403 Verification Expired or Suspended"]
     G2 -->|ACTIVE| G3{"Gate 3: Scope Validation<br/>(Target in Approved Subdomains?)"}
 
     G3 -->|OUT OF SCOPE| REJECT3["REJECT: 400 Target Out of Scope"]
@@ -44,10 +44,16 @@ Ownership must be verified via:
 2. **HTTP Challenge File:** `https://<domain>/.well-known/veltrix-challenge/<token>` returning the matching JSON challenge payload over valid HTTPS.
 *Unverified domains cannot be scanned under any circumstances.*
 
-### Gate 2: Temporal Re-Certification Window
+### Gate 2: Temporal Re-Certification Window & Grace Period Policy
 - Domain ownership verification is valid for a maximum of **90 days**.
 - The control plane executes background DNS verification checks every 24 hours.
-- If DNS records change or ownership tokens are removed, the asset transitions to `GRACE_PERIOD` for 7 days, after which it enters `REVOKED`. Any queued or scheduled scans are immediately cancelled.
+- If DNS records change or ownership tokens are removed, the asset transitions to `GRACE_PERIOD` for 7 days, after which it enters `REVOKED`.
+- **CRITICAL INVARIANT:** Entering `GRACE_PERIOD` **immediately freezes and blocks all scanning**:
+  - No new scans can be launched or scheduled while an asset is in `GRACE_PERIOD`.
+  - All queued and scheduled scans for the asset are **cancelled immediately**.
+  - Active worker containers running against the asset receive an **immediate abort signal**.
+  - The 7-day grace period is strictly an administrative grace period to alert the domain owner and allow DNS renewal before full asset deregistration; **it is NEVER permission to continue scanning**.
+  - Resuming scanning strictly requires successful domain re-verification.
 
 ### Gate 3: Strict Scope Boundary
 - The target URL must strictly match the registered asset's `primaryDomain` or explicitly approved entries in `approvedSubdomains`.
@@ -76,7 +82,7 @@ flowchart LR
         X2["Payment Gateways<br/>(checkout.stripe.com, paypal.com)"]
         X3["External CDNs & Asset Storage<br/>(cdn.cloudflare.net, s3.amazonaws.com)"]
         X4["External Tracking & Analytics<br/>(google-analytics.com, segment.com)"]
-        X5["Private RFC 1918 & Local IP Addresses<br/>(10.0.0.0/8, 192.168.0.0/16, 127.0.0.1)"]
+        X5["Private RFC 1918 & Prohibited IP Addresses<br/>(10.0.0.0/8, 192.168.0.0/16, 127.0.0.1, ::1)"]
     end
 ```
 
@@ -104,7 +110,7 @@ VELTRIX establishes two clear assessment tiers. **Passive scanning is the system
 
 ---
 
-## 5. Absolute Prohibitions
+## 5. Absolute Prohibitions & Network Egress Safeguards
 
 The following activities are strictly prohibited and structurally prevented in the scanner engine code:
 
@@ -120,15 +126,32 @@ The following activities are strictly prohibited and structurally prevented in t
 - Active assessment MUST NOT attempt dictionary or brute-force attacks against user login forms, password reset forms, contact/support ticketing forms, or payment checkout workflows.
 - Testing of authentication rate limits must be conducted using synthetic test accounts in staging environments only.
 
-### 4. No Server-Side Request Forgery (SSRF) Against Private Infrastructure
-- The scanner worker sandbox MUST enforce an OS-level and application-level network egress guard blocking outbound connections to:
-  - `10.0.0.0/8` (RFC 1918 Private)
-  - `172.16.0.0/12` (RFC 1918 Private)
-  - `192.168.0.0/16` (RFC 1918 Private)
-  - `127.0.0.0/8` (Loopback)
-  - `169.254.169.254` (Link-local cloud instance metadata)
-  - `::1/128` (IPv6 Loopback)
-  - `fc00::/7` (IPv6 Unique Local)
+### 4. Comprehensive SSRF & Prohibited Network Ranges
+The scanner worker sandbox MUST enforce socket-level and OS-level network egress validation blocking outbound connections to all of the following prohibited ranges:
+
+| Address Category | Prohibited CIDR Ranges & Values | Description / Risk |
+| :--- | :--- | :--- |
+| **IPv4 Private (RFC 1918)** | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | Internal enterprise networks. |
+| **IPv4 Loopback** | `127.0.0.0/8` | Host loopback interfaces. |
+| **IPv4 Link-Local & Metadata** | `169.254.0.0/16` (specifically `169.254.169.254`) | Cloud provider instance metadata services. |
+| **IPv4 Unspecified & Broadcast** | `0.0.0.0/8`, `255.255.255.255/32` | Non-routable and broadcast. |
+| **IPv4 Multicast & Reserved** | `224.0.0.0/4`, `240.0.0.0/4` | Multicast and reserved ranges. |
+| **IPv4 Documentation (TEST-NET)** | `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` | Non-production test networks. |
+| **IPv6 Loopback & Unspecified** | `::1/128`, `::/128` | IPv6 loopback and unspecified addresses. |
+| **IPv6 Unique-Local (ULA)** | `fc00::/7` | RFC 4193 private IPv6 addresses. |
+| **IPv6 Link-Local** | `fe80::/10` | IPv6 auto-configured link-local. |
+| **IPv4-Mapped IPv6** | `::ffff:0:0/96` (e.g. `::ffff:127.0.0.1`, `::ffff:10.0.0.1`, `::ffff:169.254.169.254`) | Circumvents basic IPv4 filters when wrapped in IPv6. |
+| **IPv6 Documentation / Discard** | `2001:db8::/32`, `100::/64` | Documentation and discard prefixes. |
+
+#### Connection-Time DNS Resolution & Pinning (Rebinding Prevention)
+- **DNS Rebinding Prevention:** An attacker could configure a DNS record that initially resolves to a valid public IP during pre-flight checks, but returns `127.0.0.1` or `169.254.169.254` at request time.
+- **Connection-Time Hook:** The scanner's HTTP agent intercepts DNS resolution at the socket creation level:
+  1. The target hostname is resolved immediately before TCP connection establishment.
+  2. Every resolved IP address is checked against the prohibited matrix above.
+  3. The TCP socket connects directly to the validated IP address (`socket.connect({ host: validatedIp, port })`), passing the target FQDN as the TLS Server Name Indication (SNI) header.
+- **Recursive CNAME Validation:** The resolver traverses all CNAME alias records recursively; if any intermediate CNAME resolves to an internal domain or prohibited IP, the connection is aborted immediately.
+- **Redirect Re-Validation:** All HTTP 3xx redirects (`301`, `302`, `307`, `308`) are intercepted. The redirect target is validated against the approved FQDN scope and connection-time IP validation before following.
+- **Network-Level Defense-in-Depth:** In addition to application-level checks, worker containers reside in isolated VPC subnets with network security groups that reject outbound traffic to internal VPC CIDRs and AWS metadata endpoints.
 
 ---
 
@@ -156,9 +179,21 @@ stateDiagram-v2
 4. **Circuit Breaker Abort:**
    - If the target server exhibits $\ge 5\%$ connection timeout rates or returns 3 consecutive `503/429` responses during backoff, the scan automatically **aborts**.
    - Status transitions to `ABORTED_TARGET_PROTECTION` and an alert is dispatched to the SOC console.
-5. **Instant Kill-Switch:**
-   - The Web SOC Console and CLI provide an instant emergency stop button: `POST /api/v1/scans/{scanId}/abort`.
-   - The worker checks the abort flag every 500ms; upon receiving the abort signal, it immediately terminates running browser/ZAP processes and drains active sockets.
+
+### Emergency Cancellation Target SLO & Worker Lifecycle
+1. **Target SLO:** The platform targets a **500ms Service Level Objective (SLO)** from operator click to worker socket termination.
+2. **Cancellation Signaling & Worker Polling:**
+   - The control plane marks scan state as `ABORT_REQUESTED` in DynamoDB and emits an abort message via Redis Pub/Sub or SQS urgent channel.
+   - The scanner worker checks the cancellation token on every HTTP request cycle (at most every 250ms).
+3. **Process Termination Handling:**
+   - Upon cancellation receipt, the worker immediately terminates active HTTP connection pools and drains pending requests.
+   - The worker sends a graceful `SIGTERM` to running browser/ZAP engine daemons.
+   - If the daemon process does not exit within 5 seconds, the worker issues an immediate `SIGKILL`.
+4. **Cancellation Acknowledgement:**
+   - The worker acknowledges cancellation by updating `Veltrix-VulnerabilityScans` to `ABORTED` with `abortedAt`, `abortedBy`, and total completed request count.
+   - An immutable audit log record (`SCAN_ABORTED`) is appended.
+5. **Failure & Timeout Reporting:**
+   - If the worker fails to acknowledge cancellation within **10 seconds**, the control plane automatically transitions the scan to `ABORT_FAILED_TIMED_OUT`, terminates the container task via AWS ECS API, and alerts the SOC.
 
 ---
 

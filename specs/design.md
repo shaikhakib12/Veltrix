@@ -2,7 +2,7 @@
 ## System Architecture & Technical Design (`specs/design.md`)
 
 **Document Version:** 3.0.0 (Unified Website Security Platform Design)  
-**Status:** Approved Technical Design  
+**Status:** PROPOSED / IN REVIEW (PR #4 Architecture Review)  
 **Brand Palette:** Midnight Navy (`#0B0F19`), Electric Cyan (`#00F5FF`), Royal Blue (`#2563EB`)  
 
 ---
@@ -209,7 +209,10 @@ VELTRIX/
 
 VELTRIX unifies website telemetry ingestion and attack detection across three interconnected layers:
 1. **Integration Layer (Layer A):** Ingests real-time HTTP events from in-process middleware (`@veltrix/sdk-node`), reverse proxy logs (Nginx, Apache), edge networks (Cloudflare Workers / Logpush), and cloud firewalls (AWS WAF). Telemetry is normalized into the `@veltrix/shared` `SecurityEvent` schema and ingested via `POST /api/v1/events`.
-2. **Analysis Layer (Layer B):** Processes web-specific detection rules (`RULE-101` SQLi, `RULE-102` XSS, `RULE-103` Path Traversal, `RULE-104` Malicious Bots, `RULE-105` Auth Flow Tampering), distinguishes blocked probes (HTTP 4xx) from potential exploitation (HTTP 200/500), and correlates attack paths with known asset vulnerability findings.
+   - **Reliability Invariants:** In-process SDKs operate strictly asynchronously with bounded in-memory ring buffers (default 500 events / 5MB cap). Never blocks the host request lifecycle. Drops oldest events under overflow with diagnostic counters. Optional durable write-ahead log/SQLite spool for zero-loss compliance.
+2. **Analysis Layer (Layer B):** Processes web-specific detection rules (`RULE-101` SQLi, `RULE-102` XSS, `RULE-103` Path Traversal, `RULE-104` Malicious Bots, `RULE-105` Auth Flow Tampering).
+   - **Confidence Classification:** Classifies attacks into four evidence-based tiers (`SUSPICIOUS_ATTEMPT`, `BLOCKED_ATTEMPT`, `POTENTIAL_EXPLOITATION`, `CONFIRMED_EXPLOITATION`). HTTP status codes (200, 4xx, 5xx) alone never establish exploitation without corroborating application/WAF error signals.
+   - **Configurable Risk Model:** Replaces arbitrary fixed multipliers with an explainable, calibrated additive risk contribution model based on exact attack surface overlap (URI and parameter match with active open findings).
 3. **SOC Management Layer (Layer C):** Multi-tenant website asset inventory (`Veltrix-WebsiteAssets`), domain ownership verification (DNS TXT & HTTP challenge), scan scheduling, incident triage, and defensive SOAR containment.
 
 ---
@@ -220,10 +223,11 @@ To deliver continuous, policy-governed vulnerability assessments without impacti
 1. **Isolated Worker Sandbox:** Scanning jobs are decoupled from the synchronous API and processed asynchronously by containerized workers (AWS ECS Fargate or Docker containers) consuming from an Amazon SQS FIFO queue.
 2. **Engine Evaluation (OWASP ZAP):** Evaluated and approved as the primary dynamic scanning engine. Controlled via its JSON REST API in daemon mode.
 3. **Safety & Policy Guardrails:**
-   - **Zero-Bypass Ownership Verification:** Active scanning requires verified domain ownership via DNS TXT or HTTP challenge (valid for 90 days).
+   - **Zero-Bypass Ownership Verification & Immediate Grace Freeze:** Active scanning strictly requires verified domain ownership via DNS TXT or HTTP challenge (valid for 90 days). If verification fails, `GRACE_PERIOD` immediately freezes all new scans, cancels queued/scheduled scans, and signals running workers to abort.
    - **Signed Authorization:** Scan jobs require an HMAC-SHA256 `scanAuthorizationToken` signed by an Organization Administrator.
-   - **Strict Scope Whitelisting:** Egress filter strictly restricts scanning to verified primary domains and approved subdomains; out-of-scope third-party URLs and RFC 1918 private IPs (SSRF prevention) are structurally dropped.
+   - **Comprehensive SSRF & Egress Protection:** Enforces connection-time IP resolution and socket pinning to defeat DNS rebinding. Egress filter structurally blocks outbound connections to IPv4 private (RFC 1918), loopback, link-local (169.254.169.254), IPv6 loopback (::1), unique-local, link-local, IPv4-mapped IPv6 (::ffff:0:0/96), unspecified, broadcast, and recursive CNAME chains pointing to internal targets.
    - **Rate Limiting & Circuit Breaking:** Scan requests are throttled (default 5-10 req/s). If the target returns 3 consecutive HTTP 429/503 responses, the scanner backs off or aborts.
+   - **Emergency Cancellation SLO:** Targets a 500ms Service Level Objective (SLO) for socket termination upon operator abort, backed by graceful `SIGTERM` (5s timeout) and `SIGKILL`, with `ABORT_FAILED_TIMED_OUT` reporting after 10s.
    - **Non-Destructive Defaults:** Passive assessment (TLS, headers, cookies, CORS, information exposure) is default. Destructive operations (`DELETE`, `DROP`, DoS floods, state-changing form fuzzing) are strictly prohibited.
-4. **Vulnerability Findings Lifecycle:** Detected findings are normalized with CVSS v3.1 scoring, remediation guidance, and tracked in `Veltrix-VulnerabilityFindings` through the state machine: `OPEN` $\to$ `CONFIRMED` $\to$ `IN_REMEDIATION` $\to$ `RESOLVED`.
+4. **Vulnerability Findings Lifecycle:** Detected findings are normalized with CVSS v3.1 scoring, remediation guidance, and tracked in `Veltrix-VulnerabilityFindings` through the state machine: `OPEN` $\to$ `CONFIRMED` $\to$ `IN_REMEDIATION` $\to$ `RESOLVED` $\to$ `ACCEPTED_RISK` $\to$ `FALSE_POSITIVE`.
 

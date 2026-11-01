@@ -1,7 +1,7 @@
 # VELTRIX: REST API Contracts & Endpoint Specifications (`specs/api-contracts.md`)
 
 **Document Version:** 3.0.0 (Unified Website Security Platform Expansion)  
-**Status:** Approved Technical Contract  
+**Status:** PROPOSED / IN REVIEW (PR #4 Architecture Review)  
 **Base URL:** `/api/v1`  
 **Protocol:** HTTPS / TLS 1.3  
 
@@ -560,7 +560,11 @@ All requests made by the Web console, CLI, and telemetry clients must include:
 
 #### 2.10.1 Launch or Schedule Scan (`POST /scans`)
 - **Authentication:** Bearer JWT required (`ORG_ADMIN` or `SUPER_ADMIN`).
-- **Safety Invariant:** Target asset MUST possess `status === 'VERIFIED'`.
+- **Safety Invariants:**
+  - Target asset MUST possess `status === 'VERIFIED'` and `expiresAt > Date.now()`.
+  - If asset is in `GRACE_PERIOD` (7-day renewal notification window), scan launch is strictly blocked with HTTP `403 Forbidden` (`code: 'DOMAIN_VERIFICATION_SUSPENDED'`).
+  - Target URL FQDN must strictly match verified `primaryDomain` or approved subdomains.
+  - Connection-time IP validation strictly enforces prohibition of RFC 1918, loopback, link-local (169.254.169.254), IPv6 loopback (::1), unique-local, link-local, IPv4-mapped IPv6, and unspecified addresses.
 - **Request Body:**
   ```json
   {
@@ -592,12 +596,30 @@ All requests made by the Web console, CLI, and telemetry clients must include:
   ```
 
 #### 2.10.2 Abort Running Scan (`POST /scans/:scanId/abort`)
-- **Response 200 OK:**
+- **Target SLO:** The platform targets a **500ms Service Level Objective (SLO)** from operator click to worker socket termination.
+- **Workflow:** Updates scan state to `ABORT_REQUESTED`, signals worker container, drains active HTTP pools, sends `SIGTERM` (5s timeout) followed by `SIGKILL`.
+- **Response 200 OK (Abort Acknowledged):**
   ```json
   {
     "success": true,
     "status": "ABORTED",
-    "message": "Scan worker received emergency stop signal and terminated active execution."
+    "scanId": "scan-018d5f31-74e1-7cb2-b43a-e9fa651f8b1d",
+    "abortedAt": "2026-11-01T12:12:00.512Z",
+    "abortedBy": "user-analyst-01",
+    "completedRequests": 42,
+    "message": "Scan worker acknowledged emergency stop signal and closed active connections."
+  }
+  ```
+- **Response 504 Gateway Timeout (Worker Unresponsive):**
+  If the worker fails to acknowledge cancellation within 10 seconds, the scan transitions to `ABORT_FAILED_TIMED_OUT`, the ECS container task is terminated via AWS API, and an urgent SOC alert is raised.
+  ```json
+  {
+    "success": false,
+    "status": "ABORT_FAILED_TIMED_OUT",
+    "error": {
+      "code": "SCAN_WORKER_UNRESPONSIVE",
+      "message": "Scanner worker did not acknowledge abort signal within 10s. Container task force-terminated."
+    }
   }
   ```
 

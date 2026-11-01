@@ -1,7 +1,7 @@
 # VELTRIX: Website Security Architecture Specification (`specs/website-security-architecture.md`)
 
-**Document Version:** 1.0.0  
-**Status:** Approved Specification  
+**Document Version:** 1.1.0 (Post-Safety Review Hardened)  
+**Status:** PROPOSED / IN REVIEW (PR #4 Architecture Review)  
 **Classification:** Enterprise Website Security Architecture & System Design  
 **Target Platform:** Unified Website Attack Monitoring & Authorized Vulnerability Assessment  
 
@@ -102,11 +102,20 @@ flowchart TD
 
 The Integration and Telemetry Layer connects external website assets, reverse proxies, and cloud infrastructure to the existing Phase 4 Ingestion API (`POST /api/v1/events`).
 
-#### Core Invariants
-1. **Zero Raw Log Bloat:** Integrations normalize diverse logs (Nginx combined, Apache standard, Cloudflare JSON, WAF JSON) into the standardized `@veltrix/shared` `SecurityEvent` schema.
-2. **Deterministic Authentication:** Integrations authenticate using tenant API keys or Cognito JWTs, passing `x-organization-id` and `x-api-key`.
-3. **Client-Side Nonce / UUIDv7:** Ingested events carry unique `eventId` and `idempotencyKey` properties to prevent dropping high-velocity attack bursts while suppressing network retries.
-4. **Tenant & Asset Binding:** Telemetry must carry `orgId` and `metadata.assetId` (or verified `sourceSystem` hostname) matching the registered asset inventory.
+#### SDK Telemetry Reliability & Non-Blocking Invariant
+1. **Never Block Host Request Lifecycle:** In-process SDKs (Node.js, Express, Python, Java, PHP, .NET) operate strictly asynchronously. Telemetry interception, parsing, and transmission never delay the host application's HTTP response lifecycle.
+2. **Bounded Memory Usage:** The in-memory ring buffer has a strictly capped capacity (configurable `maxBufferSize`, default 500 events, hard memory ceiling ~5 MB).
+3. **Overflow & Event-Drop Policy:** If the VELTRIX Ingestion API is unreachable or experiences network latency, and the ring buffer reaches capacity, the SDK enters **drop-oldest overflow mode**:
+   - The oldest buffered event is discarded to accommodate incoming telemetry.
+   - An internal atomic counter (`droppedEventsCount`) increments.
+   - A rate-limited diagnostic warning is logged via the application logger.
+4. **Retry, Backoff & Jitter:** Network dispatches use truncated exponential backoff ($1\text{s}, 2\text{s}, 4\text{s}$) with randomized jitter ($\pm 20\%$) up to a maximum of 3 attempts before dropping.
+5. **Duplicate Prevention:** Client retries preserve the original `idempotencyKey = eventId`, allowing the backend DynamoDB conditional write (`attribute_not_exists`) to suppress duplicates atomically.
+6. **Process Crash Boundaries & Limitations:** In-memory buffered events are transient and will be lost if the host process crashes unexpectedly (e.g. unhandled exception, SIGKILL, container restart).
+7. **Optional Durable Local Spool:** For regulated environments requiring zero telemetry loss under process failure:
+   - SDK provides an optional pluggable disk-backed spool interface (`DurableSpoolStorage`).
+   - Events are written synchronously to an append-only local write-ahead log (WAL) or embedded SQLite buffer before asynchronous batch drain.
+   - On process boot, the spool automatically recovers and flushes uncommitted events.
 
 #### Supported Telemetry Sources
 
@@ -127,48 +136,43 @@ The Integration and Telemetry Layer connects external website assets, reverse pr
 
 The Website Security Analysis Layer separates attack detection, correlation, and vulnerability analysis into decoupled modules.
 
-```mermaid
-flowchart TD
-    EVENT["Normalized Security Event<br/>(Phase 4 Schema)"] --> PARSE["Attack Signature Parser<br/>(URI, Headers, Body, Status)"]
+#### Attack vs. Exploitation Classification: Four Confidence Tiers
+HTTP status codes (200, 4xx, 5xx) and response payload sizes alone **never establish successful exploitation**. An HTTP 200 response may simply be a generic error page, a home page redirect, or a standard SPA response. An HTTP 500 error may be an unrelated unhandled route bug rather than an injection exploit.
 
-    PARSE --> R_SQLI["RULE-101: SQL Injection Probing"]
-    PARSE --> R_XSS["RULE-102: Cross-Site Scripting Probing"]
-    PARSE --> R_PATH["RULE-103: Path Traversal / LFI Probing"]
-    PARSE --> R_BRUTE["RULE-001: Credential Brute Force"]
-    PARSE --> R_STUFF["RULE-003: Credential Stuffing Pattern"]
-    PARSE --> R_API["RULE-008: API Abuse & Endpoint Scraping"]
-    PARSE --> R_BOT["RULE-104: Malicious Bot & Scraper Activity"]
-    PARSE --> R_AUTH["RULE-105: Authentication Flow Tampering"]
+VELTRIX enforces **Four Evidence-Based Confidence Tiers**:
 
-    R_SQLI --> DETECT_EVENT["Detection Alert Produced"]
-    R_XSS --> DETECT_EVENT
-    R_PATH --> DETECT_EVENT
-    R_BRUTE --> DETECT_EVENT
-    R_STUFF --> DETECT_EVENT
-    R_API --> DETECT_EVENT
-    R_BOT --> DETECT_EVENT
-    R_AUTH --> DETECT_EVENT
+| Confidence Tier | Classification Definition | Required Corroborating Evidence | Severity & SOC Action |
+| :--- | :--- | :--- | :--- |
+| **1. Suspicious Attempt** | Inbound attack signature matched in URI, query parameter, header, or body. | Pattern match only; target response is unverified or inconclusive. | **LOW / MEDIUM** — Recorded as threat detection alert; feeds threat multiplier; no incident created. |
+| **2. Blocked Attempt** | Inbound attack signature matched, but verified security control intervened. | Corroborated by WAF block action (`action: BLOCK`), middleware rejection (`403 Forbidden`), or early parameter sanitization. | **LOW / INFO** — Logged as defense-in-depth verification; attacker IP tracked in sliding window. |
+| **3. Potential Exploitation** | Inbound attack signature reached application layer accompanied by execution anomalies. | Corroborated by trusted application signals: unhandled database syntax error traceback in error logs, database timeout spike, anomalous response latency, or unexpected server stack trace. | **HIGH** — Incident created for rapid triage; flags unhandled exception targeting known attack vector. |
+| **4. Confirmed Exploitation** | Multi-source proof that the attack succeeded and compromised system state or confidentiality. | Corroborated by verified data leakage indicators (e.g. database schema tokens in response), unauthorized privilege mutation immediately following injection, or canary token breach. | **CRITICAL** — Automated emergency alert; high-priority SOAR containment proposal. |
 
-    DETECT_EVENT --> EXPLOIT_CHECK{"Did Request Succeed?<br/>(HTTP 200/500 vs 4xx)"}
-    EXPLOIT_CHECK -->|HTTP 400, 401, 403, 404| PROBE["Flag as Blocked / Attempted Probe<br/>(Severity: LOW to HIGH)"]
-    EXPLOIT_CHECK -->|HTTP 200, 500 + Error Pattern| SUSPECT["Flag as Potential Exploitation<br/>(Severity: CRITICAL, Immediate Triage)"]
+#### Configurable & Explainable Risk Contribution Model
+Rather than applying an arbitrary fixed 1.5x multiplier, VELTRIX evaluates asset vulnerabilities using a **Configurable Risk Contribution Model**:
 
-    PROBE --> CORRELATION["Attack Correlation Engine"]
-    SUSPECT --> CORRELATION
+$$\text{RiskScore} = \min\left(100, \text{Round}\left(S_{\text{base}} \times M_{\text{freq}} \times M_{\text{asset}} \times M_{\text{threat}} + C_{\text{vuln\_match}} + B_{\text{sequence}}\right)\right)$$
 
-    VULN_FINDINGS[("Vulnerability Findings Registry<br/>(Asset Scan Results)")] -.->|Asset Context| CORRELATION
+Where the vulnerability correlation term $C_{\text{vuln\_match}}$ is calculated dynamically based on verified attack surface overlap:
 
-    CORRELATION --> RISK_ENGINE["Explainable Risk Scoring Engine ($0 - 100$)"]
-    RISK_ENGINE --> INCIDENT["Unified Security Incident"]
-```
+$$C_{\text{vuln\_match}} = w_{\text{overlap}} \times \left(\frac{\text{CVSS}_{\text{finding}}}{10}\right) \times K_{\text{confidence}}$$
 
-#### Crucial Principle: Probe vs. Exploitation
-A fundamental flaw in naive SIEM implementations is conflating an attack *attempt* with a successful *compromise*:
-1. **Attack Attempt / Probe:** An attacker sends `GET /products?id=1' OR 1=1--`. The web server or WAF intercepts the request and responds with `HTTP 403 Forbidden` or `HTTP 400 Bad Request`.
-   - *Verdict:* This is an attack attempt. The asset remained secure. It is recorded as a threat detection (`RULE-101`), raising the attacker IP's threat multiplier, but it does **not** create a compromised system alert.
-2. **Potential Exploitation:** An attacker sends `GET /products?id=1' UNION SELECT username,password FROM users--`. The server responds with `HTTP 200 OK` with an anomalous response size or database error traceback (`SQL syntax error`).
-   - *Verdict:* The application evaluated the payload. This warrants an escalated priority incident with high base risk.
-3. **Vulnerability-Correlated Attack:** If the asset inventory has an open vulnerability finding for *SQL Injection on `/products`* from a previous scan, an incoming probe against `/products` immediately receives an Asset Criticality Multiplier penalty ($1.5\times$), elevating priority before damage occurs.
+- **Attack Surface Overlap Factor ($w_{\text{overlap}}$):**
+  - **Exact Match ($w = 25$):** Attack URI and parameter match the exact vulnerable endpoint and parameter of an active open finding (e.g. SQLi probe on `/api/search?q=` where Finding #104 is an open SQLi on `/api/search?q=`).
+  - **Path-Level Match ($w = 15$):** Attack targets the affected path but on a different parameter.
+  - **Asset-Level Match ($w = 5$):** Attack type matches an open finding anywhere on the asset.
+  - **No Match ($w = 0$):** No active vulnerability on target asset.
+- **Confidence Multiplier ($K_{\text{confidence}}$):**
+  - `CONFIRMED_EXPLOITATION`: $1.0$
+  - `POTENTIAL_EXPLOITATION`: $0.8$
+  - `SUSPICIOUS_ATTEMPT`: $0.4$
+  - `BLOCKED_ATTEMPT`: $0.1$ (blocked probes targeting vulnerable endpoints still indicate adversary interest).
+
+#### Testing & Calibration Plan
+The Risk Contribution Model undergoes empirical calibration:
+1. **Baseline Synthetic Testing:** Execute 50,000 synthetic test events across 6 attack scenarios, measuring risk score distributions.
+2. **False Positive Suppression Calibration:** Verify that blocked probes against non-vulnerable assets never score above 45 (Medium tier).
+3. **Threshold Sensitivity Tuning:** Allow organization administrators to tune $w_{\text{overlap}}$ weights per environment tier (higher in Production, lower in Dev).
 
 ---
 
@@ -184,7 +188,7 @@ The SOC Management Layer provides operational controls for the security team:
 
 ---
 
-## 3. Website Asset Registry & Domain Verification
+## 3. Website Asset Registry & Domain Ownership Revocation
 
 To prevent unauthorized scanning or malicious telemetry injection, all website assets must undergo strict registration and cryptographic or DNS verification.
 
@@ -239,10 +243,16 @@ sequenceDiagram
    - **Content-Type:** `text/plain` or `application/json`
    - **Response Body:** `{"veltrixChallengeToken":"<token>","orgId":"<orgId>"}`
    - **Security Policy:** Challenge endpoint MUST be served over HTTPS. Redirects are followed up to 3 hops within the same domain only.
-3. **Verification Validity & Re-Certification:**
-   - Domain verification is valid for **90 days**.
-   - Assets undergo automatic daily background DNS re-check. If the challenge record is removed or DNS ownership changes, the asset enters `GRACE_PERIOD` (7 days) before transitioning to `REVOKED`.
-   - **Zero-Bypass Policy:** Active vulnerability scans are structurally blocked by the engine if `status !== 'VERIFIED'` or if `expiresAt < Date.now()`.
+
+### Ownership Revocation & Grace Period Safety Invariants
+- **90-Day Verification Window:** Domain verification is valid for a maximum of 90 days.
+- **Daily Re-Check:** Background scheduler performs daily DNS verification probes.
+- **Immediate Scan Freeze on Grace Period:** If a verification check fails (e.g. TXT record deleted or modified), the asset enters `GRACE_PERIOD` (7 days).
+  - **CRITICAL INVARIANT:** `GRACE_PERIOD` **immediately freezes and blocks all new scans**.
+  - All queued and scheduled scans for the asset are **cancelled immediately**.
+  - The control plane emits an immediate abort signal to any actively running scanner workers targeting the asset.
+  - The 7-day grace period is strictly an administrative notification window allowing the owner to restore DNS records before asset deregistration; **it is NEVER permission to continue scanning**.
+  - Resuming scans strictly requires successful domain re-verification.
 
 ---
 
@@ -308,53 +318,55 @@ flowchart TD
 
 ---
 
-### 4.2 Passive vs. Active Assessment Rules
+### 4.2 Comprehensive SSRF & Network Egress Protection
 
-#### Phase 1: Native Passive Assessment (Zero Impact)
-Passive assessment executes without sending attack payloads; it inspects HTTP responses during benign site crawling.
+To completely eliminate Server-Side Request Forgery (SSRF) and prevent scanner abuse against internal infrastructure, the scanner worker enforces dual-layer validation:
 
-1. **TLS / SSL Configuration:**
-   - Certificate expiration and issuer chain validation.
-   - TLS version enforcement (Flags TLS 1.0 and TLS 1.1 as `MEDIUM`).
-   - Weak cipher suite detection (RC4, 3DES, CBC mode ciphers).
-2. **HTTP Security Headers:**
-   - `Strict-Transport-Security` (HSTS): Missing, short max-age ($< 1\text{ year}$), or missing `includeSubDomains`.
-   - `Content-Security-Policy` (CSP): Missing, using `unsafe-inline`, `unsafe-eval`, or wildcard `*` sources.
-   - `X-Frame-Options` / CSP `frame-ancestors`: Clickjacking exposure.
-   - `X-Content-Type-Options`: Missing `nosniff`.
-   - `Referrer-Policy`: Missing or insecure (`unsafe-url`).
-   - `Permissions-Policy`: Missing or overly permissive feature delegation.
-3. **Cookie Security Attributes:**
-   - Sensitive session cookies missing `Secure` flag.
-   - Missing `HttpOnly` flag on authentication/session tokens.
-   - Missing or insecure `SameSite` attribute (`None` without `Secure` or lax on sensitive mutations).
-4. **CORS Misconfiguration:**
-   - Insecure origin reflection (`Access-Control-Allow-Origin: *` with `Access-Control-Allow-Credentials: true`).
-   - Null origin reflection (`Access-Control-Allow-Origin: null`).
-5. **Information Exposure:**
-   - Verbose server identification banners (`Server: Apache/2.4.41 (Ubuntu)`, `X-Powered-By: PHP/7.4.3`).
-   - Exposure of sensitive debug endpoints (`/.env`, `/.git/HEAD`, `/actuator/health`, `/phpinfo.php`).
+#### 1. Prohibited Destination IP Matrix
+All socket connections are evaluated against the following blocked ranges:
 
-#### Phase 2: Controlled Active Assessment (Opt-In & Strictly Gated)
-Active assessment injects specific test strings to identify vulnerabilities:
-- Reflected Cross-Site Scripting (XSS) parameter probing with non-executable canary strings (`veltrix-xss-probe-<uuid>`).
-- SQL Error-Based Probing using benign syntax characters (`'`, `"`).
-- Path Traversal parameter checking using relative path sequences targeting safe test paths.
-- Open Redirect parameter validation using approved loopback destinations.
+| Address Category | Prohibited CIDR Ranges & Values | Rationale |
+| :--- | :--- | :--- |
+| **IPv4 Private** | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | RFC 1918 internal networks. |
+| **IPv4 Loopback** | `127.0.0.0/8` | Host loopback addresses. |
+| **IPv4 Link-Local & Cloud Metadata** | `169.254.0.0/16` (specifically `169.254.169.254`) | AWS / cloud instance metadata endpoints. |
+| **IPv4 Broadcast & Special** | `0.0.0.0/8`, `224.0.0.0/4` (Multicast), `240.0.0.0/4` (Reserved), `255.255.255.255/32` | Non-routable and broadcast. |
+| **IPv4 Documentation** | `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24` | TEST-NET ranges. |
+| **IPv6 Loopback & Unspecified** | `::1/128`, `::/128` | Host loopback and unspecified. |
+| **IPv6 Unique-Local (ULA)** | `fc00::/7` | RFC 4193 private IPv6. |
+| **IPv6 Link-Local** | `fe80::/10` | Link-local IPv6. |
+| **IPv4-Mapped IPv6** | `::ffff:0:0/96` (e.g. `::ffff:127.0.0.1`, `::ffff:10.0.0.1`, `::ffff:169.254.169.254`) | Bypasses naive IPv4 checks by wrapping in IPv6. |
+| **IPv6 Documentation / Discard** | `2001:db8::/32`, `100::/64` | Documentation and discard ranges. |
+
+#### 2. Connection-Time DNS Resolution & Rebinding Prevention
+- **DNS Rebinding Attack Protection:** Attackers can configure DNS records that resolve to a public IP on pre-check but resolve to `127.0.0.1` or `169.254.169.254` milliseconds later.
+- **Connection-Time IP Pinning:**
+  - The scanner worker intercepts socket creation at connection time (`lookup` hook / custom HTTP Agent).
+  - The exact IP address resolved for the TCP handshake is validated against the prohibited matrix **before the SYN packet is sent**.
+  - The connection is pinned directly to the validated IP, passing the verified IP to `socket.connect({ host: validatedIp })` with `servername` set to the target FQDN for SNI.
+- **CNAME Resolution Recursion:** The resolver recursively traverses all CNAME aliases. If any intermediary alias points to an unapproved domain or internal IP, the request is immediately dropped.
+- **HTTP 3xx Redirect Re-Validation:** Every HTTP redirect (`301`, `302`, `307`, `308`) is intercepted. The redirection target URL is validated against the approved FQDN scope and its resolved IP is validated against the prohibited matrix before following.
+- **Dual-Layer Enforcement:** In addition to application-level checks, worker containers reside in isolated VPC subnets with network security groups that reject outbound traffic to internal VPC CIDRs and AWS metadata endpoints.
 
 ---
 
-### 4.3 Safety Invariants & Out-of-Scope Protection
+### 4.3 Emergency Scan Cancellation & Worker Lifecycle
 
-The Scanner Worker enforces the following inviolable safety guardrails:
-1. **Strict Target Whitelisting:** Target URLs are checked against the asset's verified `primaryDomain` and `approvedSubdomains`. Any redirect to external domains (e.g. `google.com`, `cdn.auth0.com`, `stripe.com`) is **dropped immediately** by the egress guard.
-2. **Private Network Egress Block (SSRF Prevention):** The scanner worker cannot resolve or connect to RFC 1918 private IP ranges (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local metadata addresses (`169.254.169.254`), or loopback (`127.0.0.0/8`).
-3. **Controlled Rate Limiting:** Default scanning rate is capped at **5 requests per second** (burst max 10 req/s). If the target returns more than three `HTTP 429 Too Many Requests` or `HTTP 503 Service Unavailable` responses within 30 seconds, the scanner enters exponential backoff or aborts to prevent target disruption.
-4. **Prohibited Assessment Categories:**
-   - **No Denial of Service (DoS/DDoS) testing.**
-   - **No resource-exhaustion stress testing.**
-   - **No brute-force fuzzing of state-changing production forms** (e.g. contact forms, checkout buttons, password reset endpoints).
-   - **No destructive data manipulation** (`DELETE`, `PUT`, `DROP`, `TRUNCATE`).
+The Web SOC Console and CLI provide an emergency stop mechanism: `POST /api/v1/scans/{scanId}/abort`.
+
+1. **Target SLO:** The platform targets a **500ms Service Level Objective (SLO)** from user abort trigger to worker socket termination.
+2. **Cancellation Signaling & Polling:**
+   - Control plane updates scan status to `ABORT_REQUESTED` in DynamoDB and publishes an immediate abort signal to the worker via high-priority Redis Pub/Sub or SQS urgent channel.
+   - The isolated worker process polls the abort flag on every HTTP request cycle (at most every 250ms).
+3. **Process Termination & Active Request Cleanup:**
+   - Upon receiving the abort signal, the worker immediately drains all active outbound HTTP connection pools.
+   - Sends graceful `SIGTERM` to running browser/ZAP processes.
+   - If ZAP daemon does not exit within 5 seconds, worker issues `SIGKILL`.
+4. **Cancellation Acknowledgement:**
+   - Worker writes an `ABORTED` state to `Veltrix-VulnerabilityScans` including `abortedAt`, `abortedBy`, and total requests completed prior to termination.
+   - Appends an immutable audit log record (`SCAN_ABORTED`).
+5. **Failure & Timeout Reporting:**
+   - If the worker fails to acknowledge cancellation within **10 seconds**, the control plane automatically transitions the scan to `ABORT_FAILED_TIMED_OUT`, terminates the container task via AWS ECS API, and alerts the SOC.
 
 ---
 
@@ -414,8 +426,6 @@ interface VulnerabilityFinding {
 
 ## 6. End-to-End Data Flow
 
-The following sequence illustrates how telemetry, detections, scans, and incidents interact seamlessly:
-
 ```mermaid
 sequenceDiagram
     autonumber
@@ -448,8 +458,6 @@ sequenceDiagram
 ---
 
 ## 7. Implementation Roadmap & Single-Developer Boundaries
-
-To ensure this enterprise architecture is realistic, modular, and implementable by a single developer initially, implementation is staged with strict component boundaries:
 
 1. **Boundary 1 (Phase 6): Asset Inventory & Integrations**
    - Implements website registration, DNS TXT / HTTP verification challenges, and telemetry adapters (Node.js SDK, Express middleware, Nginx collector). Zero scanner implementation.

@@ -1,7 +1,7 @@
 # VELTRIX: Revised Engineering Development Roadmap (`specs/website-security-roadmap-update.md`)
 
-**Document Version:** 1.0.0  
-**Status:** Approved Roadmap Specification  
+**Document Version:** 1.1.0 (Post-Safety Review Hardened)  
+**Status:** PROPOSED / IN REVIEW (PR #4 Architecture Review)  
 **Classification:** Strategic Development Plan & Task Allocation  
 **Target Milestone:** Competition Readiness & Enterprise Scalable Unified Website Security Platform  
 
@@ -58,9 +58,9 @@ flowchart TD
 | Task ID | Task Title & Scope | Primary Deliverables | Target Interfaces |
 | :--- | :--- | :--- | :--- |
 | **TASK-601** | **Website Asset Inventory & Domain Registry** | Data models, Zod schemas, and storage methods for `Veltrix-WebsiteAssets`. Support primary domain, approved subdomains, environment (`PROD`/`STAGING`/`DEV`), and asset health. | `packages/shared/src/schemas/index.ts`<br/>`backend/src/storage/storage-interface.ts` |
-| **TASK-602** | **Domain Ownership Verification Service** | Implement DNS TXT record challenge resolution (`dns.promises.resolveTxt`) and HTTP challenge endpoint verification (`/.well-known/veltrix-challenge/<token>`). Enforce 90-day validity window. | `backend/src/services/domain-verification.ts`<br/>`backend/src/routes/websites.ts` |
+| **TASK-602** | **Domain Ownership Verification & Grace Period Freeze** | Implement DNS TXT challenge resolution (`dns.promises.resolveTxt`) and HTTP challenge endpoint verification (`/.well-known/veltrix-challenge/<token>`). Enforce 90-day validity window. Implement immediate scan freeze upon `GRACE_PERIOD`: cancel queued/scheduled scans, emit worker abort signal, and require successful re-verification before resuming scans. | `backend/src/services/domain-verification.ts`<br/>`backend/src/routes/websites.ts` |
 | **TASK-603** | **Website Asset Management REST API** | Endpoints: `POST /api/v1/websites`, `GET /api/v1/websites`, `GET /api/v1/websites/:siteId`, `PATCH /api/v1/websites/:siteId`, `POST /api/v1/websites/:siteId/verify`, `DELETE /api/v1/websites/:siteId`. Enforce RBAC and tenant isolation. | `backend/src/routes/websites.ts` |
-| **TASK-604** | **Node.js SDK & Express Middleware Package** | Author `@veltrix/sdk-node` package with `VeltrixClient` and `veltrixMiddleware`. Non-blocking ring buffer, async batching, sensitive parameter sanitization, and fail-open design. | `packages/sdk-node/src/index.ts`<br/>`packages/sdk-node/src/middleware.ts` |
+| **TASK-604** | **Node.js SDK & Express Middleware Package** | Author `@veltrix/sdk-node` package with `VeltrixClient` and `veltrixMiddleware`. Strictly non-blocking async execution (never blocks host requests), bounded in-memory ring buffer (default 500 events / 5MB cap), drop-oldest overflow policy with `droppedEventsCount`, exponential backoff with jitter, duplicate suppression via `idempotencyKey`, and optional disk WAL/SQLite spool (`DurableSpoolStorage`) for zero-loss compliance. | `packages/sdk-node/src/index.ts`<br/>`packages/sdk-node/src/middleware.ts` |
 | **TASK-605** | **Reverse Proxy & Edge Ingestion Adapters** | Implement FluentBit JSON configuration templates for Nginx and Apache logs, and Cloudflare Worker telemetry forwarder script. | `packages/integrations/nginx/`<br/>`packages/integrations/cloudflare/` |
 | **TASK-606** | **Phase 6 Automated Test Suites** | Comprehensive unit & integration tests covering website CRUD, DNS/HTTP challenge verification, cross-tenant isolation, SDK ring buffer, and log parsing. | `backend/tests/websites.test.ts`<br/>`packages/sdk-node/tests/middleware.test.ts` |
 
@@ -72,7 +72,7 @@ flowchart TD
 | Task ID | Task Title & Scope | Primary Deliverables | Target Interfaces |
 | :--- | :--- | :--- | :--- |
 | **TASK-701** | **Web Attack Signature & Rule Definitions** | Implement website-specific detection rules: `RULE-101` (SQL Injection Probing), `RULE-102` (Cross-Site Scripting Probing), `RULE-103` (Path Traversal / LFI Probing), `RULE-104` (Malicious Bot & Scraper Activity), `RULE-105` (Authentication Flow Tampering). | `backend/src/detection/rules/web/`<br/>`packages/shared/src/types/index.ts` |
-| **TASK-702** | **Attack Probe vs. Exploitation Disambiguation** | Parser evaluating target HTTP response status (`4xx` = blocked probe vs `200`/`500` = potential exploitation) to assign severity and urgency tiers dynamically. | `backend/src/detection/web-parser.ts` |
+| **TASK-702** | **Attack vs. Exploitation Confidence Classification** | Telemetry parser implementing four evidence-based confidence tiers (`SUSPICIOUS_ATTEMPT`, `BLOCKED_ATTEMPT`, `POTENTIAL_EXPLOITATION`, `CONFIRMED_EXPLOITATION`). Require corroborating application/WAF error signals (DB syntax exceptions, latency spikes, canary triggers); prohibit automatic Critical alerts from status code or response size alone. | `backend/src/detection/web-parser.ts` |
 | **TASK-703** | **Multi-Stage Attack Correlation Engine** | Correlate inbound web attack detections across sliding temporal windows (15m default), grouping related alerts by `sourceIp` and `siteId` into unified incidents. | `backend/src/correlation/engine.ts`<br/>`backend/src/correlation/types.ts` |
 | **TASK-704** | **Explainable Mathematical Risk Scoring Engine** | Implement deterministic formula: $\text{RiskScore} = \min(100, \text{Round}(S_{\text{base}} \times M_{\text{freq}} \times M_{\text{asset}} \times M_{\text{threat}} + B_{\text{sequence}}))$. Generate transparent factor breakdowns. | `backend/src/risk/engine.ts` |
 | **TASK-705** | **Vulnerability-Aware Attack Prioritization** | Cross-reference attack target URIs with known open vulnerability findings on the asset; apply $1.5\times$ risk multiplier when an active attack targets an unmitigated vulnerability. | `backend/src/correlation/vuln-correlator.ts` |
@@ -89,7 +89,7 @@ flowchart TD
 | **TASK-801** | **Vulnerability Assessment Domain Types & Schemas** | Define Zod schemas and TypeScript types for scan configurations, scan jobs, vulnerability findings, CVSS v3.1 scores, and remediation guidance. | `packages/shared/src/schemas/index.ts`<br/>`packages/shared/src/types/index.ts` |
 | **TASK-802** | **Safe Native Passive Assessment Engine** | Implement non-destructive passive checks: TLS cipher suites/versions, HTTP security headers (HSTS, CSP, X-Frame-Options, etc.), cookie flags, CORS configuration, and info disclosure banners. | `backend/src/scanner/passive/` |
 | **TASK-803** | **Isolated Scanner Worker Daemon & ZAP Runner** | Implement queue-polled isolated worker daemon. Evaluate and integrate headless OWASP ZAP container runner via ZAP API with safe non-destructive active scan policies. | `backend/src/scanner/worker.ts`<br/>`backend/src/scanner/zap-client.ts` |
-| **TASK-804** | **Scanning Governance, Egress Guard & Rate Limiter** | Enforce domain verification check, HMAC-signed authorization token validation, private IP egress blocking (SSRF prevention), and token-bucket rate limiting (max 5-10 req/s). | `backend/src/scanner/governance.ts`<br/>`backend/src/scanner/rate-limiter.ts` |
+| **TASK-804** | **Comprehensive SSRF Guard, Rate Limiter & Emergency Cancellation** | Enforce domain verification check, HMAC authorization tokens, connection-time IP validation and socket pinning (defeating DNS rebinding), recursive CNAME inspection, redirect re-validation, complete IPv4/IPv6/IPv4-mapped prohibited matrix, token-bucket rate limiting (max 5-10 req/s with backoff), and emergency abort kill-switch targeting 500ms SLO for socket termination. | `backend/src/scanner/governance.ts`<br/>`backend/src/scanner/rate-limiter.ts` |
 | **TASK-805** | **Vulnerability Findings Registry & State Machine** | Implement findings persistence in `Veltrix-VulnerabilityFindings`. Support lifecycle states: `OPEN` $\to$ `CONFIRMED` $\to$ `IN_REMEDIATION` $\to$ `RESOLVED` $\to$ `ACCEPTED_RISK` $\to$ `FALSE_POSITIVE`. | `backend/src/storage/storage-interface.ts`<br/>`backend/src/services/findings-service.ts` |
 | **TASK-806** | **Vulnerability Scanning & Findings REST API** | Endpoints: `POST /api/v1/scans`, `GET /api/v1/scans`, `GET /api/v1/scans/:scanId`, `POST /api/v1/scans/:scanId/abort`, `GET /api/v1/findings`, `PATCH /api/v1/findings/:findingId`. | `backend/src/routes/scans.ts`<br/>`backend/src/routes/findings.ts` |
 | **TASK-807** | **Security & Compliance Report Generator** | Generate structured Executive Summary, Vulnerability Assessment Detail, and OWASP Top 10 compliance reports in JSON and Markdown formats. | `backend/src/services/report-generator.ts` |
@@ -171,3 +171,55 @@ flowchart TD
 | **TASK-1306** | **AWS Infrastructure SAM Template & Cloud Verification** | Validate `infrastructure/template.yaml` (DynamoDB tables, ECS Fargate scanner task, Cognito User Pool, SQS FIFO queues, IAM least privilege). | `infrastructure/template.yaml` |
 | **TASK-1307** | **Documentation & Competition Presentation Kit** | Finalize `README.md`, `docs/api-reference.md`, `docs/deployment-guide.md`, and 5-minute competition presentation demo script. | `docs/` |
 | **TASK-1308** | **Final Competition & Enterprise Production Readiness Sign-off** | Complete final readiness review matrix confirming 100% test pass rate, clean builds, and zero blockers. | `specs/final-verification-report.md` |
+
+---
+
+## 3. Architecture Safety Review Decisions & Invariants
+
+Following independent DevSecOps safety review during PR #4, the following architectural invariants are binding across all subsequent phases:
+
+### 1. Domain Ownership Revocation & Grace Period Freeze
+- **Scan Freeze:** Transition to `GRACE_PERIOD` **immediately freezes all scanning permissions**.
+- **Immediate Cancellation:** All queued and scheduled scans are cancelled immediately upon entering `GRACE_PERIOD`.
+- **Worker Signal:** Running worker containers receive an immediate abort signal.
+- **No License to Scan:** The 7-day grace period is strictly an administrative renewal period for alerting the owner before full asset deregistration; **it is NEVER permission to continue scanning**.
+- **Re-Verification Required:** Resuming scanning strictly requires successful domain re-verification via DNS TXT or HTTP challenge.
+
+### 2. Comprehensive SSRF & Network Egress Protection
+- **Prohibited Address Matrix:** Strictly blocks IPv4 private (RFC 1918), loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), broadcast, documentation, IPv6 loopback (`::1`), unique-local (`fc00::/7`), link-local (`fe80::/10`), documentation, unspecified (`::`), and IPv4-mapped IPv6 (`::ffff:0:0/96`).
+- **Connection-Time IP Resolution & Socket Pinning:** Resolves and validates target IPs at socket connection time, passing the verified IP directly to `socket.connect({ host: validatedIp })` with SNI header. Completely eliminates DNS rebinding attacks.
+- **Recursive CNAME Validation:** Recursively resolves CNAME chains; intermediate aliases resolving to internal or prohibited addresses abort the connection.
+- **Redirect Re-Validation:** All HTTP 3xx redirects re-validate both FQDN scope and connection-time IP before following.
+- **Dual-Layer Enforcement:** Application socket hooks combined with network-level VPC security groups.
+
+### 3. SDK Telemetry Reliability & Non-Blocking Invariant
+- **Non-Blocking Guarantee:** In-process SDKs operate strictly asynchronously and never block host request/response execution.
+- **Bounded Buffer:** Capped memory ceiling (default 500 events / ~5 MB).
+- **Drop Policy:** Overflow triggers drop-oldest mode, increments atomic counter `droppedEventsCount`, and logs rate-limited warnings.
+- **Exponential Backoff:** Retries use truncated backoff ($1\text{s}, 2\text{s}, 4\text{s}$) with randomized jitter ($\pm 20\%$). Reuses stable `idempotencyKey` for atomic DynamoDB duplicate suppression.
+- **Optional Durable Spool:** Pluggable disk-backed write-ahead log / SQLite spool (`DurableSpoolStorage`) for zero-loss compliance under process crashes.
+
+### 4. Attack vs Exploitation Confidence Classification
+- **Corroboration Requirement:** HTTP 200, 4xx, or 5xx status codes alone must not establish successful exploitation.
+- **Four Confidence Tiers:**
+  1. `SUSPICIOUS_ATTEMPT`: Inbound pattern detected; unverified application impact (Low/Medium severity).
+  2. `BLOCKED_ATTEMPT`: Verified security control (WAF/middleware) intercepted the attack (Low/Info severity).
+  3. `POTENTIAL_EXPLOITATION`: Inbound attack accompanied by corroborating execution signals: unhandled DB syntax exceptions in error logs, database timeout spikes, or anomalous latency (High severity).
+  4. `CONFIRMED_EXPLOITATION`: Multi-source proof (verified data leakage in payload, unauthorized privilege grant, canary token breach) (Critical severity).
+- No automatic Critical incidents are created from status codes or response size alone.
+
+### 5. Configurable Explainable Risk Contribution Model
+- Replaces arbitrary fixed multipliers with an explainable additive risk contribution model:
+  $$\text{RiskScore} = \min\left(100, \text{Round}\left(S_{\text{base}} \times M_{\text{freq}} \times M_{\text{asset}} \times M_{\text{threat}} + C_{\text{vuln\_match}} + B_{\text{sequence}}\right)\right)$$
+  where $C_{\text{vuln\_match}}$ is calibrated by attack surface overlap ($w_{\text{overlap}} = 25$ for exact URI+parameter match, $w = 15$ for path match, $w = 5$ for asset match), CVSS severity, and confidence tier.
+- Subject to empirical testing and calibration against 50,000 synthetic test events.
+
+### 6. Emergency Cancellation Target SLO
+- The platform targets a **500ms Service Level Objective (SLO)** from operator click to worker socket termination.
+- Worker polls cancellation token every 250ms or receives urgent message.
+- Worker terminates HTTP pools, sends `SIGTERM` (5s timeout), followed by `SIGKILL`.
+- Worker acknowledges with `ABORTED` state and completed request count.
+- If worker fails to acknowledge within 10 seconds, control plane transitions scan to `ABORT_FAILED_TIMED_OUT`, terminates container task via AWS API, and alerts the SOC.
+
+### 7. Specification Status Governance
+- All architecture and design documentation must reflect `PROPOSED / IN REVIEW` status until PR #4 is formally approved and merged into `main`.

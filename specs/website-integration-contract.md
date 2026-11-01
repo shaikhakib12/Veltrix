@@ -1,7 +1,7 @@
 # VELTRIX: Website Integration Contract & Telemetry Specifications (`specs/website-integration-contract.md`)
 
-**Document Version:** 1.0.0  
-**Status:** Approved Technical Contract  
+**Document Version:** 1.1.0 (Post-Safety Review Hardened)  
+**Status:** PROPOSED / IN REVIEW (PR #4 Architecture Review)  
 **Classification:** Telemetry Ingestion Adapters & SDK Contract  
 **Target Ingestion Engine:** VELTRIX Phase 4 Event Ingestion API (`POST /api/v1/events`)  
 
@@ -12,11 +12,14 @@
 To provide continuous attack monitoring across diverse web topologies, VELTRIX supports a unified telemetry integration model. Whether telemetry originates from an in-process web application SDK, an edge reverse proxy (Nginx, Apache), a global CDN (Cloudflare), or cloud perimeter firewalls (AWS WAF), every integration must comply with the canonical **VELTRIX Event Ingestion Contract**.
 
 ### Non-Negotiable Integration Rules
-1. **Zero Runtime Disruption:** In-process SDKs (Node.js, Python, Java, PHP, .NET) MUST operate strictly asynchronously. Telemetry collection and HTTP transmission must never block the host application's request/response lifecycle.
-2. **Fail-Open Policy:** If the VELTRIX API is unreachable, times out, or encounters a transient error, the client application MUST continue serving user requests unaffected. Errors are logged locally without throwing uncaught exceptions.
-3. **Local In-Memory Buffering:** High-throughput collectors and SDKs MUST buffer telemetry locally, dispatching events in periodic batches (e.g. every 1,000ms or upon reaching 50 events) to minimize HTTP overhead.
-4. **Tenant & Asset Scoping:** Every payload MUST supply a verified Organization ID (`x-organization-id` header or JWT claim) and asset identifier (`metadata.siteId` or registered domain). Cross-tenant submissions are structurally rejected with HTTP `403 Forbidden`.
-5. **Sanitization of Sensitive Data:** Integrations MUST redact sensitive parameters (passwords, session tokens, API secrets, credit card numbers, authorization bearer headers) prior to transmission.
+1. **Zero Runtime Disruption:** In-process SDKs (Node.js, Python, Java, PHP, .NET) MUST operate strictly asynchronously. Telemetry collection, serialization, and HTTP dispatch MUST NEVER block or delay the host application's HTTP request/response lifecycle.
+2. **Fail-Open Policy & Exception Isolation:** If the VELTRIX Ingestion API is unreachable, times out, or throws a 5xx error, the client application MUST continue serving user requests unaffected. Errors are trapped internally and logged with rate-limiting to prevent log saturation.
+3. **Bounded In-Memory Buffering:** High-throughput collectors and SDKs MUST buffer telemetry locally with a strictly capped capacity (default 500 events / 5MB ceiling) to prevent memory growth under network partition.
+4. **Overflow & Drop Policy:** When the buffer fills, the SDK enters drop-oldest mode, discarding the oldest queued event, incrementing an internal atomic counter (`droppedEventsCount`), and logging a diagnostic warning.
+5. **Exponential Backoff & Duplicate Handling:** Transient network failures trigger truncated exponential backoff ($1\text{s}, 2\text{s}, 4\text{s}$) with jitter ($\pm 20\%$). Client retries reuse the original `idempotencyKey = eventId` so backend conditional writes suppress duplicate ingestion atomically.
+6. **Delivery Limitations & Optional Durable Spool:** In-memory buffers will lose pending events if the host process crashes unexpectedly. For environments requiring strict zero-loss compliance, SDKs provide an optional disk-backed write-ahead log or embedded SQLite spool (`DurableSpoolStorage`) that drains asynchronously.
+7. **Tenant & Asset Scoping:** Every payload MUST supply a verified Organization ID (`x-organization-id` header or JWT claim) and asset identifier (`metadata.siteId` or registered domain). Cross-tenant submissions are structurally rejected with HTTP `403 Forbidden`.
+8. **Sanitization of Sensitive Data:** Integrations MUST redact sensitive parameters (passwords, session tokens, API secrets, credit card numbers, authorization bearer headers) prior to transmission.
 
 ---
 
@@ -48,6 +51,8 @@ interface WebSecurityEvent {
     wafAction?: 'ALLOW' | 'BLOCK' | 'CHALLENGE' | 'LOG';
     isBot?: boolean;
     ja3Fingerprint?: string;              // TLS fingerprint if captured by edge/reverse proxy
+    confidenceLevel?: 'SUSPICIOUS_ATTEMPT' | 'BLOCKED_ATTEMPT' | 'POTENTIAL_EXPLOITATION' | 'CONFIRMED_EXPLOITATION';
+    corroboratingSignals?: string[];      // e.g. ["UNHANDLED_DB_SYNTAX_ERROR", "STACK_TRACE_IN_RESPONSE", "LATENCY_SPIKE"]
   };
   isSimulated?: boolean;
   idempotencyKey?: string;                // Client idempotency key to prevent drop during retries
