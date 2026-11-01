@@ -190,7 +190,7 @@ Following independent DevSecOps safety review during PR #4, the following archit
 - **Connection-Time IP Resolution & Socket Pinning:** Resolves and validates target IPs at socket connection time, passing the verified IP directly to `socket.connect({ host: validatedIp })` with SNI header. Completely eliminates DNS rebinding attacks.
 - **Recursive CNAME Validation:** Recursively resolves CNAME chains; intermediate aliases resolving to internal or prohibited addresses abort the connection.
 - **Redirect Re-Validation:** All HTTP 3xx redirects re-validate both FQDN scope and connection-time IP before following.
-- **Dual-Layer Enforcement:** Application socket hooks combined with network-level VPC security groups.
+- **Multi-Layer Egress Defense-in-Depth:** Application-level connection validation and socket pinning combined with proposed cloud network controls: restrictive Security Group allow rules (outbound 80/443 only), Network ACL stateless deny rules for internal CIDRs, Route 53 Resolver DNS Firewall, and proposed AWS Network Firewall routing (all labeled as proposed cloud architecture; pending Phase 11/12 implementation).
 
 ### 3. SDK Telemetry Reliability & Non-Blocking Invariant
 - **Non-Blocking Guarantee:** In-process SDKs operate strictly asynchronously and never block host request/response execution.

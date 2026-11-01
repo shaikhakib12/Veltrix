@@ -143,15 +143,38 @@ The scanner worker sandbox MUST enforce socket-level and OS-level network egress
 | **IPv4-Mapped IPv6** | `::ffff:0:0/96` (e.g. `::ffff:127.0.0.1`, `::ffff:10.0.0.1`, `::ffff:169.254.169.254`) | Circumvents basic IPv4 filters when wrapped in IPv6. |
 | **IPv6 Documentation / Discard** | `2001:db8::/32`, `100::/64` | Documentation and discard prefixes. |
 
-#### Connection-Time DNS Resolution & Pinning (Rebinding Prevention)
-- **DNS Rebinding Prevention:** An attacker could configure a DNS record that initially resolves to a valid public IP during pre-flight checks, but returns `127.0.0.1` or `169.254.169.254` at request time.
-- **Connection-Time Hook:** The scanner's HTTP agent intercepts DNS resolution at the socket creation level:
-  1. The target hostname is resolved immediately before TCP connection establishment.
-  2. Every resolved IP address is checked against the prohibited matrix above.
-  3. The TCP socket connects directly to the validated IP address (`socket.connect({ host: validatedIp, port })`), passing the target FQDN as the TLS Server Name Indication (SNI) header.
-- **Recursive CNAME Validation:** The resolver traverses all CNAME alias records recursively; if any intermediate CNAME resolves to an internal domain or prohibited IP, the connection is aborted immediately.
-- **Redirect Re-Validation:** All HTTP 3xx redirects (`301`, `302`, `307`, `308`) are intercepted. The redirect target is validated against the approved FQDN scope and connection-time IP validation before following.
-- **Network-Level Defense-in-Depth:** In addition to application-level checks, worker containers reside in isolated VPC subnets with network security groups that reject outbound traffic to internal VPC CIDRs and AWS metadata endpoints.
+#### Application-Level Connection Validation (Socket Pinning & DNS Protection)
+Application-level connection hooks enforce the primary defense against SSRF and DNS manipulation:
+1. **Destination IP Validation:** The target FQDN is resolved immediately prior to TCP connection establishment. Every resolved IPv4 and IPv6 address is matched against the prohibited network matrix above. If any resolved address belongs to a prohibited range, connection initiation is aborted immediately.
+2. **DNS Pinning:** Rather than allowing downstream HTTP libraries or OS resolvers to re-query DNS during handshake, the scanner agent bypasses secondary lookups by pinning the socket directly to the validated IP (`socket.connect({ host: validatedIp, port })`). This completely eliminates time-of-check to time-of-use (TOCTOU) DNS rebinding vulnerabilities.
+3. **Redirect Re-Validation:** All HTTP 3xx redirects (`301`, `302`, `307`, `308`) are intercepted by custom client handlers. The target redirect URL is checked against the registered asset's verified primary domain or approved subdomains, and its destination IP is resolved and re-validated against the prohibited matrix before any redirect is followed.
+4. **TLS Hostname & SNI Preservation:** To ensure virtual hosting, multi-tenant CDNs, and TLS certificate validation operate correctly despite IP-level socket pinning, the target FQDN is explicitly preserved and supplied in the TLS Server Name Indication (`servername` SNI) header and the HTTP `Host` header.
+
+#### Multi-Layer AWS Cloud Network Controls (Proposed Architecture)
+> [!NOTE]
+> **Proposed Cloud Architecture — Pending Implementation in Phase 11/12; Not Deployed in Current Phase.**  
+> The AWS infrastructure controls described below represent the defense-in-depth cloud network design for production scanner isolation. They are scheduled for implementation in Phase 11/12 and are not deployed in local development environments.
+
+To provide defense-in-depth below the application layer, the production cloud architecture distributes egress safeguards across specialized AWS controls. **Security Groups alone do not provide explicit deny rules or full DNS/URL-based SSRF protection**, because Security Groups are purely stateful allow-only rules operating at Layer 4 and cannot inspect DNS queries, HTTP URLs, or redirect targets.
+
+The platform coordinates five distinct layers of protection:
+
+| Layer / AWS Control | Nature & Scope | Specific Responsibility & Configuration | Limitations (Why Control Alone Is Insufficient) |
+| :--- | :--- | :--- | :--- |
+| **Application Connection Validation** | In-Process / Socket Hook | Destination IP validation against prohibited CIDR matrix, socket IP pinning to prevent DNS rebinding, HTTP 3xx redirect re-validation, and TLS SNI preservation. | Relies on process runtime integrity; requires defense-in-depth at network perimeter. |
+| **Security Groups** | Elastic Network Interface (ENI) / Stateful | **Restrictive Outbound Allow Rules:** Restrict scanner task ENIs strictly to outbound TCP ports 80 and 443 destined for internet CIDRs (or specific VPC Endpoint interfaces). All non-web egress (SSH, RDP, SMTP, internal RPCs) is blocked at Layer 4. | **Allow-only:** Security Groups do NOT support explicit DENY rules. Cannot selectively block internal CIDRs while allowing broad internet egress; cannot inspect URLs, DNS, or redirects. |
+| **Network ACLs (NACLs)** | Subnet Boundary / Stateless | **Subnet-Level Stateless Allow/Deny Filtering:** Enforces explicit stateless outbound DENY rules on the Scanner Worker Subnet before the default allow rule:<br>- `Rule 100: DENY 10.0.0.0/8` (RFC 1918 Private)<br>- `Rule 110: DENY 172.16.0.0/12` (RFC 1918 Private)<br>- `Rule 120: DENY 192.168.0.0/16` (RFC 1918 Private)<br>- `Rule 130: DENY 169.254.169.254/32` (Cloud Metadata)<br>- `Rule 140: DENY 169.254.0.0/16` (Link-Local)<br>- `Rule 200: ALLOW 0.0.0.0/0` (Outbound Internet TCP 80/443) | Stateless (requires return ephemeral port rules); does not inspect domain names, HTTP headers, or TLS SNI. |
+| **AWS Network Firewall** | VPC Egress Boundary / Stateful | **Stateful Network & Domain-Based Egress Filtering:** Centrally inspects Layer 3 through Layer 7 traffic using Suricata-compatible rules and AWS domain list filtering. Enforces domain name allowlists (TLS SNI and HTTP Host) and blocks non-TLS tunnels. | Requires dedicated firewall subnets and route table orchestration; higher latency and cost than basic ACLs. |
+| **Route 53 Resolver DNS Firewall** | VPC DNS Layer (`169.254.169.253`) | **DNS Query Filtering:** Filters VPC-level DNS queries before name resolution completes. Blocks queries for internal private hosted zones (`*.internal`, `*.local`, `*.ec2.internal`), cloud metadata domains, and known threat domains. | Does not prevent DNS rebinding where an external nameserver returns internal IPs; requires application-level IP validation. |
+
+#### AWS Network Firewall Routing & Deployment Requirements (Proposed)
+Deploying AWS Network Firewall for isolated scanner task subnets requires specific VPC route table orchestration to ensure stateful symmetric inspection:
+
+1. **Dedicated Firewall Subnet per AZ:** AWS Network Firewall endpoints must be provisioned in dedicated, separate subnets (`Firewall-Subnet-AZ1`, `Firewall-Subnet-AZ2`) distinct from the Scanner Worker Subnet and NAT Gateway Subnet.
+2. **Scanner Subnet Route Table:** The route table associated with the Scanner Worker Subnet configures the default route (`0.0.0.0/0`) with the target set to the **AWS Network Firewall VPC Endpoint** (`vpce-xxx`) in the corresponding Availability Zone.
+3. **Firewall Subnet Route Table:** The route table associated with the Firewall Subnet configures the default route (`0.0.0.0/0`) with the target set to the **NAT Gateway** in the public subnet of the same AZ.
+4. **Public / NAT Subnet Route Table:** Configures default route (`0.0.0.0/0`) pointing to the AWS Internet Gateway (IGW).
+5. **IGW Ingress Route Table (Edge Association):** To maintain symmetric stateful inspection, an ingress route table is associated with the Internet Gateway containing explicit routes for the Scanner Subnet CIDR pointing back through the **AWS Network Firewall VPC Endpoint**.
 
 ---
 

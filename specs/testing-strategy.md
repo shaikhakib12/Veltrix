@@ -108,14 +108,22 @@ A feature is never considered complete merely because its code was authored; it 
 - **Safety & Sandboxing Tests:**
   - Zero-Bypass test: Attempt to launch active scan on unverified domain $\to$ assert `403 Forbidden`.
   - Out-of-scope drop test: Spider encountering third-party redirect (e.g. `https://auth0.com`) $\to$ assert request dropped and logged as `DROPPED_OUT_OF_SCOPE`.
-  - **Comprehensive SSRF Egress Tests:**
-    - Connection to IPv4 private (`10.0.0.1`, `192.168.1.1`, `172.16.0.1`) $\to$ blocked.
-    - Connection to Cloud Metadata (`169.254.169.254`) $\to$ blocked.
-    - Connection to IPv6 loopback (`::1`), unique-local (`fc00::1`), and link-local (`fe80::1`) $\to$ blocked.
-    - Connection to IPv4-mapped IPv6 (`::ffff:127.0.0.1`, `::ffff:169.254.169.254`) $\to$ blocked.
-    - Connection to unspecified (`0.0.0.0`, `::`) $\to$ blocked.
-    - **DNS Rebinding Test:** Mock DNS server returning public IP on lookup #1 but returning `127.0.0.1` on connection lookup $\to$ assert connection hook blocks socket before TCP handshake.
-    - **Recursive CNAME Test:** Target domain alias pointing to `internal.service.local` $\to$ assert connection rejected.
+  - **Comprehensive SSRF & Egress Protection Tests:**
+    - **Application-Level Connection Validation Tests:**
+      - Connection to IPv4 private (`10.0.0.1`, `192.168.1.1`, `172.16.0.1`) $\to$ assert blocked.
+      - Connection to Cloud Metadata (`169.254.169.254`) $\to$ assert blocked.
+      - Connection to IPv6 loopback (`::1`), unique-local (`fc00::1`), and link-local (`fe80::1`) $\to$ assert blocked.
+      - Connection to IPv4-mapped IPv6 (`::ffff:127.0.0.1`, `::ffff:169.254.169.254`) $\to$ assert blocked.
+      - Connection to unspecified (`0.0.0.0`, `::`) $\to$ assert blocked.
+      - **DNS Rebinding Test:** Mock DNS server returning public IP on lookup #1 but returning `127.0.0.1` on connection lookup $\to$ assert socket hook validates IP and blocks connection before TCP handshake.
+      - **DNS Pinning Test:** Assert socket connects directly to validated IP (`socket.connect({ host: validatedIp })`) while preserving TLS SNI (`servername`) and HTTP `Host` header.
+      - **Recursive CNAME Test:** Target domain alias pointing to `internal.service.local` $\to$ assert connection rejected.
+      - **HTTP 3xx Redirect Re-Validation Test:** Target redirecting to internal IP or unapproved domain $\to$ assert redirect intercepted and dropped.
+    - **Proposed Cloud Network Controls Validation (Proposed Phase 11/12 Cloud Infrastructure Tests):**
+      - *CloudFormation / SAM Linter Test:* Validate proposed template specifies restrictive Security Group allow rules (outbound TCP 80/443 only; assert no claims of explicit deny rules in SG).
+      - *NACL Rule Ordering Test:* Validate proposed CloudFormation template defines explicit high-priority outbound DENY rules for `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, and `169.254.169.254/32` on the Scanner Subnet NACL before default allow.
+      - *AWS Network Firewall Route Table Test:* Validate proposed routing configuration directs default route `0.0.0.0/0` from Scanner Subnet $\to$ Network Firewall VPC Endpoint $\to$ NAT Gateway $\to$ IGW, and verifies IGW edge route table for symmetric return traffic.
+      - *Route 53 Resolver DNS Firewall Test:* Validate proposed DNS Firewall rule group association blocks queries for private hosted zones.
   - **Rate Limiting & Adaptive Backoff:** Verify scanner never exceeds configured rate (5 req/s). Mock 3 consecutive 429/503 responses $\to$ assert scanner backs off and aborts if unrecovered.
   - **Emergency Abort Target SLO Test:** Trigger `POST /scans/:scanId/abort` $\to$ assert worker terminates sockets, cleans up processes, and reports `ABORTED` state within target SLO. If unresponsive for 10s $\to$ assert `ABORT_FAILED_TIMED_OUT`.
 

@@ -221,11 +221,17 @@ VELTRIX unifies website telemetry ingestion and attack detection across three in
 
 To deliver continuous, policy-governed vulnerability assessments without impacting production availability:
 1. **Isolated Worker Sandbox:** Scanning jobs are decoupled from the synchronous API and processed asynchronously by containerized workers (AWS ECS Fargate or Docker containers) consuming from an Amazon SQS FIFO queue.
-2. **Engine Evaluation (OWASP ZAP):** Evaluated and approved as the primary dynamic scanning engine. Controlled via its JSON REST API in daemon mode.
+2. **Engine Evaluation (OWASP ZAP):** Evaluated and proposed as the candidate dynamic scanning engine. Controlled via its JSON REST API in daemon mode.
 3. **Safety & Policy Guardrails:**
    - **Zero-Bypass Ownership Verification & Immediate Grace Freeze:** Active scanning strictly requires verified domain ownership via DNS TXT or HTTP challenge (valid for 90 days). If verification fails, `GRACE_PERIOD` immediately freezes all new scans, cancels queued/scheduled scans, and signals running workers to abort.
    - **Signed Authorization:** Scan jobs require an HMAC-SHA256 `scanAuthorizationToken` signed by an Organization Administrator.
-   - **Comprehensive SSRF & Egress Protection:** Enforces connection-time IP resolution and socket pinning to defeat DNS rebinding. Egress filter structurally blocks outbound connections to IPv4 private (RFC 1918), loopback, link-local (169.254.169.254), IPv6 loopback (::1), unique-local, link-local, IPv4-mapped IPv6 (::ffff:0:0/96), unspecified, broadcast, and recursive CNAME chains pointing to internal targets.
+   - **Multi-Layer SSRF & Network Egress Protection:**
+     - *Application Connection Validation:* Enforces destination IP validation, connection-time DNS pinning, recursive CNAME checking, redirect re-validation, and TLS SNI preservation to eliminate DNS rebinding and structurally block outbound connections to IPv4 private (RFC 1918), loopback, link-local (169.254.169.254), IPv6 loopback (::1), unique-local, link-local, IPv4-mapped IPv6 (::ffff:0:0/96), and unspecified addresses.
+     - *Proposed Cloud Infrastructure Controls (Pending Phase 11/12 Implementation; Not Deployed in Current Phase):*
+       - **Security Groups:** Restrictive outbound allow rules (TCP 80/443 only). Security Groups alone do not provide explicit deny rules or full DNS/URL-based SSRF protection.
+       - **Network ACLs:** Subnet-level stateless allow/deny filtering with explicit outbound DENY rules for RFC 1918 CIDRs and cloud metadata (`169.254.169.254/32`).
+       - **AWS Network Firewall:** Stateful network and domain-based egress filtering with dedicated firewall subnets and route table orchestration (Scanner Subnet -> Firewall Subnet Endpoint -> NAT Gateway -> IGW).
+       - **Route 53 Resolver DNS Firewall:** Outbound DNS query filtering blocking internal VPC domains and suspicious hosts.
    - **Rate Limiting & Circuit Breaking:** Scan requests are throttled (default 5-10 req/s). If the target returns 3 consecutive HTTP 429/503 responses, the scanner backs off or aborts.
    - **Emergency Cancellation SLO:** Targets a 500ms Service Level Objective (SLO) for socket termination upon operator abort, backed by graceful `SIGTERM` (5s timeout) and `SIGKILL`, with `ABORT_FAILED_TIMED_OUT` reporting after 10s.
    - **Non-Destructive Defaults:** Passive assessment (TLS, headers, cookies, CORS, information exposure) is default. Destructive operations (`DELETE`, `DROP`, DoS floods, state-changing form fuzzing) are strictly prohibited.
