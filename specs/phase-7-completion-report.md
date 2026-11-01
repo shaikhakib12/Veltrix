@@ -158,7 +158,7 @@ Implemented in `frontend/src/components/WebsiteAttackMonitoring.tsx` and integra
 
 ## 9. Automated Test Suite Verification (TASK-707)
 
-Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` executes 41 tests covering:
+Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` executes 46 tests covering:
 1. Positive and negative payload verification for `RULE-101` (SQLi).
 2. Positive and negative payload verification for `RULE-102` (XSS).
 3. Positive and negative payload verification for `RULE-103` (Path Traversal).
@@ -169,7 +169,7 @@ Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` execut
 8. Vulnerability-aware attack surface correlation ($C_{\text{vuln\_match}}$).
 9. REST APIs, keyset pagination, tenant isolation (Tenant B cannot access Tenant A data: 404 `WEBSITE_NOT_FOUND`), and API key scoping (`FORBIDDEN_API_KEY_SCOPE_PROHIBITED`).
 10. Security audit regressions: credential redaction in query parameters/raw URIs, NaN poisoning defense, generic IP collision defense, correlation idempotency, sliding window bucket boundary correlation, and out-of-order timestamp preservation.
-11. Evidence provenance & trust boundary: rejection of client-submitted `CANARY_TOKEN_BREACH`, `DATA_LEAKAGE_INDICATOR`, `UNAUTHORIZED_PRIVILEGE_MUTATION`, isolation of forged DB errors, anti-impersonation via `sourceSystem`, and server-verified evidence processing.
+11. Evidence provenance & internal trust boundary: rejection of client-submitted `CANARY_TOKEN_BREACH`, `DATA_LEAKAGE_INDICATOR`, `UNAUTHORIZED_PRIVILEGE_MUTATION`, isolation of forged DB errors, anti-impersonation via `sourceSystem`, strict non-promotion of untrusted client signals in trusted execution contexts, and server-verified evidence processing via `InternalTrustedEvidenceContext`.
 
 ### Full Monorepo Test Results:
 ```
@@ -177,16 +177,16 @@ Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` execut
 > npm run test --workspaces --if-present
 
 @veltrix/sdk-node: 8 passed (8 tests)
-@veltrix/backend: 237 passed (237 tests)
-Total: 245 / 245 passed (100% pass rate)
+@veltrix/backend: 242 passed (242 tests)
+Total: 250 / 250 passed (100% pass rate)
 ```
 
 ---
 
 ## 10. Conclusion & PR Management
 
-Phase 7 (TASK-701 through TASK-707) is complete, independently audited, hardened, and verified against all criteria.
+Phase 7 (TASK-701 through TASK-707) is complete, independently audited, hardened with an internal trust boundary, and verified against all criteria.
 Per instructions:
 - Phase 7 is NOT merged into `main`.
 - Phase 8 has NOT been started.
-- All changes are pushed to branch `feature/phase-7-web-attack-monitoring` updating PR #7.
+- All outstanding changes are submitted via PR #10 targeting `main`.

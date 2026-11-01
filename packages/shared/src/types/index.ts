@@ -36,6 +36,19 @@ export type EvidenceProvenance =
   | 'AUTHENTICATED_COLLECTOR'
   | 'UNTRUSTED_CLIENT';
 
+/**
+ * Internal-only trusted evidence context used by approved server components
+ * (such as active verification workers, canary probes, and internal audit jobs).
+ * External clients, SDK users, webhooks, and integrations cannot construct this.
+ */
+export interface InternalTrustedEvidenceContext {
+  verifiedProvenance: 'TRUSTED_SERVER_COMPONENT' | 'AUTHENTICATED_COLLECTOR';
+  verifiedSignalIdentifiers: string[];
+  verifierIdentity: string;
+  verificationTimestamp: string;
+  evidenceReferences: string[];
+}
+
 export interface WebSecurityEventMetadata {
   siteId?: string;
   domain?: string;
@@ -74,6 +87,7 @@ export interface SecurityEvent {
   isSimulated?: boolean;
   idempotencyKey?: string;
   ingestedAt?: string; // Server-side ISO 8601 UTC receipt timestamp
+  trustedEvidenceContext?: InternalTrustedEvidenceContext;
 }
 
 export interface IngestionItemResult {

@@ -113,23 +113,35 @@ All **9 security audit findings** identified during review have been fully remed
 
 #### Finding SEC-P7-009: Untrusted Client Evidence Promotion & Missing Provenance Trust Boundary
 - **Severity:** Critical
-- **Affected File:** `backend/src/detection/web-parser.ts` & `backend/src/services/event-service.ts`
-- **Explanation:** `normalizeWebTelemetry()` previously copied client-provided `metadata.corroboratingSignals` directly into its internal evidence list. Because the ingestion schema accepts arbitrary JSON metadata, an untrusted integration client could submit forged claims such as `CANARY_TOKEN_BREACH`, `DATA_LEAKAGE_INDICATOR`, or `UNAUTHORIZED_PRIVILEGE_MUTATION`, directly escalating alerts to `CONFIRMED_EXPLOITATION` or `POTENTIAL_EXPLOITATION`. Similarly, forged database errors in `errorMessage` or `responseSample` could trick the parser into establishing unverified exploitation.
+- **Affected File:** `backend/src/detection/web-parser.ts`, `backend/src/services/event-service.ts`, `packages/shared/src/types/index.ts`
+- **Explanation:**
+  1. **Untrusted Signal Promotion (Finding A):** `normalizeWebTelemetry()` previously allowed client-provided `metadata.corroboratingSignals` to be copied directly into internal trusted evidence when parsed under a trusted server context. Under strict zero-trust rules, client-provided signals must NEVER become trusted evidence regardless of parser execution context.
+  2. **Metadata-Based Provenance Escalation (Finding B):** Client-submitted metadata fields (`serverVerified`, `evidenceProvenance`, `trustedProvenance`, `verifiedSignals`) previously had logic pathways that could grant trusted provenance or promote signals. Inbound event metadata is external client input and must never establish trust by itself.
 - **Fix Applied:**
-  1. **Strict Zero-Trust Provenance Model:** Defined `EvidenceProvenance` (`TRUSTED_SERVER_COMPONENT`, `AUTHENTICATED_COLLECTOR`, `UNTRUSTED_CLIENT`). All external ingestion is classified as `UNTRUSTED_CLIENT` by default.
-  2. **Ingestion Sanitization:** Updated `EventService.normalizeEvent` to strip/prefix client-supplied `serverVerified`, `trustedProvenance`, `evidenceProvenance`, and `verifiedSignals`, preventing external clients from spoofing provenance.
-  3. **Signal Separation:** Client-submitted `corroboratingSignals` are relegated to `untrustedClientSignals: string[]` and NEVER promoted into trusted evidence.
-  4. **Strict Server-Verification Gate:** `CONFIRMED_EXPLOITATION` is strictly prohibited unless `evidenceProvenance === 'TRUSTED_SERVER_COMPONENT'`.
-  5. **Response & Error Sanitization:** Inspection of `responseSample` and `errorMessage` for DB errors or file leaks is restricted to verified server components; untrusted client claims are isolated in `untrustedClientSignals`.
+  1. **Internal-Only Trusted Evidence Context (`InternalTrustedEvidenceContext`):** Defined in `@veltrix/shared` and instantiated via `createInternalTrustedEvidenceContext()`. Only authenticated, approved server-side components (canary workers, internal scanners, core verification engines) can construct this context. It encapsulates:
+     - `verifiedProvenance`: `'TRUSTED_SERVER_COMPONENT' | 'AUTHENTICATED_COLLECTOR'`
+     - `verifiedSignalIdentifiers`: explicit list of server-verified signal IDs
+     - `verifierIdentity`: identity of internal verifier component
+     - `verificationTimestamp`: ISO 8601 UTC timestamp
+     - `evidenceReferences`: references to underlying cryptographic proofs or canary IDs
+  2. **Zero-Trust Metadata Decoupling:** Inbound client `metadata` is completely decoupled from provenance resolution. Fields such as `serverVerified`, `evidenceProvenance`, and `trustedProvenance` in `metadata` are strictly ignored by `web-parser.ts`.
+  3. **Signal Separation & Untrusted Isolation:** Client-submitted `corroboratingSignals` and client `verifiedSignals` are relegated to `untrustedClientSignals: string[]`. Under no circumstances are `untrustedClientSignals` copied or promoted into `corroboratingSignals` (trusted), even if `isTrustedServerComponent` is true.
+  4. **Strict Server-Verification Gate:** `CONFIRMED_EXPLOITATION` is strictly prohibited unless `evidenceProvenance === 'TRUSTED_SERVER_COMPONENT'` and trusted signals include server-attested indicators (`CANARY_TOKEN_BREACH`, `DATA_LEAKAGE_INDICATOR`, `UNAUTHORIZED_PRIVILEGE_MUTATION`).
+  5. **Response & Error Sanitization:** Inspection of `responseSample` and `errorMessage` for DB syntax errors or system file leaks is restricted to verified server components; untrusted client claims are isolated in `untrustedClientSignals`.
   6. **Anti-Impersonation:** Prohibited integration clients from impersonating trusted collectors via `sourceSystem` alone.
   7. **Preserved Ordinary Detections:** Regular attack pattern recognition (SQLi, XSS, Path Traversal) operates unimpeded on untrusted metadata, producing `SUSPICIOUS_ATTEMPT` alerts without false exploitation elevation.
-- **Test Evidence:** 7 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
-  - `rejects client-submitted CANARY_TOKEN_BREACH and does not escalate to CONFIRMED_EXPLOITATION`
-  - `rejects client-submitted DATA_LEAKAGE_INDICATOR and does not escalate to CONFIRMED_EXPLOITATION`
+- **Test Evidence:** 12 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
+  - `1. rejects client-submitted CANARY_TOKEN_BREACH and does not escalate to CONFIRMED_EXPLOITATION`
+  - `2. rejects client-submitted DATA_LEAKAGE_INDICATOR and does not escalate to CONFIRMED_EXPLOITATION`
+  - `3. trusted context combined with forged client signals NEVER promotes client signals into trusted evidence` (Most Important Invariant)
+  - `4. isolates forged client verifiedSignals in untrusted claims and never promotes them to trusted evidence`
+  - `5. client-submitted serverVerified: true never establishes trust`
+  - `6. client-declared TRUSTED_SERVER_COMPONENT in metadata never establishes trust`
+  - `7. prohibits arbitrary integration clients from impersonating trusted collectors via sourceSystem`
+  - `8. accepts genuine independently verified server evidence via InternalTrustedEvidenceContext`
   - `rejects forged UNAUTHORIZED_PRIVILEGE_MUTATION as trusted evidence and isolates it in untrustedClientSignals`
   - `prohibits forged database errors and response samples from establishing exploitation`
-  - `prohibits arbitrary integration clients from impersonating trusted collectors via sourceSystem`
-  - `accepts valid evidence from an authenticated and trusted server-side source`
+  - `accepts server-verified DB syntax error from authenticated collector`
   - `ensures ordinary SQLi, XSS, and traversal detection continues working seamlessly with untrusted metadata`
 
 ---
@@ -154,12 +166,12 @@ All **9 security audit findings** identified during review have been fully remed
 
 ```
 Test Files  9 passed (9 across monorepo)
-     Tests  237 passed (237) - @veltrix/backend
+     Tests  242 passed (242) - @veltrix/backend
      Tests  8 passed (8)     - @veltrix/sdk-node
-  Total:    245 / 245 passed (100% pass rate)
+  Total:    250 / 250 passed (100% pass rate)
 ```
 
-- All 41 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including the 6 regression tests in Section 9 and 7 new trust-boundary regression tests in Section 10).
+- All 46 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including the 6 regression tests in Section 9 and 12 trust-boundary regression tests in Section 10).
 - Full tenant boundary isolation and API key prohibition regression tests pass.
 - False positive suppression verified across all 5 web attack rules.
 

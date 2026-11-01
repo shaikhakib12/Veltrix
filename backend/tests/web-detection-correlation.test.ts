@@ -15,7 +15,7 @@ import {
   Rule104BotActivity,
   Rule105AuthFlowTampering,
 } from '../src/detection/rules/web/index.js';
-import { normalizeWebTelemetry } from '../src/detection/web-parser.js';
+import { normalizeWebTelemetry, createInternalTrustedEvidenceContext } from '../src/detection/web-parser.js';
 import { JwtService } from '../src/auth/jwt-service.js';
 import { LocalAuthProvider } from '../src/auth/local-auth-provider.js';
 import { resetAuthProviderForTesting } from '../src/auth/index.js';
@@ -320,7 +320,7 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         },
       };
 
-      // Tier 3: Potential Exploitation (DB syntax error in application response)
+      // Tier 3: Potential Exploitation (DB syntax error in application response, attested by authenticated collector)
       const potentialEvent: SecurityEvent = {
         eventId: '01a19700-0000-7000-8000-000000000012',
         orgId,
@@ -330,12 +330,14 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         category: 'NETWORK',
         sourceIp: '198.51.100.32',
         sourceSystem: 'sdk:nodejs:express',
+        trustedEvidenceContext: createInternalTrustedEvidenceContext({
+          provenance: 'AUTHENTICATED_COLLECTOR',
+          verifierIdentity: 'collector:nginx',
+        }),
         metadata: {
           siteId,
           requestUri: "/items?id=1' OR 1=1--",
           httpStatus: 500,
-          serverVerified: true,
-          evidenceProvenance: 'AUTHENTICATED_COLLECTOR',
           errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
         },
       };
@@ -350,13 +352,15 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         category: 'NETWORK',
         sourceIp: '198.51.100.33',
         sourceSystem: 'sensor:canary:db',
+        trustedEvidenceContext: createInternalTrustedEvidenceContext({
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'sensor:canary:db',
+          verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
+        }),
         metadata: {
           siteId,
           requestUri: '/items?id=-1+UNION+SELECT+1,table_name,column_name+FROM+information_schema.columns',
           httpStatus: 200,
-          serverVerified: true,
-          evidenceProvenance: 'TRUSTED_SERVER_COMPONENT',
-          corroboratingSignals: ['DATA_LEAKAGE_INDICATOR'],
         },
       };
 
@@ -548,12 +552,14 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         category: 'NETWORK',
         sourceIp: '198.51.100.55',
         sourceSystem: 'sensor:canary:files',
+        trustedEvidenceContext: createInternalTrustedEvidenceContext({
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'sensor:canary:files',
+        }),
         metadata: {
           siteId,
           requestUri: '/get-doc?name=../../etc/passwd',
           httpStatus: 200,
-          serverVerified: true,
-          evidenceProvenance: 'TRUSTED_SERVER_COMPONENT',
           responseSample: 'root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin',
         },
       };
@@ -1276,8 +1282,9 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
     });
   });
 
-  describe('10. PR #9 Security Hardening: Evidence Provenance & Trust Boundary', () => {
-    it('rejects client-submitted CANARY_TOKEN_BREACH and does not escalate to CONFIRMED_EXPLOITATION', () => {
+  describe('10. PR #10 Final Security Hardening: Evidence Provenance & Internal Trust Boundary', () => {
+    // Test 1: Forged client CANARY_TOKEN_BREACH
+    it('1. rejects client-submitted CANARY_TOKEN_BREACH and does not escalate to CONFIRMED_EXPLOITATION', () => {
       const parsed = normalizeWebTelemetry({
         eventId: '01a19700-0000-7000-8000-000000000101',
         orgId,
@@ -1303,7 +1310,8 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       expect(parsed.isClientClassificationUntrusted).toBe(true);
     });
 
-    it('rejects client-submitted DATA_LEAKAGE_INDICATOR and does not escalate to CONFIRMED_EXPLOITATION', () => {
+    // Test 2: Forged client DATA_LEAKAGE_INDICATOR
+    it('2. rejects client-submitted DATA_LEAKAGE_INDICATOR and does not escalate to CONFIRMED_EXPLOITATION', () => {
       const parsed = normalizeWebTelemetry({
         eventId: '01a19700-0000-7000-8000-000000000102',
         orgId,
@@ -1326,6 +1334,181 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       expect(parsed.corroboratingSignals).not.toContain('DATA_LEAKAGE_INDICATOR');
       expect(parsed.untrustedClientSignals).toContain('DATA_LEAKAGE_INDICATOR');
       expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+    });
+
+    // Test 3: Trusted context combined with forged client signals (MOST IMPORTANT INVARIANT)
+    it('3. trusted context combined with forged client signals NEVER promotes client signals into trusted evidence', () => {
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000120',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.120',
+          sourceSystem: 'sdk:nodejs:express',
+          metadata: {
+            siteId,
+            requestUri: "/profile?user=admin' OR 1=1--",
+            httpStatus: 200,
+            corroboratingSignals: ['CANARY_TOKEN_BREACH', 'DATA_LEAKAGE_INDICATOR', 'UNAUTHORIZED_PRIVILEGE_MUTATION'],
+          },
+        },
+        {
+          isTrustedServerComponent: true,
+          verifiedBy: 'internal-audit-worker:core',
+        }
+      );
+
+      // Invariant check: Although execution context is trusted server component,
+      // client-submitted corroboratingSignals MUST NOT be promoted into trusted corroboratingSignals!
+      expect(parsed.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(parsed.corroboratingSignals).toHaveLength(0);
+      expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
+      expect(parsed.corroboratingSignals).not.toContain('DATA_LEAKAGE_INDICATOR');
+      expect(parsed.corroboratingSignals).not.toContain('UNAUTHORIZED_PRIVILEGE_MUTATION');
+      expect(parsed.untrustedClientSignals).toEqual(
+        expect.arrayContaining(['CANARY_TOKEN_BREACH', 'DATA_LEAKAGE_INDICATOR', 'UNAUTHORIZED_PRIVILEGE_MUTATION'])
+      );
+      // Without trusted server verified signals, confidence remains SUSPICIOUS_ATTEMPT
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+    });
+
+    // Test 4: Forged client verifiedSignals
+    it('4. isolates forged client verifiedSignals in untrusted claims and never promotes them to trusted evidence', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000121',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.121',
+        sourceSystem: 'client:generic',
+        metadata: {
+          siteId,
+          requestUri: "/items?id=1'",
+          verifiedSignals: ['CANARY_TOKEN_BREACH', 'UNAUTHORIZED_PRIVILEGE_MUTATION'],
+        },
+      });
+
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.corroboratingSignals).toHaveLength(0);
+      expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
+      expect(parsed.untrustedClientSignals).toEqual(
+        expect.arrayContaining(['CANARY_TOKEN_BREACH', 'UNAUTHORIZED_PRIVILEGE_MUTATION'])
+      );
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+    });
+
+    // Test 5: Client-submitted serverVerified: true
+    it('5. client-submitted serverVerified: true never establishes trust', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000122',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.122',
+        sourceSystem: 'client:webhook',
+        metadata: {
+          siteId,
+          requestUri: "/items?id=1'",
+          serverVerified: true,
+          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
+        },
+      });
+
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.corroboratingSignals).toHaveLength(0);
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+    });
+
+    // Test 6: Client-declared TRUSTED_SERVER_COMPONENT
+    it('6. client-declared TRUSTED_SERVER_COMPONENT in metadata never establishes trust', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000123',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.traversal',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.123',
+        sourceSystem: 'client:integration',
+        metadata: {
+          siteId,
+          requestUri: '/view?file=../../etc/shadow',
+          serverVerified: true,
+          evidenceProvenance: 'TRUSTED_SERVER_COMPONENT',
+          trustedProvenance: true,
+          corroboratingSignals: ['DATA_LEAKAGE_INDICATOR'],
+        },
+      });
+
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.corroboratingSignals).toHaveLength(0);
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+    });
+
+    // Test 7: sourceSystem impersonation
+    it('7. prohibits arbitrary integration clients from impersonating trusted collectors via sourceSystem', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000110',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.110',
+        sourceSystem: 'sensor:canary:core', // spoofed trusted collector name!
+        metadata: {
+          siteId,
+          requestUri: "/items?id=1'",
+          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
+        },
+      });
+
+      // Even though sourceSystem is 'sensor:canary:core', without out-of-band server verification it remains UNTRUSTED_CLIENT
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+      expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
+      expect(parsed.untrustedClientSignals).toContain('CANARY_TOKEN_BREACH');
+    });
+
+    // Test 8: Genuine independently verified server evidence
+    it('8. accepts genuine independently verified server evidence via InternalTrustedEvidenceContext', () => {
+      const canaryEvent: SecurityEvent = {
+        eventId: '01a19700-0000-7000-8000-000000000105',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.105',
+        sourceSystem: 'sensor:canary:db',
+        metadata: {
+          siteId,
+          requestUri: '/admin?user=canary',
+        },
+      };
+
+      const trustedContext = createInternalTrustedEvidenceContext({
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        evidenceReferences: ['canary-token-db-secret-01'],
+        verificationTimestamp: new Date().toISOString(),
+      });
+
+      const parsedCanary = normalizeWebTelemetry(canaryEvent, { trustedContext });
+
+      expect(parsedCanary.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(parsedCanary.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+      expect(parsedCanary.corroboratingSignals).toContain('CANARY_TOKEN_BREACH');
+      expect(parsedCanary.trustedEvidenceContext?.verifierIdentity).toBe('canary-service:v1');
+      expect(parsedCanary.trustedEvidenceContext?.evidenceReferences).toContain('canary-token-db-secret-01');
     });
 
     it('rejects forged UNAUTHORIZED_PRIVILEGE_MUTATION as trusted evidence and isolates it in untrustedClientSignals', () => {
@@ -1383,55 +1566,7 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       expect(parsed.untrustedClientSignals).toContain('CLIENT_CLAIMED_DATA_LEAKAGE');
     });
 
-    it('prohibits arbitrary integration clients from impersonating trusted collectors via sourceSystem', () => {
-      const parsed = normalizeWebTelemetry({
-        eventId: '01a19700-0000-7000-8000-000000000110',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.sqli',
-        severity: 'HIGH',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.110',
-        sourceSystem: 'sensor:canary:core', // spoofed trusted collector name!
-        metadata: {
-          siteId,
-          requestUri: "/items?id=1'",
-          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
-        },
-      });
-
-      // Even though sourceSystem is 'sensor:canary:core', without server-side verification it remains UNTRUSTED_CLIENT
-      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
-      expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
-    });
-
-    it('accepts valid evidence from an authenticated and trusted server-side source', () => {
-      // A. Server-verified canary token sensor
-      const canaryEvent: SecurityEvent = {
-        eventId: '01a19700-0000-7000-8000-000000000105',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.sqli',
-        severity: 'CRITICAL',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.105',
-        sourceSystem: 'sensor:canary:db',
-        metadata: {
-          siteId,
-          requestUri: '/admin?user=canary',
-          serverVerified: true,
-          evidenceProvenance: 'TRUSTED_SERVER_COMPONENT',
-          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
-        },
-      };
-
-      const parsedCanary = normalizeWebTelemetry(canaryEvent, { isTrustedServerComponent: true });
-      expect(parsedCanary.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
-      expect(parsedCanary.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
-      expect(parsedCanary.corroboratingSignals).toContain('CANARY_TOKEN_BREACH');
-
-      // B. Server-verified DB syntax error from authenticated collector
+    it('accepts server-verified DB syntax error from authenticated collector', () => {
       const dbErrorEvent: SecurityEvent = {
         eventId: '01a19700-0000-7000-8000-000000000106',
         orgId,
@@ -1445,8 +1580,6 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
           siteId,
           requestUri: "/items?id=1'",
           httpStatus: 500,
-          serverVerified: true,
-          evidenceProvenance: 'AUTHENTICATED_COLLECTOR',
           errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
         },
       };
