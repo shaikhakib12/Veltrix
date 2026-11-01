@@ -1,16 +1,99 @@
 import type { Request, Response, NextFunction } from 'express';
+import { createHash } from 'node:crypto';
 import type { ApiErrorResponse } from '@veltrix/shared';
 import { getAuthProvider } from '../auth/index.js';
+import { getStorage } from '../storage/index.js';
 
 export async function authenticate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const apiKeyHeader = req.headers['x-api-key'] || req.headers['x-integration-key'];
   const authHeader = req.headers.authorization;
 
+  // Case 1: Integration API Key Authentication (TASK-603)
+  if (apiKeyHeader) {
+    const rawApiKey = Array.isArray(apiKeyHeader) ? apiKeyHeader[0] : apiKeyHeader;
+    if (!rawApiKey || typeof rawApiKey !== 'string' || !rawApiKey.trim()) {
+      const errorResponse: ApiErrorResponse = {
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED_INVALID_API_KEY',
+          message: 'Supplied x-api-key is empty or invalid.',
+        },
+      };
+      res.status(401).json(errorResponse);
+      return;
+    }
+
+    const apiKeyHash = createHash('sha256').update(rawApiKey.trim()).digest('hex');
+    const storage = getStorage();
+    const integration = await storage.getIntegrationByApiKeyHash(apiKeyHash);
+
+    if (!integration) {
+      const errorResponse: ApiErrorResponse = {
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED_INVALID_API_KEY',
+          message: 'The supplied API key was not found or is invalid.',
+        },
+      };
+      res.status(401).json(errorResponse);
+      return;
+    }
+
+    if (integration.status === 'REVOKED') {
+      const errorResponse: ApiErrorResponse = {
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED_REVOKED_API_KEY',
+          message: `The integration '${integration.name}' (${integration.integrationId}) has been revoked.`,
+        },
+      };
+      res.status(401).json(errorResponse);
+      return;
+    }
+
+    if (integration.status === 'INACTIVE') {
+      const errorResponse: ApiErrorResponse = {
+        success: false,
+        error: {
+          code: 'FORBIDDEN_INACTIVE_INTEGRATION',
+          message: `The integration '${integration.name}' is inactive.`,
+        },
+      };
+      res.status(403).json(errorResponse);
+      return;
+    }
+
+    // Attach user and tenant context to Request
+    req.user = {
+      userId: integration.integrationId,
+      username: integration.name,
+      email: `${integration.integrationId}@integration.veltrix.local`,
+      role: 'SECURITY_ANALYST',
+      orgId: integration.orgId,
+    };
+    req.tenantOrgId = integration.orgId;
+    req.integration = integration;
+
+    // Asynchronously update lastSeenAt
+    storage
+      .updateIntegration(integration.orgId, integration.integrationId, {
+        lastSeenAt: new Date().toISOString(),
+      })
+      .catch((err) => {
+        console.error('[VELTRIX-AUTH] Failed to update integration lastSeenAt:', err);
+      });
+
+    next();
+    return;
+  }
+
+  // Case 2: Bearer Token Authentication (Cognito / JWT)
   if (!authHeader) {
     const errorResponse: ApiErrorResponse = {
       success: false,
       error: {
         code: 'UNAUTHORIZED_MISSING_TOKEN',
-        message: 'Authorization header is missing. Bearer token is required.',
+        message: 'Authentication required. Supply Authorization header with Bearer token or x-api-key header.',
       },
     };
     res.status(401).json(errorResponse);

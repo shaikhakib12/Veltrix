@@ -6,6 +6,12 @@ import {
   INCIDENT_STATUSES,
   RESPONSE_ACTION_TYPES,
   USER_ROLES,
+  WEBSITE_ENVIRONMENTS,
+  WEBSITE_STATUSES,
+  RISK_TIERS,
+  VERIFICATION_METHODS,
+  INTEGRATION_TYPES,
+  INTEGRATION_STATUSES,
 } from '../constants/index.js';
 
 export const SeveritySchema = z.enum(SEVERITIES);
@@ -262,4 +268,47 @@ export const ThreatIndicatorUpdateSchema = z.object({
   isFlagged: z.boolean().optional(),
   expiresAt: z.string().datetime({ offset: true }).optional(),
   metadata: z.record(z.unknown()).optional(),
+}).strict();
+
+export const WebsiteEnvironmentSchema = z.enum(WEBSITE_ENVIRONMENTS);
+export const WebsiteStatusSchema = z.enum(WEBSITE_STATUSES);
+export const RiskTierSchema = z.enum(RISK_TIERS);
+export const VerificationMethodSchema = z.enum(VERIFICATION_METHODS);
+export const IntegrationTypeSchema = z.enum(INTEGRATION_TYPES);
+export const IntegrationStatusSchema = z.enum(INTEGRATION_STATUSES);
+
+export const FQDN_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
+
+export const WebsiteCreateRequestSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters').max(100, 'Name must be at most 100 characters'),
+  primaryDomain: z.string().trim().toLowerCase().regex(FQDN_REGEX, 'Must be a valid FQDN domain (e.g. app.example.com)'),
+  approvedSubdomains: z.array(z.string().trim().toLowerCase().regex(FQDN_REGEX, 'Invalid subdomain FQDN')).default([]),
+  environment: WebsiteEnvironmentSchema.default('PRODUCTION'),
+  riskTier: RiskTierSchema.default('MEDIUM'),
+  tags: z.array(z.string().min(1).max(50)).default([]),
+}).strict();
+
+export const WebsiteUpdateRequestSchema = z.object({
+  name: z.string().min(2).max(100).optional(),
+  approvedSubdomains: z.array(z.string().trim().toLowerCase().regex(FQDN_REGEX, 'Invalid subdomain FQDN')).optional(),
+  environment: WebsiteEnvironmentSchema.optional(),
+  riskTier: RiskTierSchema.optional(),
+  tags: z.array(z.string().min(1).max(50)).optional(),
+}).strict();
+
+export const DomainVerifyRequestSchema = z.object({
+  method: VerificationMethodSchema,
+}).strict();
+
+export const IntegrationCreateRequestSchema = z.object({
+  name: z.string().min(2, 'Name must be at least 2 characters').max(100, 'Name must be at most 100 characters'),
+  type: IntegrationTypeSchema,
+  siteId: z.string().optional(),
+  description: z.string().max(500).optional(),
+}).strict();
+
+export const IntegrationUpdateRequestSchema = z.object({
+  name: z.string().min(2).max(100).optional(),
+  status: IntegrationStatusSchema.optional(),
+  description: z.string().max(500).optional(),
 }).strict();
