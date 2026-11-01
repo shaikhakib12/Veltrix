@@ -37,6 +37,19 @@ export type EvidenceProvenance =
   | 'UNTRUSTED_CLIENT';
 
 /**
+ * Independently captured and verified response evidence payload.
+ * Encapsulates response bodies, error messages, and WAF interventions captured
+ * by an authenticated server component, separate from client-controlled metadata.
+ */
+export interface VerifiedResponseEvidence {
+  responseBody?: string;
+  errorMessage?: string;
+  wafAction?: 'ALLOW' | 'BLOCK' | 'CHALLENGE' | 'LOG';
+  wafRuleId?: string;
+  capturedAt?: string;
+}
+
+/**
  * Internal-only trusted evidence context used by approved server components
  * (such as active verification workers, canary probes, and internal audit jobs).
  * External clients, SDK users, webhooks, and integrations cannot construct this.
@@ -47,6 +60,8 @@ export interface InternalTrustedEvidenceContext {
   verifierIdentity: string;
   verificationTimestamp: string;
   evidenceReferences: string[];
+  authoritySignature?: string;
+  verifiedResponseEvidence?: VerifiedResponseEvidence;
 }
 
 export interface WebSecurityEventMetadata {

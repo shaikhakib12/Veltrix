@@ -4,76 +4,48 @@ import type {
   WebSecurityEventMetadata,
   EvidenceProvenance,
   InternalTrustedEvidenceContext,
+  VerifiedResponseEvidence,
 } from '@veltrix/shared';
+import {
+  InternalEvidenceAuthority,
+  getDefaultInternalEvidenceAuthority,
+  resetDefaultInternalEvidenceAuthorityForTesting,
+  APPROVED_INTERNAL_VERIFIERS,
+  ALLOWED_VERIFIED_SIGNALS,
+  type ApprovedVerifierIdentity,
+  type AllowedVerifiedSignal,
+  type CreateEvidenceContextParams,
+} from './evidence-authority.js';
 
-export { EvidenceProvenance, InternalTrustedEvidenceContext };
+export {
+  EvidenceProvenance,
+  InternalTrustedEvidenceContext,
+  VerifiedResponseEvidence,
+  InternalEvidenceAuthority,
+  getDefaultInternalEvidenceAuthority,
+  resetDefaultInternalEvidenceAuthorityForTesting,
+  APPROVED_INTERNAL_VERIFIERS,
+  ALLOWED_VERIFIED_SIGNALS,
+  ApprovedVerifierIdentity,
+  AllowedVerifiedSignal,
+};
 
 /**
- * Factory for creating an internal-only trusted evidence context.
- * Only authenticated, approved internal server-side components may construct this.
- * External SDK users, webhooks, API clients and generic integrations cannot construct this.
+ * Convenience helper delegating to the process-wide InternalEvidenceAuthority.
+ * Strictly intended for internal server-side components.
  */
-export function createInternalTrustedEvidenceContext(params: {
-  provenance: 'TRUSTED_SERVER_COMPONENT' | 'AUTHENTICATED_COLLECTOR';
-  verifierIdentity: string;
-  verifiedSignalIdentifiers?: string[];
-  evidenceReferences?: string[];
-  verificationTimestamp?: string;
-}): InternalTrustedEvidenceContext {
-  if (
-    params.provenance !== 'TRUSTED_SERVER_COMPONENT' &&
-    params.provenance !== 'AUTHENTICATED_COLLECTOR'
-  ) {
-    throw new Error(`Invalid trusted provenance: ${params.provenance}`);
-  }
-  if (!params.verifierIdentity || typeof params.verifierIdentity !== 'string') {
-    throw new Error('verifierIdentity is required for internal trusted evidence context');
-  }
-
-  return {
-    verifiedProvenance: params.provenance,
-    verifiedSignalIdentifiers: Array.isArray(params.verifiedSignalIdentifiers)
-      ? [...params.verifiedSignalIdentifiers]
-      : [],
-    verifierIdentity: params.verifierIdentity,
-    verificationTimestamp: params.verificationTimestamp || new Date().toISOString(),
-    evidenceReferences: Array.isArray(params.evidenceReferences)
-      ? [...params.evidenceReferences]
-      : [],
-  };
+export function createInternalTrustedEvidenceContext(
+  params: CreateEvidenceContextParams
+): InternalTrustedEvidenceContext {
+  return getDefaultInternalEvidenceAuthority().createContext(params);
 }
 
 export interface WebTelemetryContext {
   /**
-   * Internal-only trusted evidence context containing explicit verifier identity,
-   * verified signal identifiers, timestamp, and evidence references.
+   * Cryptographically signed, internal-only trusted evidence context issued by
+   * an authorized InternalEvidenceAuthority.
    */
   trustedContext?: InternalTrustedEvidenceContext;
-  /**
-   * Explicitly indicates caller is an authenticated, trusted internal server-side component
-   * (e.g. internal canary sensor, trusted core scanner, audit engine).
-   */
-  isTrustedServerComponent?: boolean;
-  /**
-   * Explicitly sets trusted provenance tier.
-   */
-  trustedProvenance?: EvidenceProvenance;
-  /**
-   * Server-side component or verifier identifier.
-   */
-  verifiedBy?: string;
-  /**
-   * Explicit verified signal identifiers attested by an internal server component.
-   */
-  verifiedSignals?: string[];
-  /**
-   * Evidence references (e.g. canary token IDs, raw audit log references).
-   */
-  evidenceReferences?: string[];
-  /**
-   * Verification timestamp (ISO 8601 UTC).
-   */
-  verificationTimestamp?: string;
 }
 
 export interface NormalizedWebTelemetry {
@@ -245,16 +217,17 @@ export function extractQueryParams(uri: string): {
  */
 export function normalizeWebTelemetry(
   event: SecurityEvent,
-  context?: WebTelemetryContext
+  context?: WebTelemetryContext,
+  authority?: InternalEvidenceAuthority
 ): NormalizedWebTelemetry {
   const meta = (event.metadata || {}) as WebSecurityEventMetadata;
+  const auth = authority || getDefaultInternalEvidenceAuthority();
 
   const rawUri = typeof meta.requestUri === 'string' ? meta.requestUri : '/';
   const sanitizedRawUri = sanitizeUriString(rawUri);
   const httpMethod = (typeof meta.httpMethod === 'string' ? meta.httpMethod : 'GET').toUpperCase();
   const httpStatus = typeof meta.httpStatus === 'number' ? meta.httpStatus : undefined;
   const userAgent = typeof meta.userAgent === 'string' ? meta.userAgent : undefined;
-  const wafAction = meta.wafAction;
 
   // Extract path without query parameters and decode safely
   const qIdx = rawUri.indexOf('?');
@@ -277,47 +250,28 @@ export function normalizeWebTelemetry(
 
   // 1. Establish Evidence Provenance Model
   // Zero-Trust Rule: All externally submitted telemetry is UNTRUSTED_CLIENT by default.
-  // Provenance can ONLY be established by out-of-band server context, NEVER from client metadata.
-  // Metadata fields (serverVerified, evidenceProvenance, trustedProvenance, verifiedSignals)
+  // Provenance can ONLY be established by a runtime-verified internal capability issued
+  // by an authorized InternalEvidenceAuthority (Finding 1).
+  // All legacy trust flags (isTrustedServerComponent, trustedProvenance) have been removed.
+  // Client metadata (serverVerified, evidenceProvenance, trustedProvenance, verifiedSignals)
   // are untrusted client claims and must never establish trust by themselves (Finding B).
   let evidenceProvenance: EvidenceProvenance = 'UNTRUSTED_CLIENT';
   let activeTrustedContext: InternalTrustedEvidenceContext | undefined;
 
   if (context?.trustedContext) {
-    evidenceProvenance = context.trustedContext.verifiedProvenance;
-    activeTrustedContext = context.trustedContext;
+    if (auth.verifyContext(context.trustedContext)) {
+      evidenceProvenance = context.trustedContext.verifiedProvenance;
+      activeTrustedContext = context.trustedContext;
+    } else {
+      console.warn('[VELTRIX-SECURITY] Rejected forged or invalid trustedContext in WebTelemetryContext');
+    }
   } else if (event.trustedEvidenceContext) {
-    evidenceProvenance = event.trustedEvidenceContext.verifiedProvenance;
-    activeTrustedContext = event.trustedEvidenceContext;
-  } else if (
-    context?.isTrustedServerComponent === true ||
-    context?.trustedProvenance === 'TRUSTED_SERVER_COMPONENT'
-  ) {
-    evidenceProvenance = 'TRUSTED_SERVER_COMPONENT';
-    activeTrustedContext = {
-      verifiedProvenance: 'TRUSTED_SERVER_COMPONENT',
-      verifiedSignalIdentifiers: Array.isArray(context.verifiedSignals)
-        ? [...context.verifiedSignals]
-        : [],
-      verifierIdentity: context.verifiedBy || 'internal-trusted-component',
-      verificationTimestamp: context.verificationTimestamp || new Date().toISOString(),
-      evidenceReferences: Array.isArray(context.evidenceReferences)
-        ? [...context.evidenceReferences]
-        : [],
-    };
-  } else if (context?.trustedProvenance === 'AUTHENTICATED_COLLECTOR') {
-    evidenceProvenance = 'AUTHENTICATED_COLLECTOR';
-    activeTrustedContext = {
-      verifiedProvenance: 'AUTHENTICATED_COLLECTOR',
-      verifiedSignalIdentifiers: Array.isArray(context.verifiedSignals)
-        ? [...context.verifiedSignals]
-        : [],
-      verifierIdentity: context.verifiedBy || 'authenticated-collector',
-      verificationTimestamp: context.verificationTimestamp || new Date().toISOString(),
-      evidenceReferences: Array.isArray(context.evidenceReferences)
-        ? [...context.evidenceReferences]
-        : [],
-    };
+    if (auth.verifyContext(event.trustedEvidenceContext)) {
+      evidenceProvenance = event.trustedEvidenceContext.verifiedProvenance;
+      activeTrustedContext = event.trustedEvidenceContext;
+    } else {
+      console.warn('[VELTRIX-SECURITY] Rejected forged or unverified event.trustedEvidenceContext');
+    }
   }
 
   // Client-supplied event classification check
@@ -327,11 +281,7 @@ export function normalizeWebTelemetry(
     evidenceProvenance === 'UNTRUSTED_CLIENT'
   );
 
-  // 2. Separate client-provided signals from server-verified evidence (Finding A & B)
-  // Finding A: Client-provided corroboratingSignals must NEVER become trusted evidence,
-  // even when the parser receives a trusted server-side context.
-  // Finding B: Metadata fields like verifiedSignals, serverVerified, evidenceProvenance
-  // must never establish trust by themselves.
+  // 2. Separate client-provided signals from server-verified evidence (Finding A, B & 2)
   const untrustedClientSignals: string[] = [];
 
   if (Array.isArray(meta.corroboratingSignals)) {
@@ -351,77 +301,93 @@ export function normalizeWebTelemetry(
     }
   }
 
+  // Finding 2: Client-Controlled Response Evidence
+  // Invariant: Response samples and error messages submitted in client metadata are untrusted claims.
+  // They must NEVER be promoted into trusted evidence, even under trusted provenance!
+  const clientResponseText = typeof meta.responseSample === 'string' ? meta.responseSample : '';
+  const clientErrorText = typeof meta.errorMessage === 'string' ? meta.errorMessage : '';
+  const clientCombined = `${clientResponseText} ${clientErrorText}`;
+
+  for (const pat of DB_SYNTAX_ERROR_PATTERNS) {
+    if (pat.test(clientCombined)) {
+      if (!untrustedClientSignals.includes('CLIENT_CLAIMED_DB_SYNTAX_ERROR')) {
+        untrustedClientSignals.push('CLIENT_CLAIMED_DB_SYNTAX_ERROR');
+      }
+      break;
+    }
+  }
+  for (const pat of SYSTEM_FILE_LEAKAGE_PATTERNS) {
+    if (pat.test(clientCombined)) {
+      if (!untrustedClientSignals.includes('CLIENT_CLAIMED_DATA_LEAKAGE')) {
+        untrustedClientSignals.push('CLIENT_CLAIMED_DATA_LEAKAGE');
+      }
+      break;
+    }
+  }
+
+  // Finding 3: WAF Action Provenance
+  // Invariant: Client-submitted WAF action is an unverified claim.
+  if (meta.wafAction) {
+    const claimedWafSignal = `CLIENT_CLAIMED_WAF_${meta.wafAction}`;
+    if (!untrustedClientSignals.includes(claimedWafSignal)) {
+      untrustedClientSignals.push(claimedWafSignal);
+    }
+  }
+
   // Trusted corroborating signals start EMPTY
   const trustedCorroboratingSignals: string[] = [];
+  let effectiveWafAction: 'ALLOW' | 'BLOCK' | 'CHALLENGE' | 'LOG' | undefined;
 
-  // ONLY verified signals explicitly attested by the internal server context are added:
+  // ONLY verified signals explicitly attested by the internal server authority are added:
   if (activeTrustedContext) {
     for (const s of activeTrustedContext.verifiedSignalIdentifiers) {
       if (typeof s === 'string' && !trustedCorroboratingSignals.includes(s)) {
         trustedCorroboratingSignals.push(s);
       }
     }
-  }
 
-  // CRITICAL INVARIANT (Finding A): Client-provided signals (untrustedClientSignals) are NEVER copied
-  // or promoted into trustedCorroboratingSignals under any circumstances, even when activeTrustedContext
-  // or isTrustedServerComponent is true!
+    // Inspect separate internal verified response evidence envelope (Finding 2 & 3)
+    const verifiedEnv = activeTrustedContext.verifiedResponseEvidence;
+    if (verifiedEnv) {
+      const verifiedResponseText = typeof verifiedEnv.responseBody === 'string' ? verifiedEnv.responseBody : '';
+      const verifiedErrorText = typeof verifiedEnv.errorMessage === 'string' ? verifiedEnv.errorMessage : '';
+      const verifiedCombined = `${verifiedResponseText} ${verifiedErrorText}`;
 
-  // 3. Inspect application response and error messages with strict provenance validation (Rule 6)
-  // Rule 6: Validate provenance of WAF actions, response samples, error messages before confidence escalation.
-  // Forged database errors cannot independently establish exploitation.
-  const responseText = typeof meta.responseSample === 'string' ? meta.responseSample : '';
-  const errorText = typeof meta.errorMessage === 'string' ? meta.errorMessage : '';
-  const combinedInspection = `${responseText} ${errorText}`;
-
-  if (
-    evidenceProvenance === 'TRUSTED_SERVER_COMPONENT' ||
-    evidenceProvenance === 'AUTHENTICATED_COLLECTOR'
-  ) {
-    for (const pat of DB_SYNTAX_ERROR_PATTERNS) {
-      if (pat.test(combinedInspection)) {
-        if (!trustedCorroboratingSignals.includes('UNHANDLED_DB_SYNTAX_ERROR')) {
-          trustedCorroboratingSignals.push('UNHANDLED_DB_SYNTAX_ERROR');
-        }
-        break;
-      }
-    }
-
-    if (evidenceProvenance === 'TRUSTED_SERVER_COMPONENT') {
-      for (const pat of SYSTEM_FILE_LEAKAGE_PATTERNS) {
-        if (pat.test(combinedInspection)) {
-          if (!trustedCorroboratingSignals.includes('DATA_LEAKAGE_INDICATOR')) {
-            trustedCorroboratingSignals.push('DATA_LEAKAGE_INDICATOR');
+      for (const pat of DB_SYNTAX_ERROR_PATTERNS) {
+        if (pat.test(verifiedCombined)) {
+          if (!trustedCorroboratingSignals.includes('UNHANDLED_DB_SYNTAX_ERROR')) {
+            trustedCorroboratingSignals.push('UNHANDLED_DB_SYNTAX_ERROR');
           }
           break;
         }
       }
-    }
-  } else {
-    // Untrusted client: if client sent DB error or leakage strings, record as untrusted client claims only
-    for (const pat of DB_SYNTAX_ERROR_PATTERNS) {
-      if (pat.test(combinedInspection)) {
-        if (!untrustedClientSignals.includes('CLIENT_CLAIMED_DB_SYNTAX_ERROR')) {
-          untrustedClientSignals.push('CLIENT_CLAIMED_DB_SYNTAX_ERROR');
+
+      if (evidenceProvenance === 'TRUSTED_SERVER_COMPONENT') {
+        for (const pat of SYSTEM_FILE_LEAKAGE_PATTERNS) {
+          if (pat.test(verifiedCombined)) {
+            if (!trustedCorroboratingSignals.includes('DATA_LEAKAGE_INDICATOR')) {
+              trustedCorroboratingSignals.push('DATA_LEAKAGE_INDICATOR');
+            }
+            break;
+          }
         }
-        break;
       }
-    }
-    for (const pat of SYSTEM_FILE_LEAKAGE_PATTERNS) {
-      if (pat.test(combinedInspection)) {
-        if (!untrustedClientSignals.includes('CLIENT_CLAIMED_DATA_LEAKAGE')) {
-          untrustedClientSignals.push('CLIENT_CLAIMED_DATA_LEAKAGE');
+
+      // Authenticated WAF action from verified response envelope (Finding 3)
+      if (verifiedEnv.wafAction) {
+        effectiveWafAction = verifiedEnv.wafAction;
+        if (verifiedEnv.wafAction === 'BLOCK' || verifiedEnv.wafAction === 'CHALLENGE') {
+          if (!trustedCorroboratingSignals.includes('WAF_INTERVENTION')) {
+            trustedCorroboratingSignals.push('WAF_INTERVENTION');
+          }
         }
-        break;
       }
     }
   }
 
-  // 4. Validate WAF action provenance
-  const isWafVerified =
-    evidenceProvenance === 'TRUSTED_SERVER_COMPONENT' ||
-    evidenceProvenance === 'AUTHENTICATED_COLLECTOR';
-  const effectiveWafAction = isWafVerified ? wafAction : undefined;
+  // CRITICAL INVARIANT (Finding A): Client-provided signals (untrustedClientSignals) are NEVER copied
+  // or promoted into trustedCorroboratingSignals under any circumstances, even when activeTrustedContext
+  // is present!
 
   // 5. Determine Confidence Tier:
   // Rule 5: Only allow CONFIRMED_EXPLOITATION when evidence has been independently verified
@@ -446,9 +412,11 @@ export function normalizeWebTelemetry(
   } else if (
     effectiveWafAction === 'BLOCK' ||
     effectiveWafAction === 'CHALLENGE' ||
+    trustedCorroboratingSignals.includes('WAF_INTERVENTION') ||
+    trustedCorroboratingSignals.includes('AUTHENTICATED_WAF_BLOCK') ||
+    trustedCorroboratingSignals.includes('AUTHENTICATED_WAF_CHALLENGE') ||
     httpStatus === 403 ||
-    httpStatus === 406 ||
-    trustedCorroboratingSignals.includes('WAF_INTERVENTION')
+    httpStatus === 406
   ) {
     confidenceLevel = 'BLOCKED_ATTEMPT';
   } else {
@@ -473,7 +441,7 @@ export function normalizeWebTelemetry(
     httpStatus,
     responseTimeMs: meta.responseTimeMs,
     userAgent,
-    wafAction: effectiveWafAction || (wafAction && !isWafVerified ? wafAction : undefined),
+    wafAction: effectiveWafAction,
     isBot: meta.isBot,
     confidenceLevel,
     corroboratingSignals: trustedCorroboratingSignals,

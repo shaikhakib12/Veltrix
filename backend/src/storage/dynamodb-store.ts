@@ -373,7 +373,10 @@ export class DynamoDBStore implements StorageInterface {
     });
 
     const response = await this.executeWithRetry(() => this.docClient.send(command));
-    const items = (response.Items || []) as SecurityEvent[];
+    const items = (response.Items || []).map((item) => {
+      const { PK: _pk, SK: _sk, GSI1_PK: _g1p, GSI1_SK: _g1s, GSI2_PK: _g2p, GSI2_SK: _g2s, trustedEvidenceContext: _discard, ...event } = item as Record<string, unknown>;
+      return event as unknown as SecurityEvent;
+    });
     const filterHash = computeFilterHash(options);
     const nextCursor = response.LastEvaluatedKey
       ? signCursor({
@@ -403,7 +406,7 @@ export class DynamoDBStore implements StorageInterface {
         );
         if (pointerResult.Item) {
           const item = pointerResult.Item as SecurityEvent & Record<string, unknown>;
-          const { PK, SK, GSI1_PK, GSI1_SK, GSI2_PK, GSI2_SK, ...event } = item;
+          const { PK, SK, GSI1_PK, GSI1_SK, GSI2_PK, GSI2_SK, trustedEvidenceContext: _discard, ...event } = item;
           return event as unknown as SecurityEvent;
         }
       } catch {
@@ -444,7 +447,10 @@ export class DynamoDBStore implements StorageInterface {
             })
           )
         );
-        const items = (queryRes.Items || []) as SecurityEvent[];
+        const items = (queryRes.Items || []).map((it) => {
+          const { PK, SK, GSI1_PK, GSI1_SK, GSI2_PK, GSI2_SK, trustedEvidenceContext: _discard, ...event } = it as Record<string, unknown>;
+          return event as unknown as SecurityEvent;
+        });
         if (items.length > 0 && items[0]) {
           return items[0];
         }

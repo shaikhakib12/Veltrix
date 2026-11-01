@@ -15,11 +15,17 @@ import {
   Rule104BotActivity,
   Rule105AuthFlowTampering,
 } from '../src/detection/rules/web/index.js';
-import { normalizeWebTelemetry, createInternalTrustedEvidenceContext } from '../src/detection/web-parser.js';
+import {
+  normalizeWebTelemetry,
+  createInternalTrustedEvidenceContext,
+  InternalEvidenceAuthority,
+  getDefaultInternalEvidenceAuthority,
+} from '../src/detection/web-parser.js';
 import { JwtService } from '../src/auth/jwt-service.js';
 import { LocalAuthProvider } from '../src/auth/local-auth-provider.js';
 import { resetAuthProviderForTesting } from '../src/auth/index.js';
 import { resetStorageForTesting } from '../src/storage/index.js';
+import { EventService } from '../src/services/event-service.js';
 
 describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-701 to TASK-707)', () => {
   let storage: MemoryStore;
@@ -332,7 +338,10 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         sourceSystem: 'sdk:nodejs:express',
         trustedEvidenceContext: createInternalTrustedEvidenceContext({
           provenance: 'AUTHENTICATED_COLLECTOR',
-          verifierIdentity: 'collector:nginx',
+          verifierIdentity: 'collector:nginx:authenticated',
+          verifiedResponseEvidence: {
+            errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
+          },
         }),
         metadata: {
           siteId,
@@ -555,6 +564,9 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         trustedEvidenceContext: createInternalTrustedEvidenceContext({
           provenance: 'TRUSTED_SERVER_COMPONENT',
           verifierIdentity: 'sensor:canary:files',
+          verifiedResponseEvidence: {
+            responseBody: 'root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin',
+          },
         }),
         metadata: {
           siteId,
@@ -1282,327 +1294,447 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
     });
   });
 
-  describe('10. PR #10 Final Security Hardening: Evidence Provenance & Internal Trust Boundary', () => {
-    // Test 1: Forged client CANARY_TOKEN_BREACH
-    it('1. rejects client-submitted CANARY_TOKEN_BREACH and does not escalate to CONFIRMED_EXPLOITATION', () => {
-      const parsed = normalizeWebTelemetry({
-        eventId: '01a19700-0000-7000-8000-000000000101',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.sqli',
-        severity: 'HIGH',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.101',
-        sourceSystem: 'client:external',
-        metadata: {
-          siteId,
-          requestUri: "/items?id=1' OR 1=1--",
-          httpStatus: 200,
-          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
-        },
-      });
+  describe('10. PR #10 Additional Trust-Boundary Hardening (Findings 1 - 4)', () => {
+    const authority = getDefaultInternalEvidenceAuthority();
 
-      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
-      expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
-      expect(parsed.untrustedClientSignals).toContain('CANARY_TOKEN_BREACH');
-      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
-      expect(parsed.isClientClassificationUntrusted).toBe(true);
-    });
+    // Required Test 1: Unauthenticated caller attempting to construct trusted context
+    it('1. unauthenticated caller attempting to construct trusted context (unverified signature or missing authority) is rejected', () => {
+      const fabricatedContext = {
+        verifiedProvenance: 'TRUSTED_SERVER_COMPONENT' as const,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        verifierIdentity: 'canary-service:v1',
+        verificationTimestamp: new Date().toISOString(),
+        evidenceReferences: ['fake-ref-001'],
+        authoritySignature: 'deadbeefcafebabe0123456789abcdef0123456789abcdef0123456789abcdef',
+      };
 
-    // Test 2: Forged client DATA_LEAKAGE_INDICATOR
-    it('2. rejects client-submitted DATA_LEAKAGE_INDICATOR and does not escalate to CONFIRMED_EXPLOITATION', () => {
-      const parsed = normalizeWebTelemetry({
-        eventId: '01a19700-0000-7000-8000-000000000102',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.traversal',
-        severity: 'HIGH',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.102',
-        sourceSystem: 'sdk:nodejs:express',
-        metadata: {
-          siteId,
-          requestUri: '/view?file=../../etc/passwd',
-          httpStatus: 200,
-          corroboratingSignals: ['DATA_LEAKAGE_INDICATOR'],
-        },
-      });
-
-      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
-      expect(parsed.corroboratingSignals).not.toContain('DATA_LEAKAGE_INDICATOR');
-      expect(parsed.untrustedClientSignals).toContain('DATA_LEAKAGE_INDICATOR');
-      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
-    });
-
-    // Test 3: Trusted context combined with forged client signals (MOST IMPORTANT INVARIANT)
-    it('3. trusted context combined with forged client signals NEVER promotes client signals into trusted evidence', () => {
       const parsed = normalizeWebTelemetry(
         {
-          eventId: '01a19700-0000-7000-8000-000000000120',
+          eventId: '01a19700-0000-7000-8000-000000000201',
           orgId,
           timestamp: new Date().toISOString(),
           eventType: 'web.attack.sqli',
           severity: 'HIGH',
           category: 'NETWORK',
-          sourceIp: '198.51.100.120',
-          sourceSystem: 'sdk:nodejs:express',
+          sourceIp: '198.51.100.201',
+          sourceSystem: 'client:external',
+          metadata: { siteId, requestUri: "/items?id=1'" },
+        },
+        { trustedContext: fabricatedContext }
+      );
+
+      // Fabrication fails runtime authority verification
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.corroboratingSignals).toHaveLength(0);
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+    });
+
+    // Required Test 2: Legacy isTrustedServerComponent: true bypass
+    it('2. legacy isTrustedServerComponent: true bypass is blocked and defaults to UNTRUSTED_CLIENT', () => {
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000202',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'CRITICAL',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.202',
+          sourceSystem: 'sensor:canary:db',
           metadata: {
             siteId,
-            requestUri: "/profile?user=admin' OR 1=1--",
-            httpStatus: 200,
-            corroboratingSignals: ['CANARY_TOKEN_BREACH', 'DATA_LEAKAGE_INDICATOR', 'UNAUTHORIZED_PRIVILEGE_MUTATION'],
+            requestUri: "/items?id=1'",
+            corroboratingSignals: ['CANARY_TOKEN_BREACH'],
           },
         },
         {
+          // Legacy flag passed by caller
           isTrustedServerComponent: true,
-          verifiedBy: 'internal-audit-worker:core',
-        }
+        } as any
       );
 
-      // Invariant check: Although execution context is trusted server component,
-      // client-submitted corroboratingSignals MUST NOT be promoted into trusted corroboratingSignals!
-      expect(parsed.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
-      expect(parsed.corroboratingSignals).toHaveLength(0);
-      expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
-      expect(parsed.corroboratingSignals).not.toContain('DATA_LEAKAGE_INDICATOR');
-      expect(parsed.corroboratingSignals).not.toContain('UNAUTHORIZED_PRIVILEGE_MUTATION');
-      expect(parsed.untrustedClientSignals).toEqual(
-        expect.arrayContaining(['CANARY_TOKEN_BREACH', 'DATA_LEAKAGE_INDICATOR', 'UNAUTHORIZED_PRIVILEGE_MUTATION'])
-      );
-      // Without trusted server verified signals, confidence remains SUSPICIOUS_ATTEMPT
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
-    });
-
-    // Test 4: Forged client verifiedSignals
-    it('4. isolates forged client verifiedSignals in untrusted claims and never promotes them to trusted evidence', () => {
-      const parsed = normalizeWebTelemetry({
-        eventId: '01a19700-0000-7000-8000-000000000121',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.sqli',
-        severity: 'CRITICAL',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.121',
-        sourceSystem: 'client:generic',
-        metadata: {
-          siteId,
-          requestUri: "/items?id=1'",
-          verifiedSignals: ['CANARY_TOKEN_BREACH', 'UNAUTHORIZED_PRIVILEGE_MUTATION'],
-        },
-      });
-
       expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
-      expect(parsed.corroboratingSignals).toHaveLength(0);
-      expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
-      expect(parsed.untrustedClientSignals).toEqual(
-        expect.arrayContaining(['CANARY_TOKEN_BREACH', 'UNAUTHORIZED_PRIVILEGE_MUTATION'])
-      );
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
-    });
-
-    // Test 5: Client-submitted serverVerified: true
-    it('5. client-submitted serverVerified: true never establishes trust', () => {
-      const parsed = normalizeWebTelemetry({
-        eventId: '01a19700-0000-7000-8000-000000000122',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.sqli',
-        severity: 'HIGH',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.122',
-        sourceSystem: 'client:webhook',
-        metadata: {
-          siteId,
-          requestUri: "/items?id=1'",
-          serverVerified: true,
-          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
-        },
-      });
-
-      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
-      expect(parsed.corroboratingSignals).toHaveLength(0);
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
-    });
-
-    // Test 6: Client-declared TRUSTED_SERVER_COMPONENT
-    it('6. client-declared TRUSTED_SERVER_COMPONENT in metadata never establishes trust', () => {
-      const parsed = normalizeWebTelemetry({
-        eventId: '01a19700-0000-7000-8000-000000000123',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.traversal',
-        severity: 'HIGH',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.123',
-        sourceSystem: 'client:integration',
-        metadata: {
-          siteId,
-          requestUri: '/view?file=../../etc/shadow',
-          serverVerified: true,
-          evidenceProvenance: 'TRUSTED_SERVER_COMPONENT',
-          trustedProvenance: true,
-          corroboratingSignals: ['DATA_LEAKAGE_INDICATOR'],
-        },
-      });
-
-      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
-      expect(parsed.corroboratingSignals).toHaveLength(0);
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
-    });
-
-    // Test 7: sourceSystem impersonation
-    it('7. prohibits arbitrary integration clients from impersonating trusted collectors via sourceSystem', () => {
-      const parsed = normalizeWebTelemetry({
-        eventId: '01a19700-0000-7000-8000-000000000110',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.sqli',
-        severity: 'HIGH',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.110',
-        sourceSystem: 'sensor:canary:core', // spoofed trusted collector name!
-        metadata: {
-          siteId,
-          requestUri: "/items?id=1'",
-          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
-        },
-      });
-
-      // Even though sourceSystem is 'sensor:canary:core', without out-of-band server verification it remains UNTRUSTED_CLIENT
-      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
       expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
       expect(parsed.untrustedClientSignals).toContain('CANARY_TOKEN_BREACH');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
     });
 
-    // Test 8: Genuine independently verified server evidence
-    it('8. accepts genuine independently verified server evidence via InternalTrustedEvidenceContext', () => {
-      const canaryEvent: SecurityEvent = {
-        eventId: '01a19700-0000-7000-8000-000000000105',
+    // Required Test 3: Legacy trustedProvenance bypass
+    it('3. legacy trustedProvenance bypass is blocked and defaults to UNTRUSTED_CLIENT', () => {
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000203',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.203',
+          sourceSystem: 'collector:nginx',
+          metadata: {
+            siteId,
+            requestUri: "/items?id=1'",
+            errorMessage: 'syntax error near SELECT',
+          },
+        },
+        {
+          // Legacy provenance passed by caller
+          trustedProvenance: 'AUTHENTICATED_COLLECTOR',
+        } as any
+      );
+
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.corroboratingSignals).toHaveLength(0);
+      expect(parsed.untrustedClientSignals).toContain('CLIENT_CLAIMED_DB_SYNTAX_ERROR');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+    });
+
+    // Required Test 4: Forged verifier identity
+    it('4. forged verifier identity outside allowlist is rejected by authority and parser', () => {
+      // A. Authority rejects at creation time
+      expect(() => {
+        authority.createContext({
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'fake-sensor:malicious-host',
+          verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        });
+      }).toThrow(/UNAUTHORIZED_VERIFIER_IDENTITY/);
+
+      // B. Manually crafted context with fake verifier is rejected by verifyContext
+      const crafted = {
+        verifiedProvenance: 'TRUSTED_SERVER_COMPONENT' as const,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        verifierIdentity: 'fake-sensor:malicious-host',
+        verificationTimestamp: new Date().toISOString(),
+        evidenceReferences: [],
+        authoritySignature: 'any-sig',
+      };
+      expect(authority.verifyContext(crafted)).toBe(false);
+
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000204',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.204',
+          sourceSystem: 'client:generic',
+          metadata: { siteId, requestUri: "/items?id=1'" },
+        },
+        { trustedContext: crafted }
+      );
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+    });
+
+    // Required Test 5: Forged signal identifiers
+    it('5. forged signal identifiers outside allowlist are rejected by authority and parser', () => {
+      // A. Authority rejects at creation time
+      expect(() => {
+        authority.createContext({
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'canary-service:v1',
+          verifiedSignalIdentifiers: ['FABRICATED_SUPER_BREACH_SIGNAL'],
+        });
+      }).toThrow(/UNAUTHORIZED_SIGNAL_IDENTIFIER/);
+
+      // B. Manually crafted context with invalid signal is rejected by verifyContext
+      const crafted = {
+        verifiedProvenance: 'TRUSTED_SERVER_COMPONENT' as const,
+        verifiedSignalIdentifiers: ['FABRICATED_SUPER_BREACH_SIGNAL'],
+        verifierIdentity: 'canary-service:v1',
+        verificationTimestamp: new Date().toISOString(),
+        evidenceReferences: [],
+        authoritySignature: 'any-sig',
+      };
+      expect(authority.verifyContext(crafted)).toBe(false);
+    });
+
+    // Required Test 6: Trusted context combined with forged responseSample
+    it('6. trusted context combined with forged responseSample in client metadata never promotes it to trusted evidence', () => {
+      const trustedContext = authority.createContext({
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'core-scanner:active-audit',
+      });
+
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000206',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.traversal',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.206',
+          sourceSystem: 'client:external',
+          metadata: {
+            siteId,
+            requestUri: '/view?file=../../etc/passwd',
+            httpStatus: 200,
+            responseSample: 'root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin',
+          },
+        },
+        { trustedContext }
+      );
+
+      // Finding 2: Client-controlled response sample stays in untrusted claims!
+      expect(parsed.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(parsed.corroboratingSignals).not.toContain('DATA_LEAKAGE_INDICATOR');
+      expect(parsed.untrustedClientSignals).toContain('CLIENT_CLAIMED_DATA_LEAKAGE');
+      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+    });
+
+    // Required Test 7: Trusted context combined with forged errorMessage
+    it('7. trusted context combined with forged errorMessage in client metadata never promotes it to trusted evidence', () => {
+      const trustedContext = authority.createContext({
+        provenance: 'AUTHENTICATED_COLLECTOR',
+        verifierIdentity: 'collector:nginx:authenticated',
+      });
+
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000207',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.207',
+          sourceSystem: 'client:external',
+          metadata: {
+            siteId,
+            requestUri: "/items?id=1'",
+            httpStatus: 500,
+            errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
+          },
+        },
+        { trustedContext }
+      );
+
+      // Finding 2: Client-controlled error message stays in untrusted claims!
+      expect(parsed.corroboratingSignals).not.toContain('UNHANDLED_DB_SYNTAX_ERROR');
+      expect(parsed.untrustedClientSignals).toContain('CLIENT_CLAIMED_DB_SYNTAX_ERROR');
+      expect(parsed.confidenceLevel).not.toBe('POTENTIAL_EXPLOITATION');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+    });
+
+    // Required Test 8: Trusted context combined with forged WAF action
+    it('8. client-submitted forged WAF action (BLOCK, CHALLENGE, ALLOW) never elevates confidence', () => {
+      // Scenario A: Client submits forged wafAction: BLOCK with HTTP 200
+      const parsedBlock = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000208a',
         orgId,
         timestamp: new Date().toISOString(),
         eventType: 'web.attack.sqli',
-        severity: 'CRITICAL',
+        severity: 'HIGH',
         category: 'NETWORK',
-        sourceIp: '198.51.100.105',
-        sourceSystem: 'sensor:canary:db',
+        sourceIp: '198.51.100.208',
+        sourceSystem: 'client:external',
         metadata: {
           siteId,
-          requestUri: '/admin?user=canary',
+          requestUri: "/items?id=1' OR 1=1--",
+          httpStatus: 200,
+          wafAction: 'BLOCK',
+        },
+      });
+
+      expect(parsedBlock.wafAction).toBeUndefined();
+      expect(parsedBlock.untrustedClientSignals).toContain('CLIENT_CLAIMED_WAF_BLOCK');
+      expect(parsedBlock.confidenceLevel).not.toBe('BLOCKED_ATTEMPT');
+      expect(parsedBlock.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+
+      // Scenario B: Client submits forged wafAction: CHALLENGE with HTTP 200
+      const parsedChallenge = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000208b',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.bot',
+        severity: 'MEDIUM',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.208',
+        sourceSystem: 'client:external',
+        metadata: {
+          siteId,
+          requestUri: '/login',
+          httpStatus: 200,
+          wafAction: 'CHALLENGE',
+        },
+      });
+
+      expect(parsedChallenge.wafAction).toBeUndefined();
+      expect(parsedChallenge.untrustedClientSignals).toContain('CLIENT_CLAIMED_WAF_CHALLENGE');
+      expect(parsedChallenge.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+
+      // Scenario C: Client submits forged wafAction: ALLOW
+      const parsedAllow = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000208c',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.208',
+        sourceSystem: 'client:external',
+        metadata: {
+          siteId,
+          requestUri: "/items?id=1'",
+          wafAction: 'ALLOW',
+        },
+      });
+
+      expect(parsedAllow.wafAction).toBeUndefined();
+      expect(parsedAllow.untrustedClientSignals).toContain('CLIENT_CLAIMED_WAF_ALLOW');
+    });
+
+    // Required Test 9: Public event containing trustedEvidenceContext
+    it('9. public event containing trustedEvidenceContext is rejected by ingestion validation and stripped from persistence', async () => {
+      const eventService = new EventService(storage);
+
+      // Ingestion schema is strict; unexpected trustedEvidenceContext fails validation
+      const payloadWithContext = {
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.209',
+        sourceSystem: 'client:external',
+        trustedEvidenceContext: {
+          verifiedProvenance: 'TRUSTED_SERVER_COMPONENT',
+          verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+          verifierIdentity: 'canary-service:v1',
+          verificationTimestamp: new Date().toISOString(),
+          evidenceReferences: [],
+          authoritySignature: 'forged',
         },
       };
 
-      const trustedContext = createInternalTrustedEvidenceContext({
+      await expect(eventService.ingestSingleEvent(payloadWithContext, orgId)).rejects.toThrow();
+
+      // Furthermore, stored events in storage never return trustedEvidenceContext
+      const validEvent: SecurityEvent = {
+        eventId: '01a19700-0000-7000-8000-000000000209',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.209',
+        sourceSystem: 'client:external',
+        trustedEvidenceContext: authority.createContext({
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'canary-service:v1',
+          verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        }),
+      };
+
+      await storage.saveEvent(validEvent);
+      const retrieved = await storage.getEventById(orgId, validEvent.eventId);
+      expect(retrieved).not.toBeNull();
+      expect(retrieved!.trustedEvidenceContext).toBeUndefined();
+    });
+
+    // Required Test 10: Genuine verified server-side evidence
+    it('10. genuine verified server-side evidence via InternalEvidenceAuthority elevates confidence correctly', () => {
+      // A. Verified canary token breach elevates to CONFIRMED_EXPLOITATION
+      const trustedCanary = authority.createContext({
         provenance: 'TRUSTED_SERVER_COMPONENT',
         verifierIdentity: 'canary-service:v1',
         verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
-        evidenceReferences: ['canary-token-db-secret-01'],
-        verificationTimestamp: new Date().toISOString(),
+        evidenceReferences: ['canary-db-prod-token-42'],
       });
 
-      const parsedCanary = normalizeWebTelemetry(canaryEvent, { trustedContext });
+      const parsedCanary = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000210a',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'CRITICAL',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.210',
+          sourceSystem: 'sensor:canary:db',
+        },
+        { trustedContext: trustedCanary }
+      );
 
       expect(parsedCanary.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
       expect(parsedCanary.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
       expect(parsedCanary.corroboratingSignals).toContain('CANARY_TOKEN_BREACH');
       expect(parsedCanary.trustedEvidenceContext?.verifierIdentity).toBe('canary-service:v1');
-      expect(parsedCanary.trustedEvidenceContext?.evidenceReferences).toContain('canary-token-db-secret-01');
-    });
 
-    it('rejects forged UNAUTHORIZED_PRIVILEGE_MUTATION as trusted evidence and isolates it in untrustedClientSignals', () => {
-      const parsed = normalizeWebTelemetry({
-        eventId: '01a19700-0000-7000-8000-000000000103',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.api_abuse',
-        severity: 'HIGH',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.103',
-        sourceSystem: 'client:generic-http',
-        metadata: {
-          siteId,
-          requestUri: '/api/v1/users/admin/role',
-          httpMethod: 'POST',
-          httpStatus: 200,
-          corroboratingSignals: ['UNAUTHORIZED_PRIVILEGE_MUTATION'],
-        },
-      });
-
-      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
-      expect(parsed.corroboratingSignals).toHaveLength(0);
-      expect(parsed.untrustedClientSignals).toContain('UNAUTHORIZED_PRIVILEGE_MUTATION');
-      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
-    });
-
-    it('prohibits forged database errors and response samples from establishing exploitation', () => {
-      const parsed = normalizeWebTelemetry({
-        eventId: '01a19700-0000-7000-8000-000000000104',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.sqli',
-        severity: 'HIGH',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.104',
-        sourceSystem: 'sdk:nodejs:express',
-        metadata: {
-          siteId,
-          requestUri: "/items?search=test'",
-          httpStatus: 500,
-          errorMessage: 'syntax error near SELECT * FROM users WHERE unclosed quotation mark',
-          responseSample: 'ORA-00933: SQL command not properly ended\nroot:x:0:0:root:/root:/bin/bash',
-        },
-      });
-
-      // Because the event is from an untrusted client, neither POTENTIAL_EXPLOITATION nor CONFIRMED_EXPLOITATION is granted
-      expect(parsed.confidenceLevel).not.toBe('POTENTIAL_EXPLOITATION');
-      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
-      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
-      expect(parsed.corroboratingSignals).not.toContain('UNHANDLED_DB_SYNTAX_ERROR');
-      expect(parsed.corroboratingSignals).not.toContain('DATA_LEAKAGE_INDICATOR');
-      expect(parsed.untrustedClientSignals).toContain('CLIENT_CLAIMED_DB_SYNTAX_ERROR');
-      expect(parsed.untrustedClientSignals).toContain('CLIENT_CLAIMED_DATA_LEAKAGE');
-    });
-
-    it('accepts server-verified DB syntax error from authenticated collector', () => {
-      const dbErrorEvent: SecurityEvent = {
-        eventId: '01a19700-0000-7000-8000-000000000106',
-        orgId,
-        timestamp: new Date().toISOString(),
-        eventType: 'web.attack.sqli',
-        severity: 'HIGH',
-        category: 'NETWORK',
-        sourceIp: '198.51.100.106',
-        sourceSystem: 'collector:nginx',
-        metadata: {
-          siteId,
-          requestUri: "/items?id=1'",
-          httpStatus: 500,
+      // B. Authenticated collector with verifiedResponseEvidence elevates to POTENTIAL_EXPLOITATION
+      const trustedCollector = authority.createContext({
+        provenance: 'AUTHENTICATED_COLLECTOR',
+        verifierIdentity: 'collector:nginx:authenticated',
+        verifiedResponseEvidence: {
           errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
         },
-      };
+      });
 
-      const parsedDb = normalizeWebTelemetry(dbErrorEvent, { trustedProvenance: 'AUTHENTICATED_COLLECTOR' });
-      expect(parsedDb.evidenceProvenance).toBe('AUTHENTICATED_COLLECTOR');
-      expect(parsedDb.confidenceLevel).toBe('POTENTIAL_EXPLOITATION');
-      expect(parsedDb.corroboratingSignals).toContain('UNHANDLED_DB_SYNTAX_ERROR');
+      const parsedCollector = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000210b',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.210',
+          sourceSystem: 'collector:nginx',
+          metadata: { httpStatus: 500 },
+        },
+        { trustedContext: trustedCollector }
+      );
+
+      expect(parsedCollector.evidenceProvenance).toBe('AUTHENTICATED_COLLECTOR');
+      expect(parsedCollector.confidenceLevel).toBe('POTENTIAL_EXPLOITATION');
+      expect(parsedCollector.corroboratingSignals).toContain('UNHANDLED_DB_SYNTAX_ERROR');
+
+      // C. Authenticated WAF with verifiedResponseEvidence elevates to BLOCKED_ATTEMPT
+      const trustedWaf = authority.createContext({
+        provenance: 'AUTHENTICATED_COLLECTOR',
+        verifierIdentity: 'waf:edge-gateway:authenticated',
+        verifiedResponseEvidence: {
+          wafAction: 'BLOCK',
+          wafRuleId: 'OWASP-CRS-942100',
+        },
+      });
+
+      const parsedWaf = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000210c',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.210',
+          sourceSystem: 'waf:edge',
+          metadata: { httpStatus: 403 },
+        },
+        { trustedContext: trustedWaf }
+      );
+
+      expect(parsedWaf.wafAction).toBe('BLOCK');
+      expect(parsedWaf.corroboratingSignals).toContain('WAF_INTERVENTION');
+      expect(parsedWaf.confidenceLevel).toBe('BLOCKED_ATTEMPT');
     });
 
-    it('ensures ordinary SQLi, XSS, and traversal detection continues working seamlessly with untrusted metadata', async () => {
+    // Required Test 11: Existing SQLi, XSS and traversal detection remains functional
+    it('11. existing SQLi, XSS and traversal detection remains fully functional', async () => {
       // SQLi probe with untrusted metadata
       const sqliDetections = await new Rule101SqlInjection().evaluate({
         organizationId: orgId,
         events: [
           {
-            eventId: '01a19700-0000-7000-8000-000000000107',
+            eventId: '01a19700-0000-7000-8000-000000000211a',
             orgId,
             timestamp: new Date().toISOString(),
             eventType: 'web.request.normal',
             severity: 'MEDIUM',
             category: 'NETWORK',
-            sourceIp: '198.51.100.107',
+            sourceIp: '198.51.100.211',
             sourceSystem: 'sdk:nodejs:express',
             metadata: {
               siteId,
@@ -1622,13 +1754,13 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         organizationId: orgId,
         events: [
           {
-            eventId: '01a19700-0000-7000-8000-000000000108',
+            eventId: '01a19700-0000-7000-8000-000000000211b',
             orgId,
             timestamp: new Date().toISOString(),
             eventType: 'web.request.normal',
             severity: 'MEDIUM',
             category: 'NETWORK',
-            sourceIp: '198.51.100.108',
+            sourceIp: '198.51.100.211',
             sourceSystem: 'sdk:nodejs:express',
             metadata: {
               siteId,
@@ -1648,13 +1780,13 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         organizationId: orgId,
         events: [
           {
-            eventId: '01a19700-0000-7000-8000-000000000109',
+            eventId: '01a19700-0000-7000-8000-000000000211c',
             orgId,
             timestamp: new Date().toISOString(),
             eventType: 'web.request.normal',
             severity: 'MEDIUM',
             category: 'NETWORK',
-            sourceIp: '198.51.100.109',
+            sourceIp: '198.51.100.211',
             sourceSystem: 'sdk:nodejs:express',
             metadata: {
               siteId,

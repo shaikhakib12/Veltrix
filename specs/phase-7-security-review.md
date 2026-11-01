@@ -113,36 +113,43 @@ All **9 security audit findings** identified during review have been fully remed
 
 #### Finding SEC-P7-009: Untrusted Client Evidence Promotion & Missing Provenance Trust Boundary
 - **Severity:** Critical
-- **Affected File:** `backend/src/detection/web-parser.ts`, `backend/src/services/event-service.ts`, `packages/shared/src/types/index.ts`
+- **Affected File:** `backend/src/detection/web-parser.ts`, `backend/src/detection/evidence-authority.ts`, `backend/src/services/event-service.ts`, `backend/src/storage/dynamodb-store.ts`, `backend/src/storage/memory-store.ts`, `packages/shared/src/types/index.ts`
 - **Explanation:**
-  1. **Untrusted Signal Promotion (Finding A):** `normalizeWebTelemetry()` previously allowed client-provided `metadata.corroboratingSignals` to be copied directly into internal trusted evidence when parsed under a trusted server context. Under strict zero-trust rules, client-provided signals must NEVER become trusted evidence regardless of parser execution context.
-  2. **Metadata-Based Provenance Escalation (Finding B):** Client-submitted metadata fields (`serverVerified`, `evidenceProvenance`, `trustedProvenance`, `verifiedSignals`) previously had logic pathways that could grant trusted provenance or promote signals. Inbound event metadata is external client input and must never establish trust by itself.
+  1. **Trusted Context Construction (Finding 1):** `createInternalTrustedEvidenceContext()` previously accepted arbitrary caller-supplied strings without cryptographic verification, and legacy bypass flags (`isTrustedServerComponent`, `trustedProvenance`) existed on `WebTelemetryContext`.
+  2. **Client-Controlled Response Evidence (Finding 2):** Inbound `metadata.responseSample` and `metadata.errorMessage` were scanned and could promote database syntax errors or file leaks into trusted evidence under trusted execution contexts, violating the principle that external client metadata cannot become trustworthy simply because the parser runs inside a trusted server component.
+  3. **WAF Action Provenance (Finding 3):** `metadata.wafAction` was treated as verified based solely on event provenance, allowing forged WAF actions (e.g. client sending `wafAction: 'BLOCK'` on an HTTP 200 event) to influence confidence classifications.
+  4. **Event-Level Trusted Context (Finding 4):** Event-level contexts required strict validation to ensure public ingestion cannot inject them, persisted storage cannot deserialize them, and runtime authority cannot be overridden.
 - **Fix Applied:**
-  1. **Internal-Only Trusted Evidence Context (`InternalTrustedEvidenceContext`):** Defined in `@veltrix/shared` and instantiated via `createInternalTrustedEvidenceContext()`. Only authenticated, approved server-side components (canary workers, internal scanners, core verification engines) can construct this context. It encapsulates:
-     - `verifiedProvenance`: `'TRUSTED_SERVER_COMPONENT' | 'AUTHENTICATED_COLLECTOR'`
-     - `verifiedSignalIdentifiers`: explicit list of server-verified signal IDs
-     - `verifierIdentity`: identity of internal verifier component
-     - `verificationTimestamp`: ISO 8601 UTC timestamp
-     - `evidenceReferences`: references to underlying cryptographic proofs or canary IDs
-  2. **Zero-Trust Metadata Decoupling:** Inbound client `metadata` is completely decoupled from provenance resolution. Fields such as `serverVerified`, `evidenceProvenance`, and `trustedProvenance` in `metadata` are strictly ignored by `web-parser.ts`.
-  3. **Signal Separation & Untrusted Isolation:** Client-submitted `corroboratingSignals` and client `verifiedSignals` are relegated to `untrustedClientSignals: string[]`. Under no circumstances are `untrustedClientSignals` copied or promoted into `corroboratingSignals` (trusted), even if `isTrustedServerComponent` is true.
-  4. **Strict Server-Verification Gate:** `CONFIRMED_EXPLOITATION` is strictly prohibited unless `evidenceProvenance === 'TRUSTED_SERVER_COMPONENT'` and trusted signals include server-attested indicators (`CANARY_TOKEN_BREACH`, `DATA_LEAKAGE_INDICATOR`, `UNAUTHORIZED_PRIVILEGE_MUTATION`).
-  5. **Response & Error Sanitization:** Inspection of `responseSample` and `errorMessage` for DB syntax errors or system file leaks is restricted to verified server components; untrusted client claims are isolated in `untrustedClientSignals`.
-  6. **Anti-Impersonation:** Prohibited integration clients from impersonating trusted collectors via `sourceSystem` alone.
-  7. **Preserved Ordinary Detections:** Regular attack pattern recognition (SQLi, XSS, Path Traversal) operates unimpeded on untrusted metadata, producing `SUSPICIOUS_ATTEMPT` alerts without false exploitation elevation.
-- **Test Evidence:** 12 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
-  - `1. rejects client-submitted CANARY_TOKEN_BREACH and does not escalate to CONFIRMED_EXPLOITATION`
-  - `2. rejects client-submitted DATA_LEAKAGE_INDICATOR and does not escalate to CONFIRMED_EXPLOITATION`
-  - `3. trusted context combined with forged client signals NEVER promotes client signals into trusted evidence` (Most Important Invariant)
-  - `4. isolates forged client verifiedSignals in untrusted claims and never promotes them to trusted evidence`
-  - `5. client-submitted serverVerified: true never establishes trust`
-  - `6. client-declared TRUSTED_SERVER_COMPONENT in metadata never establishes trust`
-  - `7. prohibits arbitrary integration clients from impersonating trusted collectors via sourceSystem`
-  - `8. accepts genuine independently verified server evidence via InternalTrustedEvidenceContext`
-  - `rejects forged UNAUTHORIZED_PRIVILEGE_MUTATION as trusted evidence and isolates it in untrustedClientSignals`
-  - `prohibits forged database errors and response samples from establishing exploitation`
-  - `accepts server-verified DB syntax error from authenticated collector`
-  - `ensures ordinary SQLi, XSS, and traversal detection continues working seamlessly with untrusted metadata`
+  1. **Runtime Cryptographic Capability Authority (`InternalEvidenceAuthority`):**
+     - Implemented in `backend/src/detection/evidence-authority.ts`.
+     - Issues and verifies HMAC-SHA256 capability signatures on `InternalTrustedEvidenceContext` using a private server-side authority secret.
+     - Enforces an explicit server-side allowlist for verifiers (`APPROVED_INTERNAL_VERIFIERS`: `'canary-service:v1'`, `'core-scanner:active-audit'`, `'internal-audit-worker:core'`, `'sensor:canary:db'`, `'sensor:canary:files'`, `'collector:nginx:authenticated'`, `'waf:edge-gateway:authenticated'`).
+     - Enforces an explicit server-side allowlist for verified signal identifiers (`ALLOWED_VERIFIED_SIGNALS`: `'CANARY_TOKEN_BREACH'`, `'DATA_LEAKAGE_INDICATOR'`, `'UNAUTHORIZED_PRIVILEGE_MUTATION'`, `'UNHANDLED_DB_SYNTAX_ERROR'`, `'STACK_TRACE_IN_RESPONSE'`, `'LATENCY_SPIKE_EXPLOIT'`, `'WAF_INTERVENTION'`, `'AUTHENTICATED_WAF_BLOCK'`, `'AUTHENTICATED_WAF_CHALLENGE'`).
+     - Removed all legacy bypass flags (`isTrustedServerComponent`, `trustedProvenance`, `verifiedBy`) from `WebTelemetryContext`.
+  2. **Separate Verified Response Evidence Envelope (`VerifiedResponseEvidence`):**
+     - Defined in `@veltrix/shared` and strictly contained within `InternalTrustedEvidenceContext`.
+     - `metadata.responseSample` and `metadata.errorMessage` are treated strictly as unverified client claims (`CLIENT_CLAIMED_DB_SYNTAX_ERROR`, `CLIENT_CLAIMED_DATA_LEAKAGE`).
+     - The parser ONLY scans independently captured response evidence inside `activeTrustedContext.verifiedResponseEvidence`.
+  3. **Authenticated WAF Action Provenance:**
+     - Client `metadata.wafAction` is isolated in `untrustedClientSignals` (`CLIENT_CLAIMED_WAF_BLOCK`, `CLIENT_CLAIMED_WAF_CHALLENGE`, `CLIENT_CLAIMED_WAF_ALLOW`) and cannot escalate confidence to `BLOCKED_ATTEMPT`.
+     - Effective WAF action is ONLY accepted from `verifiedResponseEvidence.wafAction` authenticated by an approved collector/WAF verifier.
+  4. **Event-Level Context Ingestion & Storage Isolation:**
+     - `SingleEventIngestSchema` is `.strict()` and rejects public events containing `trustedEvidenceContext`.
+     - `EventService.normalizeEvent` explicitly never includes `trustedEvidenceContext`.
+     - `DynamoDBStore` and `MemoryStore` strip `trustedEvidenceContext` on `saveEvent`, and deserialize stored events with `trustedEvidenceContext: undefined`.
+     - Any attached context must pass `authority.verifyContext()` runtime validation.
+- **Test Evidence:** 11 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
+  - `1. unauthenticated caller attempting to construct trusted context (unverified signature or missing authority) is rejected`
+  - `2. legacy isTrustedServerComponent: true bypass is blocked and defaults to UNTRUSTED_CLIENT`
+  - `3. legacy trustedProvenance bypass is blocked and defaults to UNTRUSTED_CLIENT`
+  - `4. forged verifier identity outside allowlist is rejected by authority and parser`
+  - `5. forged signal identifiers outside allowlist are rejected by authority and parser`
+  - `6. trusted context combined with forged responseSample in client metadata never promotes it to trusted evidence`
+  - `7. trusted context combined with forged errorMessage in client metadata never promotes it to trusted evidence`
+  - `8. client-submitted forged WAF action (BLOCK, CHALLENGE, ALLOW) never elevates confidence`
+  - `9. public event containing trustedEvidenceContext is rejected by ingestion validation and stripped from persistence`
+  - `10. genuine verified server-side evidence via InternalEvidenceAuthority elevates confidence correctly`
+  - `11. existing SQLi, XSS and traversal detection remains fully functional`
 
 ---
 
@@ -166,12 +173,12 @@ All **9 security audit findings** identified during review have been fully remed
 
 ```
 Test Files  9 passed (9 across monorepo)
-     Tests  242 passed (242) - @veltrix/backend
+     Tests  241 passed (241) - @veltrix/backend
      Tests  8 passed (8)     - @veltrix/sdk-node
-  Total:    250 / 250 passed (100% pass rate)
+  Total:    249 / 249 passed (100% pass rate)
 ```
 
-- All 46 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including the 6 regression tests in Section 9 and 12 trust-boundary regression tests in Section 10).
+- All 45 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including the 6 regression tests in Section 9 and 11 trust-boundary regression tests in Section 10).
 - Full tenant boundary isolation and API key prohibition regression tests pass.
 - False positive suppression verified across all 5 web attack rules.
 
