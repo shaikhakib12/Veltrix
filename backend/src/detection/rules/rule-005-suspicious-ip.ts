@@ -41,10 +41,21 @@ export class Rule005SuspiciousIp extends BaseDetectionRule {
     if (threatIndicators && Array.isArray(threatIndicators)) {
       for (const indicator of threatIndicators) {
         if (indicator.type === 'IP') {
-          // Verify freshness: reject expired threat intelligence indicators
+          // Source provenance verification: reject indicators lacking a valid source
+          if (!indicator.source || typeof indicator.source !== 'string' || indicator.source.trim().length === 0) {
+            continue;
+          }
+          // Freshness verification: reject expired threat intelligence indicators
           const expiresAt = (indicator as unknown as { expiresAt?: string }).expiresAt;
           if (expiresAt && new Date(expiresAt).getTime() < Date.now()) {
             continue;
+          }
+          // Reject stale indicators whose lastSeen is older than 90 days
+          if (indicator.lastSeen) {
+            const lastSeenMs = new Date(indicator.lastSeen).getTime();
+            if (!isNaN(lastSeenMs) && Date.now() - lastSeenMs > 90 * 86400 * 1000) {
+              continue;
+            }
           }
           suspiciousIps.add(indicator.value);
         }
@@ -65,7 +76,14 @@ export class Rule005SuspiciousIp extends BaseDetectionRule {
     for (const event of events) {
       if (event.orgId !== context.organizationId) continue;
       const ip = event.sourceIp;
-      if (suspiciousIps.has(ip) || event.metadata?.isTorExitNode === true || event.metadata?.threatIntelMatch) {
+      // Client-provided fields cannot independently declare an IP malicious.
+      // event.metadata.isTorExitNode or threatIntelMatch is only honored if accompanied by trusted enrichment provenance
+      const hasTrustedTorEnrichment = event.metadata?.isTorExitNode === true &&
+        Boolean(event.metadata?.enrichmentSource || event.metadata?.trustedEnrichment);
+      const hasTrustedThreatIntelMatch = event.metadata?.threatIntelMatch === true &&
+        Boolean(event.metadata?.enrichmentSource || event.metadata?.threatIntelSource);
+
+      if (suspiciousIps.has(ip) || hasTrustedTorEnrichment || hasTrustedThreatIntelMatch) {
         if (!eventsByIp.has(ip)) {
           eventsByIp.set(ip, []);
         }

@@ -19,7 +19,8 @@ import {
   Rule009MultiAccountRecon,
   Rule010OffHoursAnomaly,
 } from '../src/detection/rules/index.js';
-import type { SecurityEvent } from '@veltrix/shared';
+import type { SecurityEvent, Detection } from '@veltrix/shared';
+import { generateUuidV7 } from '../src/utils/uuid.js';
 
 describe('Phase 5: Threat Detection Engine (TASK-501 through TASK-505)', () => {
   let app: ReturnType<typeof createApp>;
@@ -937,7 +938,7 @@ describe('Phase 5: Threat Detection Engine (TASK-501 through TASK-505)', () => {
           sourceIp: '203.0.113.1',
           username: 'remote-worker',
           sourceSystem: 'okta',
-          metadata: { country: 'JP', city: 'Tokyo', isVpn: true },
+          metadata: { country: 'JP', city: 'Tokyo', isVpn: true, enrichmentSource: 'INTERNAL_VPN_REGISTRY' },
         },
       ];
 
@@ -1166,4 +1167,557 @@ describe('Phase 5: Threat Detection Engine (TASK-501 through TASK-505)', () => {
     });
   });
 
+  // ==========================================================================
+  // 6. Phase 5 Final Merge Readiness Gate: Deduplication, Enrichment, Timezone
+  // ==========================================================================
+  describe('Phase 5 Final Merge Readiness Gate Verification', () => {
+    // --- Section 2: Detection Deduplication Verification ---
+    describe('Detection Deduplication Fingerprinting & Window Semantics', () => {
+      it('duplicate events in the same fixed window produce identical dedupKey and are deduplicated in storage', async () => {
+        const rule = new Rule001BruteForce();
+        const baseEpoch = 1700000000000;
+        const windowSec = 300;
+        const bucket = Math.floor(baseEpoch / (windowSec * 1000));
+
+        const key1 = rule.computeDedupKey(orgA, rule.id, '198.51.100.1', bucket);
+        const key2 = rule.computeDedupKey(orgA, rule.id, '198.51.100.1', bucket);
+        expect(key1).toBe(key2);
+
+        const store = new MemoryStore();
+        const detection1: Detection = {
+          detectionId: generateUuidV7(baseEpoch),
+          ruleId: rule.id,
+          ruleName: rule.name,
+          orgId: orgA,
+          severity: 'HIGH',
+          confidence: 85,
+          category: 'AUTHENTICATION',
+          title: 'Brute Force Alert',
+          description: '5 failed logins',
+          detectedAt: new Date(baseEpoch).toISOString(),
+          relatedEventIds: ['ev-1', 'ev-2'],
+          evidence: {
+            matchedRuleId: rule.id,
+            matchedThreshold: 5,
+            actualCount: 5,
+            timeWindowSeconds: windowSec,
+          },
+          status: 'ACTIVE',
+          dedupKey: key1,
+        };
+
+        const res1 = await store.saveDetection(detection1);
+        expect(res1.saved).toBe(true);
+        expect(res1.isDuplicate).toBe(false);
+
+        // Second detection with same dedupKey is marked duplicate and suppressed
+        const detection2 = { ...detection1, detectionId: generateUuidV7(baseEpoch + 1000) };
+        const res2 = await store.saveDetection(detection2);
+        expect(res2.saved).toBe(false);
+        expect(res2.isDuplicate).toBe(true);
+      });
+
+      it('distinct attacks against different entities in the same window produce distinct dedupKeys and both save', async () => {
+        const rule = new Rule001BruteForce();
+        const baseEpoch = 1700000000000;
+        const bucket = Math.floor(baseEpoch / (300 * 1000));
+
+        const keyEntity1 = rule.computeDedupKey(orgA, rule.id, '198.51.100.1', bucket);
+        const keyEntity2 = rule.computeDedupKey(orgA, rule.id, '198.51.100.2', bucket);
+        expect(keyEntity1).not.toBe(keyEntity2);
+
+        const store = new MemoryStore();
+        const d1: Detection = {
+          detectionId: generateUuidV7(baseEpoch),
+          ruleId: rule.id,
+          ruleName: rule.name,
+          orgId: orgA,
+          severity: 'HIGH',
+          confidence: 85,
+          category: 'AUTHENTICATION',
+          title: 'Attack 1',
+          description: 'Entity 1',
+          detectedAt: new Date(baseEpoch).toISOString(),
+          relatedEventIds: ['ev-1'],
+          evidence: { matchedRuleId: rule.id, matchedThreshold: 5, actualCount: 5, timeWindowSeconds: 300 },
+          status: 'ACTIVE',
+          dedupKey: keyEntity1,
+        };
+        const d2: Detection = {
+          ...d1,
+          detectionId: generateUuidV7(baseEpoch + 100),
+          title: 'Attack 2',
+          dedupKey: keyEntity2,
+        };
+
+        const r1 = await store.saveDetection(d1);
+        const r2 = await store.saveDetection(d2);
+        expect(r1.saved).toBe(true);
+        expect(r2.saved).toBe(true);
+      });
+
+      it('events immediately before and after bucket boundary produce distinct dedupKeys without silent suppression', () => {
+        const rule = new Rule001BruteForce();
+        const windowSec = 300;
+        const windowMs = windowSec * 1000;
+
+        // Bucket boundary: T_boundary is a multiple of windowMs
+        const bucketIndex = 500000;
+        const boundaryMs = bucketIndex * windowMs;
+
+        const justBeforeMs = boundaryMs - 1; // 1 ms before boundary -> bucketIndex - 1
+        const atBoundaryMs = boundaryMs;     // exactly at boundary -> bucketIndex
+
+        const bucketBefore = Math.floor(justBeforeMs / windowMs);
+        const bucketAt = Math.floor(atBoundaryMs / windowMs);
+        expect(bucketAt).toBe(bucketBefore + 1);
+
+        const keyBefore = rule.computeDedupKey(orgA, rule.id, '198.51.100.1', bucketBefore);
+        const keyAt = rule.computeDedupKey(orgA, rule.id, '198.51.100.1', bucketAt);
+        expect(keyBefore).not.toBe(keyAt);
+      });
+
+      it('different organizations produce isolated dedupKeys and do not collide', async () => {
+        const rule = new Rule001BruteForce();
+        const baseEpoch = 1700000000000;
+        const bucket = Math.floor(baseEpoch / (300 * 1000));
+
+        const keyOrgA = rule.computeDedupKey(orgA, rule.id, '198.51.100.1', bucket);
+        const keyOrgB = rule.computeDedupKey(orgB, rule.id, '198.51.100.1', bucket);
+        expect(keyOrgA).not.toBe(keyOrgB);
+
+        const store = new MemoryStore();
+        const dOrgA: Detection = {
+          detectionId: generateUuidV7(baseEpoch),
+          ruleId: rule.id,
+          ruleName: rule.name,
+          orgId: orgA,
+          severity: 'HIGH',
+          confidence: 85,
+          category: 'AUTHENTICATION',
+          title: 'Org A Attack',
+          description: 'Attack against Org A',
+          detectedAt: new Date(baseEpoch).toISOString(),
+          relatedEventIds: ['ev-a'],
+          evidence: { matchedRuleId: rule.id, matchedThreshold: 5, actualCount: 5, timeWindowSeconds: 300 },
+          status: 'ACTIVE',
+          dedupKey: keyOrgA,
+        };
+        const dOrgB: Detection = {
+          ...dOrgA,
+          detectionId: generateUuidV7(baseEpoch + 50),
+          orgId: orgB,
+          title: 'Org B Attack',
+          description: 'Attack against Org B',
+          dedupKey: keyOrgB,
+        };
+
+        const resA = await store.saveDetection(dOrgA);
+        const resB = await store.saveDetection(dOrgB);
+        expect(resA.saved).toBe(true);
+        expect(resB.saved).toBe(true);
+
+        const listA = await store.getDetections(orgA);
+        const listB = await store.getDetections(orgB);
+        expect(listA.items.length).toBe(1);
+        expect(listB.items.length).toBe(1);
+        expect(listA.items[0].orgId).toBe(orgA);
+        expect(listB.items[0].orgId).toBe(orgB);
+      });
+
+      it('concurrent saves of identical detection result in exactly one successful save and one duplicate', async () => {
+        const store = new MemoryStore();
+        const dedupKey = 'concurrent-test-dedup-hash-12345';
+        const d1: Detection = {
+          detectionId: generateUuidV7(),
+          ruleId: 'RULE-001',
+          ruleName: 'Brute Force',
+          orgId: orgA,
+          severity: 'HIGH',
+          confidence: 85,
+          category: 'AUTHENTICATION',
+          title: 'Concurrent 1',
+          description: 'Test concurrent write',
+          detectedAt: new Date().toISOString(),
+          relatedEventIds: ['ev-c1'],
+          evidence: { matchedRuleId: 'RULE-001', matchedThreshold: 5, actualCount: 5, timeWindowSeconds: 300 },
+          status: 'ACTIVE',
+          dedupKey,
+        };
+        const d2 = { ...d1, detectionId: generateUuidV7() };
+
+        const [r1, r2] = await Promise.all([store.saveDetection(d1), store.saveDetection(d2)]);
+        const savedCount = (r1.saved ? 1 : 0) + (r2.saved ? 1 : 0);
+        const dupCount = (r1.isDuplicate ? 1 : 0) + (r2.isDuplicate ? 1 : 0);
+        expect(savedCount).toBe(1);
+        expect(dupCount).toBe(1);
+      });
+    });
+
+    // --- Section 3: Trusted Enrichment Verification ---
+    describe('Trusted Enrichment & Provenance Invariants', () => {
+      it('RULE-004: client-provided metadata.isVpn: true without trusted enrichment source does NOT suppress impossible travel', async () => {
+        const rule = new Rule004ImpossibleTravel();
+        const baseTime = Date.now();
+
+        // Two logins from US and JP within 5 minutes, but untrusted client sent isVpn: true
+        const untrustedEvents: SecurityEvent[] = [
+          {
+            eventId: generateUuidV7(baseTime - 300000),
+            orgId: orgA,
+            category: 'AUTHENTICATION',
+            eventType: 'auth.login.success',
+            severity: 'LOW',
+            timestamp: new Date(baseTime - 300000).toISOString(),
+            sourceIp: '198.51.100.1',
+            username: 'alice',
+            sourceSystem: 'client-app',
+            metadata: { country: 'US', city: 'New York' },
+          },
+          {
+            eventId: generateUuidV7(baseTime),
+            orgId: orgA,
+            category: 'AUTHENTICATION',
+            eventType: 'auth.login.success',
+            severity: 'LOW',
+            timestamp: new Date(baseTime).toISOString(),
+            sourceIp: '203.0.113.1',
+            username: 'alice',
+            sourceSystem: 'client-app',
+            metadata: { country: 'JP', city: 'Tokyo', isVpn: true }, // Untrusted! No enrichmentSource!
+          },
+        ];
+
+        const detections = await rule.evaluate({
+          organizationId: orgA,
+          events: untrustedEvents,
+          currentTime: new Date(),
+        });
+
+        // The attack is NOT suppressed because isVpn lacked trusted enrichment provenance!
+        expect(detections.length).toBe(1);
+        expect(detections[0].ruleId).toBe('RULE-004');
+      });
+
+      it('RULE-004: missing location enrichment does not create unsupported conclusions', async () => {
+        const rule = new Rule004ImpossibleTravel();
+        const baseTime = Date.now();
+
+        // Two logins with different IPs but NO location metadata (enrichment missing)
+        const noGeoEvents: SecurityEvent[] = [
+          {
+            eventId: generateUuidV7(baseTime - 10000),
+            orgId: orgA,
+            category: 'AUTHENTICATION',
+            eventType: 'auth.login.success',
+            severity: 'LOW',
+            timestamp: new Date(baseTime - 10000).toISOString(),
+            sourceIp: '10.0.0.1',
+            username: 'bob',
+            sourceSystem: 'internal-portal',
+          },
+          {
+            eventId: generateUuidV7(baseTime),
+            orgId: orgA,
+            category: 'AUTHENTICATION',
+            eventType: 'auth.login.success',
+            severity: 'LOW',
+            timestamp: new Date(baseTime).toISOString(),
+            sourceIp: '10.0.0.2',
+            username: 'bob',
+            sourceSystem: 'internal-portal',
+          },
+        ];
+
+        const detections = await rule.evaluate({
+          organizationId: orgA,
+          events: noGeoEvents,
+          currentTime: new Date(),
+        });
+
+        // Does NOT fire because missing enrichment prevents jumping to unsupported conclusions
+        expect(detections.length).toBe(0);
+      });
+
+      it('RULE-005: rejects threat intelligence indicators lacking source provenance', async () => {
+        const rule = new Rule005SuspiciousIp();
+        const event: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'NETWORK',
+          eventType: 'network.connection',
+          severity: 'MEDIUM',
+          timestamp: new Date().toISOString(),
+          sourceIp: '198.51.100.222',
+          username: 'charlie',
+          sourceSystem: 'edge-gw',
+        };
+
+        // Indicator lacking source provenance (empty source)
+        const unprovenancedIndicator = {
+          indicatorId: 'ind-no-source',
+          type: 'IP' as const,
+          value: '198.51.100.222',
+          severity: 'HIGH' as const,
+          confidence: 90,
+          source: '', // Empty source!
+          description: 'Untrusted indicator',
+          firstSeen: new Date().toISOString(),
+          lastSeen: new Date().toISOString(),
+          isFlagged: true,
+          threatType: 'BOTNET',
+        };
+
+        const detections = await rule.evaluate({
+          organizationId: orgA,
+          events: [event],
+          currentTime: new Date(),
+          threatIndicators: [unprovenancedIndicator],
+        });
+
+        expect(detections.length).toBe(0);
+      });
+
+      it('RULE-005: client-provided isTorExitNode without trusted enrichment provenance does not trigger alert', async () => {
+        const rule = new Rule005SuspiciousIp();
+        const event: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'NETWORK',
+          eventType: 'network.connection',
+          severity: 'MEDIUM',
+          timestamp: new Date().toISOString(),
+          sourceIp: '198.51.100.223', // Not in known list
+          username: 'charlie',
+          sourceSystem: 'untrusted-client',
+          metadata: { isTorExitNode: true }, // Client claimed Tor without enrichment source
+        };
+
+        const detections = await rule.evaluate({
+          organizationId: orgA,
+          events: [event],
+          currentTime: new Date(),
+        });
+
+        // Untrusted client claim ignored
+        expect(detections.length).toBe(0);
+      });
+
+      it('EventService sanitizes client-provided isVpn and isTorExitNode to client_declared_* at ingestion', async () => {
+        const res = await request(app)
+          .post('/api/v1/events')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({
+            eventType: 'auth.login.success',
+            severity: 'LOW',
+            category: 'AUTHENTICATION',
+            sourceIp: '198.51.100.55',
+            username: 'sanitized-user',
+            sourceSystem: 'public-api',
+            metadata: {
+              isVpn: true,
+              isTorExitNode: true,
+              legitimateField: 'user-session-123',
+            },
+          });
+
+        expect(res.status).toBe(202);
+        const eventId = res.body.data.eventId;
+
+        const getRes = await request(app)
+          .get(`/api/v1/events/${eventId}`)
+          .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+        expect(getRes.status).toBe(200);
+        const storedEvent = getRes.body.data;
+        expect(storedEvent.metadata.isVpn).toBeUndefined();
+        expect(storedEvent.metadata.isTorExitNode).toBeUndefined();
+        expect(storedEvent.metadata.client_declared_isVpn).toBe(true);
+        expect(storedEvent.metadata.client_declared_isTorExitNode).toBe(true);
+        expect(storedEvent.metadata.legitimateField).toBe('user-session-123');
+      });
+    });
+
+    // --- Section 4: Timezone Tests (RULE-010) ---
+    describe('RULE-010 Timezone, DST, Weekend, and Boundary Verification', () => {
+      const rule = new Rule010OffHoursAnomaly();
+
+      it('correctly handles DST transitions in America/New_York (winter EST vs summer EDT)', async () => {
+        // Winter: Jan 14, 2026 at 23:30 UTC -> EST is UTC-5 -> 18:30 local (during 06:00-22:00 business hours)
+        const winterEvent: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'SYSTEM',
+          eventType: 'admin.action',
+          severity: 'MEDIUM',
+          timestamp: '2026-01-14T23:30:00Z',
+          sourceIp: '10.0.0.1',
+          username: 'winter-admin',
+          sourceSystem: 'k8s',
+        };
+        const winterDetections = await rule.evaluate(
+          { organizationId: orgA, events: [winterEvent], currentTime: new Date() },
+          { condition: { startHour: 6, endHour: 22, timezone: 'America/New_York' } }
+        );
+        expect(winterDetections.length).toBe(0);
+
+        // Summer: Jul 15, 2026 at 01:30 UTC -> EDT is UTC-4 -> 21:30 local (during 06:00-22:00 business hours)
+        const summerEvent1: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'SYSTEM',
+          eventType: 'admin.action',
+          severity: 'MEDIUM',
+          timestamp: '2026-07-15T01:30:00Z',
+          sourceIp: '10.0.0.1',
+          username: 'summer-admin',
+          sourceSystem: 'k8s',
+        };
+        const summerDetections1 = await rule.evaluate(
+          { organizationId: orgA, events: [summerEvent1], currentTime: new Date() },
+          { condition: { startHour: 6, endHour: 22, timezone: 'America/New_York' } }
+        );
+        expect(summerDetections1.length).toBe(0);
+
+        // Summer: Jul 15, 2026 at 02:30 UTC -> EDT is UTC-4 -> 22:30 local (OUTSIDE 06:00-22:00 business hours!)
+        const summerEvent2: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'SYSTEM',
+          eventType: 'admin.action',
+          severity: 'MEDIUM',
+          timestamp: '2026-07-15T02:30:00Z',
+          sourceIp: '10.0.0.1',
+          username: 'summer-admin',
+          sourceSystem: 'k8s',
+        };
+        const summerDetections2 = await rule.evaluate(
+          { organizationId: orgA, events: [summerEvent2], currentTime: new Date() },
+          { condition: { startHour: 6, endHour: 22, timezone: 'America/New_York' } }
+        );
+        expect(summerDetections2.length).toBe(1);
+      });
+
+      it('supports configurable weekend schedules (e.g. Middle East Friday/Saturday weekend)', async () => {
+        // Nov 6, 2026 is a Friday. Nov 8, 2026 is a Sunday.
+        // In Middle East config, weekendDays = [5, 6] (Friday=5, Saturday=6). Sunday=0 is a normal workday.
+        const fridayEvent: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'SYSTEM',
+          eventType: 'admin.action',
+          severity: 'MEDIUM',
+          timestamp: '2026-11-06T10:00:00Z', // Friday 10:00 UTC
+          sourceIp: '10.0.0.1',
+          username: 'dubai-admin',
+          sourceSystem: 'k8s',
+        };
+        const sundayEvent: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'SYSTEM',
+          eventType: 'admin.action',
+          severity: 'MEDIUM',
+          timestamp: '2026-11-08T10:00:00Z', // Sunday 10:00 UTC
+          sourceIp: '10.0.0.1',
+          username: 'dubai-admin',
+          sourceSystem: 'k8s',
+        };
+
+        const config = {
+          condition: {
+            startHour: 6,
+            endHour: 22,
+            timezone: 'Asia/Dubai', // UTC+4
+            weekendDays: [5, 6], // Friday & Saturday are weekend
+          },
+        };
+
+        // Friday is weekend -> triggers detection
+        const fridayDetections = await rule.evaluate(
+          { organizationId: orgA, events: [fridayEvent], currentTime: new Date() },
+          config
+        );
+        expect(fridayDetections.length).toBe(1);
+
+        // Sunday is normal business day -> 0 detections
+        const sundayDetections = await rule.evaluate(
+          { organizationId: orgA, events: [sundayEvent], currentTime: new Date() },
+          config
+        );
+        expect(sundayDetections.length).toBe(0);
+      });
+
+      it('handles exact business hour boundary times with precision', async () => {
+        // Business hours: 09:00 to 17:00 UTC
+        const config = { condition: { startHour: 9, endHour: 17, timezone: 'UTC' } };
+
+        // 08:59:59 UTC -> off-hours (triggers)
+        const justBeforeStart: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'SYSTEM',
+          eventType: 'admin.action',
+          severity: 'MEDIUM',
+          timestamp: '2026-11-03T08:59:59Z',
+          sourceIp: '10.0.0.1',
+          username: 'boundary-admin',
+          sourceSystem: 'k8s',
+        };
+        const d1 = await rule.evaluate({ organizationId: orgA, events: [justBeforeStart], currentTime: new Date() }, config);
+        expect(d1.length).toBe(1);
+
+        // 09:00:00 UTC -> business hours (does not trigger)
+        const exactStart: SecurityEvent = {
+          ...justBeforeStart,
+          eventId: generateUuidV7(),
+          timestamp: '2026-11-03T09:00:00Z',
+        };
+        const d2 = await rule.evaluate({ organizationId: orgA, events: [exactStart], currentTime: new Date() }, config);
+        expect(d2.length).toBe(0);
+
+        // 16:59:59 UTC -> business hours (does not trigger)
+        const justBeforeEnd: SecurityEvent = {
+          ...justBeforeStart,
+          eventId: generateUuidV7(),
+          timestamp: '2026-11-03T16:59:59Z',
+        };
+        const d3 = await rule.evaluate({ organizationId: orgA, events: [justBeforeEnd], currentTime: new Date() }, config);
+        expect(d3.length).toBe(0);
+
+        // 17:00:00 UTC -> off-hours (triggers)
+        const exactEnd: SecurityEvent = {
+          ...justBeforeStart,
+          eventId: generateUuidV7(),
+          timestamp: '2026-11-03T17:00:00Z',
+        };
+        const d4 = await rule.evaluate({ organizationId: orgA, events: [exactEnd], currentTime: new Date() }, config);
+        expect(d4.length).toBe(1);
+      });
+
+      it('handles invalid/malformed IANA timezones gracefully without throwing or crashing', async () => {
+        const event: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgA,
+          category: 'SYSTEM',
+          eventType: 'admin.action',
+          severity: 'MEDIUM',
+          timestamp: '2026-11-03T12:00:00Z', // 12:00 UTC (business hours)
+          sourceIp: '10.0.0.1',
+          username: 'safe-admin',
+          sourceSystem: 'k8s',
+        };
+
+        // Pass completely invalid timezone string
+        const detections = await rule.evaluate(
+          { organizationId: orgA, events: [event], currentTime: new Date() },
+          { condition: { startHour: 6, endHour: 22, timezone: 'Invalid/NonExistent_Zone' } }
+        );
+
+        // Does not throw RangeError; falls back to UTC
+        expect(Array.isArray(detections)).toBe(true);
+        expect(detections.length).toBe(0); // 12:00 UTC is business hours
+      });
+    });
+  });
 });

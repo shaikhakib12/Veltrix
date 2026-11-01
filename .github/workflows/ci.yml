@@ -36,6 +36,9 @@ jobs:
       - name: Typecheck Workspaces
         run: npm run typecheck
 
+      - name: Run Linter
+        run: npm run lint
+
       - name: Run Test Suites
         run: npm run test
 

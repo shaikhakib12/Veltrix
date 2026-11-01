@@ -47,9 +47,20 @@ export class Rule004ImpossibleTravel extends BaseDetectionRule {
         const curr = userEvents[i];
         if (!prev || !curr) continue;
 
-        // Ignore if either event is flagged as corporate VPN or proxy to account for VPN toggling
-        const isVpnOrProxy = prev.metadata?.isVpn === true || curr.metadata?.isVpn === true ||
-          prev.metadata?.isProxy === true || curr.metadata?.isProxy === true;
+        // Verify VPN/proxy suppression originates from trusted enrichment provenance or corporate gateway
+        const isEventTrustedVpnOrProxy = (e: typeof prev): boolean => {
+          if (!e.metadata) return false;
+          const hasVpnFlag = e.metadata.isVpn === true || e.metadata.isProxy === true;
+          if (!hasVpnFlag) return false;
+          // Provenance check: must possess recognized enrichmentSource or trusted gateway system
+          const source = typeof e.metadata.enrichmentSource === 'string' ? e.metadata.enrichmentSource.toUpperCase() : '';
+          const hasTrustedSource = ['MAXMIND', 'IPINFO', 'INTERNAL_VPN_REGISTRY', 'VPN_GATEWAY'].some((s) => source.includes(s));
+          const isCorporateGateway = typeof e.sourceSystem === 'string' && ['corporate-vpn', 'vpn-gateway', 'ztna-gateway'].includes(e.sourceSystem.toLowerCase());
+          const isExplicitlyTrusted = e.metadata.trustedEnrichment === true;
+          return hasTrustedSource || isCorporateGateway || isExplicitlyTrusted;
+        };
+
+        const isVpnOrProxy = isEventTrustedVpnOrProxy(prev) || isEventTrustedVpnOrProxy(curr);
         if (isVpnOrProxy) {
           continue;
         }

@@ -278,6 +278,28 @@ export class EventService {
 
     const idempotencyKey = data.idempotencyKey || headerIdempotencyKey || eventId;
 
+    // Security: Client-supplied fields cannot independently declare an IP trusted, VPN, proxy, or malicious.
+    let sanitizedMetadata: Record<string, unknown> | undefined;
+    if (data.metadata && typeof data.metadata === 'object') {
+      sanitizedMetadata = {};
+      const securityOverrideKeys = [
+        'isVpn',
+        'isProxy',
+        'isTorExitNode',
+        'threatIntelMatch',
+        'isMalicious',
+        'isTrusted',
+        'trustedEnrichment',
+      ];
+      for (const [key, val] of Object.entries(data.metadata)) {
+        if (securityOverrideKeys.includes(key)) {
+          sanitizedMetadata['client_declared_' + key] = val;
+        } else {
+          sanitizedMetadata[key] = val;
+        }
+      }
+    }
+
     return {
       eventId,
       orgId: tenantOrgId,
@@ -288,7 +310,7 @@ export class EventService {
       sourceIp: data.sourceIp,
       username: data.username,
       sourceSystem: data.sourceSystem,
-      metadata: data.metadata,
+      metadata: sanitizedMetadata,
       isSimulated: data.isSimulated ?? false,
       idempotencyKey,
       ingestedAt: nowIso,
