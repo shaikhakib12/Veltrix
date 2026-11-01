@@ -3,7 +3,9 @@ import type {
   SecurityEvent,
   IngestionItemResult,
   IngestionResponseData,
+  InternalTrustedEvidenceContext,
 } from '@veltrix/shared';
+import { getDefaultInternalEvidenceAuthority } from '../detection/evidence-authority.js';
 import {
   SingleEventIngestSchema,
   EventQueryRequestSchema,
@@ -37,7 +39,8 @@ export class EventService {
     rawPayload: unknown,
     tenantOrgId: string,
     isSuperAdmin: boolean = false,
-    headerIdempotencyKey?: string
+    headerIdempotencyKey?: string,
+    internalTrustedContext?: InternalTrustedEvidenceContext
   ): Promise<SingleIngestionResult> {
     // 1. Zod schema validation
     const parseResult = SingleEventIngestSchema.safeParse(rawPayload);
@@ -64,6 +67,27 @@ export class EventService {
     const normalizedEvent = this.normalizeEvent(data, tenantOrgId, headerIdempotencyKey);
     const payloadHash = computePayloadHash(rawPayload);
 
+    // If an authorized internal caller passed a trusted context, cryptographically verify and attach it
+    if (internalTrustedContext) {
+      const authority = getDefaultInternalEvidenceAuthority();
+      const meta = (normalizedEvent.metadata || {}) as Record<string, unknown>;
+      const siteId = typeof meta.siteId === 'string' ? meta.siteId : '';
+
+      const isValid = authority.verifyContext(internalTrustedContext, {
+        eventId: normalizedEvent.eventId,
+        orgId: tenantOrgId,
+        siteId,
+      });
+
+      if (isValid) {
+        normalizedEvent.trustedEvidenceContext = internalTrustedContext;
+      } else {
+        console.warn(
+          `[VELTRIX-SECURITY] Rejected invalid or unverified internalTrustedContext during event ingestion for event ${normalizedEvent.eventId}`
+        );
+      }
+    }
+
     // 4. Persistence with atomic conditional deduplication & payload consistency check
     const persistResult = await this.storage.saveEvent(normalizedEvent, payloadHash);
 
@@ -85,6 +109,36 @@ export class EventService {
       status: 'ACCEPTED',
       eventId: persistResult.eventId || normalizedEvent.eventId,
       event: normalizedEvent,
+    };
+  }
+
+  /**
+   * Internal-only ingestion method for server-side verifiers with pre-constructed SecurityEvent.
+   * Never exposed to external HTTP routes.
+   */
+  async ingestInternalEvent(
+    event: SecurityEvent
+  ): Promise<SingleIngestionResult> {
+    const payloadHash = computePayloadHash(event);
+    const persistResult = await this.storage.saveEvent(event, payloadHash);
+
+    if (persistResult.isDuplicate) {
+      return {
+        status: 'DUPLICATE_SUPPRESSED',
+        eventId: persistResult.eventId || event.eventId,
+      };
+    }
+
+    try {
+      this.detectionPipeline.dispatch(event);
+    } catch (pipelineErr) {
+      console.warn('[VELTRIX] Failed to dispatch internal event to detection pipeline:', pipelineErr);
+    }
+
+    return {
+      status: 'ACCEPTED',
+      eventId: persistResult.eventId || event.eventId,
+      event,
     };
   }
 

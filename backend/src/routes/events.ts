@@ -226,7 +226,7 @@ export function createEventsRouter(storage?: StorageInterface): Router {
         }> = {
           success: true,
           data: {
-            events: queryResult.events,
+            events: queryResult.events.map(({ trustedEvidenceContext: _discard, ...e }) => e as SecurityEvent),
             total: queryResult.total ?? queryResult.events.length,
             nextCursor: queryResult.nextCursor,
           },
@@ -306,9 +306,11 @@ export function createEventsRouter(storage?: StorageInterface): Router {
           return;
         }
 
+        const { trustedEvidenceContext: _discard, ...publicEvent } = event;
+
         const response: ApiResponse<SecurityEvent> = {
           success: true,
-          data: event,
+          data: publicEvent as SecurityEvent,
           meta: {
             timestamp: new Date().toISOString(),
           },

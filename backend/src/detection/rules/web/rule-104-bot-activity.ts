@@ -6,7 +6,7 @@ import type {
 } from '@veltrix/shared';
 import { BaseDetectionRule } from '../base-rule.js';
 import type { RuleEvaluationContext } from '../../types.js';
-import { normalizeWebTelemetry } from '../../web-parser.js';
+import { normalizeWebTelemetry, normalizeWebTelemetryAsync } from '../../web-parser.js';
 
 export class Rule104BotActivity extends BaseDetectionRule {
   readonly id = 'RULE-104';
@@ -71,7 +71,7 @@ export class Rule104BotActivity extends BaseDetectionRule {
     const eventsByEntity = new Map<string, Array<{ event: (typeof events)[0]; meta: ReturnType<typeof normalizeWebTelemetry>; isProbe: boolean; hasToolUa: boolean }>>();
 
     for (const event of events) {
-      const normalized = normalizeWebTelemetry(event);
+      const normalized = await normalizeWebTelemetryAsync(event);
       const ua = normalized.userAgent || '';
       const path = normalized.normalizedPath;
 
