@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import type { SecurityEvent, WebsiteAsset, Detection } from '@veltrix/shared';
 import { createApp } from '../src/app.js';
@@ -21,6 +21,7 @@ import {
   InternalEvidenceAuthority,
   getDefaultInternalEvidenceAuthority,
   initializeDefaultInternalEvidenceAuthority,
+  _initializeDefaultInternalEvidenceAuthorityForTesting,
   issueTrustedEvidenceContext,
   _resetInternalEvidenceAuthorityForTesting,
   type ApprovedVerifierIdentity,
@@ -29,6 +30,7 @@ import {
   EvidenceReplayRegistry,
 } from '../src/detection/evidence-authority.js';
 import { marshall } from '@aws-sdk/util-dynamodb';
+import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { handleSecurityEventStream, type DynamoDBStreamEvent } from '../src/detection/stream-handler.js';
 import { DynamoDBStore } from '../src/storage/dynamodb-store.js';
 import { SecretLoader } from '../src/auth/secret-loader.js';
@@ -3045,6 +3047,7 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
     });
 
     afterEach(() => {
+      vi.restoreAllMocks();
       process.env = { ...originalEnv };
       _resetInternalEvidenceAuthorityForTesting(undefined);
     });
@@ -3057,8 +3060,9 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       }).toThrow(/UNINITIALIZED_EVIDENCE_AUTHORITY.*Call initializeDefaultInternalEvidenceAuthority/);
     });
 
-    // Test 2: initializeDefaultInternalEvidenceAuthority loads secrets through SecretLoader.loadSecrets()
-    it('2. initializeDefaultInternalEvidenceAuthority loads secrets and configures authority correctly', async () => {
+    // Test 2: Test factory allows test dependency injection in non-production
+    it('2. test-only dependency injection works in non-production environments', async () => {
+      process.env.NODE_ENV = 'test';
       const mockLoader = {
         loadSecrets: async () => ({
           signingKey: TEST_SIGNING_KEY,
@@ -3067,7 +3071,7 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         }),
       };
 
-      const authority = await initializeDefaultInternalEvidenceAuthority({
+      const authority = await _initializeDefaultInternalEvidenceAuthorityForTesting({
         secretLoader: mockLoader as any,
         authorityConfig: {
           replayRegistry: new MemoryReplayRegistry(),
@@ -3077,7 +3081,6 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       expect(authority).toBeDefined();
       expect(getDefaultInternalEvidenceAuthority()).toBe(authority);
 
-      // Verify authority can create and verify contexts using the loaded credentials
       const eventId = '01a19700-0000-7000-8000-000000000601';
       const ctx = authority.createContext({
         serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
@@ -3091,104 +3094,97 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       expect(authority.verifyContext(ctx, { eventId, orgId, siteId })).toBe(true);
     });
 
-    // Test 3: In production mode, missing signing key fails closed
-    it('3. in production mode, missing signing key from Secrets Manager fails closed', async () => {
+    // Test 3: Production initialization cannot replace the real Secrets Manager loader
+    it('3. production initialization strictly rejects custom injected secretLoader', async () => {
       process.env.NODE_ENV = 'production';
-      const mockEmptyLoader = {
-        loadSecrets: async () => ({
-          signingKey: undefined,
-          rotatedVerificationKeys: [],
-          serviceCredentials: TEST_SERVICE_CREDENTIALS,
-        }),
-      };
-
-      await expect(
-        initializeDefaultInternalEvidenceAuthority({
-          secretLoader: mockEmptyLoader as any,
-          authorityConfig: { strictEnforcement: true },
-        })
-      ).rejects.toThrow(/FATAL_KEY_CONFIG_ERROR.*SIGNING_KEY/i);
-    });
-
-    // Test 4: In production mode, signing key shorter than 32 bytes fails closed
-    it('4. in production mode, signing key shorter than 32 bytes fails closed', async () => {
-      process.env.NODE_ENV = 'production';
-      const mockShortKeyLoader = {
-        loadSecrets: async () => ({
-          signingKey: 'short-key-under-32-bytes',
-          rotatedVerificationKeys: [],
-          serviceCredentials: TEST_SERVICE_CREDENTIALS,
-        }),
-      };
-
-      await expect(
-        initializeDefaultInternalEvidenceAuthority({
-          secretLoader: mockShortKeyLoader as any,
-          authorityConfig: { strictEnforcement: true },
-        })
-      ).rejects.toThrow(/FATAL_KEY_CONFIG_ERROR.*at least 32 bytes/i);
-    });
-
-    // Test 5: In production mode, missing service credentials fails closed
-    it('5. in production mode, missing service credentials fails closed', async () => {
-      process.env.NODE_ENV = 'production';
-      const mockNoCredsLoader = {
+      const mockCustomLoader = {
         loadSecrets: async () => ({
           signingKey: TEST_SIGNING_KEY,
           rotatedVerificationKeys: [],
-          serviceCredentials: {},
-        }),
-      };
-
-      await expect(
-        initializeDefaultInternalEvidenceAuthority({
-          secretLoader: mockNoCredsLoader as any,
-          authorityConfig: { strictEnforcement: true },
-        })
-      ).rejects.toThrow(/FATAL_KEY_CONFIG_ERROR.*service credential/i);
-    });
-
-    // Test 6: In production mode, Secrets Manager client failure fails closed
-    it('6. in production mode, Secrets Manager client failure fails closed', async () => {
-      process.env.NODE_ENV = 'production';
-      const mockFailingLoader = {
-        loadSecrets: async () => {
-          throw new Error('AccessDeniedException: KMS key access denied');
-        },
-      };
-
-      await expect(
-        initializeDefaultInternalEvidenceAuthority({
-          secretLoader: mockFailingLoader as any,
-          authorityConfig: { strictEnforcement: true },
-        })
-      ).rejects.toThrow(/FATAL_KEY_CONFIG_ERROR.*Failed to load secrets/i);
-    });
-
-    // Test 7: Caller cannot override signingKey via authorityConfig options
-    it('7. caller cannot override loaded signingKey via authorityConfig options', async () => {
-      const genuineSigningKey = TEST_SIGNING_KEY;
-      const forgedSigningKey = 'attacker-override-key-32bytes-long!';
-
-      const mockLoader = {
-        loadSecrets: async () => ({
-          signingKey: genuineSigningKey,
-          rotatedVerificationKeys: [],
           serviceCredentials: TEST_SERVICE_CREDENTIALS,
         }),
       };
 
-      const authority = await initializeDefaultInternalEvidenceAuthority({
-        secretLoader: mockLoader as any,
-        authorityConfig: {
-          signingKey: forgedSigningKey,
-          replayRegistry: new MemoryReplayRegistry(),
-        } as any,
+      await expect(
+        initializeDefaultInternalEvidenceAuthority({
+          secretLoader: mockCustomLoader,
+        } as any)
+      ).rejects.toThrow(/FATAL_CONFIG_ERROR.*Injected secretLoader.*is prohibited in production mode/);
+    });
+
+    // Test 4: Production initialization cannot inject custom secretLoaderConfig through casts
+    it('4. production initialization strictly rejects custom injected secretLoaderConfig', async () => {
+      process.env.NODE_ENV = 'production';
+      await expect(
+        initializeDefaultInternalEvidenceAuthority({
+          secretLoaderConfig: { signingKeySecretId: 'custom-secret-id' },
+        } as any)
+      ).rejects.toThrow(/FATAL_CONFIG_ERROR.*custom secretLoaderConfig is prohibited in production mode/);
+    });
+
+    // Test 5: Production initialization strictly rejects custom authorityConfig injection
+    it('5. production initialization strictly rejects custom authorityConfig injection', async () => {
+      process.env.NODE_ENV = 'production';
+      await expect(
+        initializeDefaultInternalEvidenceAuthority({
+          authorityConfig: { replayRegistry: new MemoryReplayRegistry() },
+        } as any)
+      ).rejects.toThrow(/FATAL_CONFIG_ERROR.*Injected authorityConfig is prohibited in production mode/);
+    });
+
+    // Test 6: Production cannot inject an arbitrary custom fake in-memory replay-registry
+    it('6. production cannot inject arbitrary custom in-memory replay-registry implementation', () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      class FakeCustomInMemoryRegistry {
+        async consumeNonce() { return { success: true, isReplayAttack: false, isIdempotentRetry: false }; }
+        async isNonceSeen() { return false; }
+      }
+
+      expect(() => {
+        new InternalEvidenceAuthority({
+          signingKey: TEST_SIGNING_KEY,
+          replayRegistry: new FakeCustomInMemoryRegistry() as any,
+        });
+      }).toThrow(/FATAL_REGISTRY_CONFIG_ERROR.*Arbitrary or in-memory replay registry injection is prohibited in production mode/);
+    });
+
+    // Test 7: Real exported production initialization path succeeds when Secrets Manager succeeds
+    it('7. real exported production initialization path succeeds with genuine Secrets Manager retrieval', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockImplementation(async (command: any) => {
+        const secretId = command.input?.SecretId || '';
+        if (secretId.includes('signing-key')) {
+          return {
+            SecretString: JSON.stringify({
+              signingKey: TEST_SIGNING_KEY,
+              rotatedKeys: ['rotated-sm-key-32-bytes-minimum-length!'],
+            }),
+          };
+        }
+        if (secretId.includes('service-credentials')) {
+          return {
+            SecretString: JSON.stringify({
+              canaryService: 'sm-canary-token-production-42',
+              collectorNginx: 'sm-nginx-token-production-42',
+            }),
+          };
+        }
+        return {};
       });
+
+      // Exercises the REAL exported production path: no custom loader, no custom config
+      const authority = await initializeDefaultInternalEvidenceAuthority();
+
+      expect(authority).toBeDefined();
+      expect(getDefaultInternalEvidenceAuthority()).toBe(authority);
 
       const eventId = '01a19700-0000-7000-8000-000000000607';
-      const genuineContext = authority.createContext({
-        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+      const ctx = authority.createContext({
+        serviceAuthToken: 'sm-canary-token-production-42',
         provenance: 'TRUSTED_SERVER_COMPONENT',
         verifierIdentity: 'canary-service:v1',
         eventId,
@@ -3196,192 +3192,78 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         siteId,
       });
 
-      // Context signed with genuine key verifies cleanly
-      expect(authority.verifyContext(genuineContext, { eventId, orgId, siteId })).toBe(true);
-
-      // Context crafted with forged key is rejected
-      const forgedAuthority = new InternalEvidenceAuthority({
-        signingKey: forgedSigningKey,
-        serviceCredentials: TEST_SERVICE_CREDENTIALS,
-      });
-      const forgedContext = forgedAuthority.createContext({
-        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
-        provenance: 'TRUSTED_SERVER_COMPONENT',
-        verifierIdentity: 'canary-service:v1',
-        eventId,
-        orgId,
-        siteId,
-      });
-
-      expect(authority.verifyContext(forgedContext, { eventId, orgId, siteId })).toBe(false);
+      expect(authority.verifyContext(ctx, { eventId, orgId, siteId })).toBe(true);
     });
 
-    // Test 8: Caller cannot override serviceCredentials via authorityConfig options
-    it('8. caller cannot override serviceCredentials via authorityConfig options', async () => {
-      const mockLoader = {
-        loadSecrets: async () => ({
-          signingKey: TEST_SIGNING_KEY,
-          rotatedVerificationKeys: [],
-          serviceCredentials: {
-            'canary-service:v1': ['genuine-canary-secret-token-32b!'],
-          },
-        }),
-      };
-
-      const authority = await initializeDefaultInternalEvidenceAuthority({
-        secretLoader: mockLoader as any,
-        authorityConfig: {
-          serviceCredentials: {
-            'canary-service:v1': ['forged-injected-override-token!'],
-          },
-          replayRegistry: new MemoryReplayRegistry(),
-        } as any,
-      });
-
-      const eventId = '01a19700-0000-7000-8000-000000000608';
-
-      // Attempting to create context with forged injected token is REJECTED
-      expect(() => {
-        authority.createContext({
-          serviceAuthToken: 'forged-injected-override-token!',
-          provenance: 'TRUSTED_SERVER_COMPONENT',
-          verifierIdentity: 'canary-service:v1',
-          eventId,
-          orgId,
-          siteId,
-        });
-      }).toThrow(/UNAUTHORIZED_SERVICE.*Invalid service authentication credential/);
-
-      // Genuine token from Secrets Manager works cleanly
-      expect(() => {
-        authority.createContext({
-          serviceAuthToken: 'genuine-canary-secret-token-32b!',
-          provenance: 'TRUSTED_SERVER_COMPONENT',
-          verifierIdentity: 'canary-service:v1',
-          eventId,
-          orgId,
-          siteId,
-        });
-      }).not.toThrow();
-    });
-
-    // Test 9: Caller cannot override rotatedVerificationKeys via authorityConfig options
-    it('9. caller cannot override rotatedVerificationKeys via authorityConfig options', async () => {
-      const genuineRotatedKey = 'genuine-rotated-key-32bytes-ok!!';
-      const forgedRotatedKey = 'forged-rotated-key-32bytes-bad!!';
-
-      const mockLoader = {
-        loadSecrets: async () => ({
-          signingKey: TEST_SIGNING_KEY,
-          rotatedVerificationKeys: [genuineRotatedKey],
-          serviceCredentials: TEST_SERVICE_CREDENTIALS,
-        }),
-      };
-
-      const authority = await initializeDefaultInternalEvidenceAuthority({
-        secretLoader: mockLoader as any,
-        authorityConfig: {
-          rotatedVerificationKeys: [forgedRotatedKey],
-          replayRegistry: new MemoryReplayRegistry(),
-        } as any,
-      });
-
-      const eventId = '01a19700-0000-7000-8000-000000000609';
-
-      // Context signed with genuine rotated key verifies cleanly
-      const genuineRotatedAuth = new InternalEvidenceAuthority({
-        signingKey: genuineRotatedKey,
-        serviceCredentials: TEST_SERVICE_CREDENTIALS,
-      });
-      const genuineRotatedCtx = genuineRotatedAuth.createContext({
-        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
-        provenance: 'TRUSTED_SERVER_COMPONENT',
-        verifierIdentity: 'canary-service:v1',
-        eventId,
-        orgId,
-        siteId,
-      });
-      expect(authority.verifyContext(genuineRotatedCtx, { eventId, orgId, siteId })).toBe(true);
-
-      // Context signed with forged rotated key fails verification
-      const forgedRotatedAuth = new InternalEvidenceAuthority({
-        signingKey: forgedRotatedKey,
-        serviceCredentials: TEST_SERVICE_CREDENTIALS,
-      });
-      const forgedRotatedCtx = forgedRotatedAuth.createContext({
-        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
-        provenance: 'TRUSTED_SERVER_COMPONENT',
-        verifierIdentity: 'canary-service:v1',
-        eventId,
-        orgId,
-        siteId,
-      });
-      expect(authority.verifyContext(forgedRotatedCtx, { eventId, orgId, siteId })).toBe(false);
-    });
-
-    // Test 10: Caller cannot disable strictEnforcement via authorityConfig in production mode
-    it('10. caller cannot disable strictEnforcement via authorityConfig in production mode', async () => {
+    // Test 8: In production mode, missing signing key fails closed via real path
+    it('8. in production mode, missing signing key from Secrets Manager fails closed via real path', async () => {
       process.env.NODE_ENV = 'production';
       process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
 
-      const mockLoader = {
-        loadSecrets: async () => ({
-          signingKey: TEST_SIGNING_KEY,
-          rotatedVerificationKeys: [],
-          serviceCredentials: TEST_SERVICE_CREDENTIALS,
-        }),
-      };
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockResolvedValue({});
 
-      const authority = await initializeDefaultInternalEvidenceAuthority({
-        secretLoader: mockLoader as any,
-        authorityConfig: {
-          strictEnforcement: false,
-          replayRegistry: new DynamoDBReplayRegistry({
-            docClient: { send: async () => ({}) } as any,
-          }),
-        } as any,
-      });
-
-      const eventId = '01a19700-0000-7000-8000-000000000610';
-
-      // Strict enforcement remains active in production: unapproved verifier fails closed
-      expect(() => {
-        authority.createContext({
-          serviceAuthToken: 'any-token',
-          provenance: 'TRUSTED_SERVER_COMPONENT',
-          verifierIdentity: 'unapproved-attacker-service' as any,
-          eventId,
-          orgId,
-          siteId,
-        });
-      }).toThrow(/UNAUTHORIZED_VERIFIER_IDENTITY/);
+      await expect(initializeDefaultInternalEvidenceAuthority()).rejects.toThrow(
+        /FATAL_KEY_CONFIG_ERROR.*(VELTRIX_EVIDENCE_SIGNING_KEY|No valid signing key)/i
+      );
     });
 
-    // Test 11: Caller cannot inject in-memory replayRegistry via authorityConfig in production mode
-    it('11. caller cannot inject in-memory replayRegistry via authorityConfig in production mode', async () => {
+    // Test 9: In production mode, short signing key fails closed via real path
+    it('9. in production mode, signing key shorter than 32 bytes fails closed via real path', async () => {
       process.env.NODE_ENV = 'production';
       process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
 
-      const mockLoader = {
-        loadSecrets: async () => ({
-          signingKey: TEST_SIGNING_KEY,
-          rotatedVerificationKeys: [],
-          serviceCredentials: TEST_SERVICE_CREDENTIALS,
-        }),
-      };
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockResolvedValue({
+        SecretString: JSON.stringify({ signingKey: 'short-key' }),
+      });
 
+      await expect(initializeDefaultInternalEvidenceAuthority()).rejects.toThrow(
+        /FATAL_KEY_CONFIG_ERROR.*(at least 32 bytes|insufficient entropy)/i
+      );
+    });
+
+    // Test 10: In production mode, missing service credentials fails closed via real path
+    it('10. in production mode, missing service credentials fails closed via real path', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockImplementation(async (cmd: any) => {
+        if ((cmd.input?.SecretId || '').includes('signing-key')) {
+          return { SecretString: JSON.stringify({ signingKey: TEST_SIGNING_KEY }) };
+        }
+        return { SecretString: JSON.stringify({}) };
+      });
+
+      await expect(initializeDefaultInternalEvidenceAuthority()).rejects.toThrow(
+        /FATAL_KEY_CONFIG_ERROR.*service credential/i
+      );
+    });
+
+    // Test 11: In production mode, Secrets Manager client failure fails closed via real path
+    it('11. in production mode, Secrets Manager client failure fails closed via real path', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockRejectedValue(
+        new Error('AccessDeniedException: KMS key access denied')
+      );
+
+      await expect(initializeDefaultInternalEvidenceAuthority()).rejects.toThrow(
+        /FATAL_KEY_CONFIG_ERROR.*Failed to load secrets from Secrets Manager in production/i
+      );
+    });
+
+    // Test 12: Test-only factory is strictly blocked in production mode
+    it('12. test-only dependency injection factory is strictly blocked in production mode', async () => {
+      process.env.NODE_ENV = 'production';
       await expect(
-        initializeDefaultInternalEvidenceAuthority({
-          secretLoader: mockLoader as any,
-          authorityConfig: {
-            replayRegistry: new MemoryReplayRegistry(),
-          } as any,
+        _initializeDefaultInternalEvidenceAuthorityForTesting({
+          secretLoader: {} as any,
         })
-      ).rejects.toThrow(/FATAL_REGISTRY_CONFIG_ERROR.*Injected MemoryReplayRegistry is prohibited in production mode/);
+      ).rejects.toThrow(/FATAL_SECURITY_ERROR.*strictly prohibited in production mode/);
     });
 
-    // Test 12: SecretLoader in production fails closed on Secrets Manager failure without silent fallback
-    it('12. SecretLoader in production fails closed on Secrets Manager failure even if environment variables are set', async () => {
+    // Test 13: SecretLoader in production fails closed on Secrets Manager failure without silent fallback
+    it('13. SecretLoader in production fails closed on Secrets Manager failure even if environment variables are set', async () => {
       process.env.NODE_ENV = 'production';
       process.env.VELTRIX_EVIDENCE_SIGNING_KEY = TEST_SIGNING_KEY;
 
@@ -3399,8 +3281,8 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       await expect(loader.loadSecrets()).rejects.toThrow(/SECRETS_MANAGER_FETCH_FAILED/);
     });
 
-    // Test 13: SecretLoader in non-production mode gracefully falls back to environment variables
-    it('13. SecretLoader in non-production mode gracefully falls back to environment variables', async () => {
+    // Test 14: SecretLoader in non-production mode gracefully falls back to environment variables
+    it('14. SecretLoader in non-production mode gracefully falls back to environment variables', async () => {
       process.env.NODE_ENV = 'test';
       delete process.env.STORAGE_MODE;
       delete process.env.VELTRIX_EVIDENCE_SIGNING_KEY_SECRET_ARN;

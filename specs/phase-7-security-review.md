@@ -252,12 +252,12 @@ All **9 security audit findings** identified during review have been fully remed
 
 ```
 Test Files  8 passed (8 across monorepo)
-     Tests  285 passed (285) - @veltrix/backend
+     Tests  286 passed (286) - @veltrix/backend
      Tests  8 passed (8)     - @veltrix/sdk-node
-  Total:    293 / 293 passed (100% pass rate)
+  Total:    294 / 294 passed (100% pass rate)
 ```
 
-- All 89 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including Section 9 regression tests, Section 10 trust-boundary tests, Section 11 distributed replay / secrets management tests, Section 12 idempotent retry tests, Section 13 asynchronous secret loading tests, Section 14 production replay registry tests, and Section 15 DynamoDB stream reconstruction tests).
+- All 90 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including Section 9 regression tests, Section 10 trust-boundary tests, Section 11 distributed replay / secrets management tests, Section 12 idempotent retry tests, Section 13 asynchronous secret loading tests, Section 14 production replay registry tests, and Section 15 DynamoDB stream reconstruction tests).
 - Full tenant boundary isolation and API key prohibition regression tests pass.
 - False positive suppression verified across all 5 web attack rules.
 
@@ -289,12 +289,13 @@ Test Files  8 passed (8 across monorepo)
   - Authoritative secrets loaded from Secrets Manager are applied strictly after optional non-security configuration, neutralizing any attempted overrides.
   - `SecretLoader` in production mode enforces an explicit fail-closed policy: if Secrets Manager retrieval fails, it throws `SECRETS_MANAGER_FETCH_FAILED` immediately without silent environment fallback.
 
-### 5.4 Finding 4 — Inviolable Authority Configuration & Strict Secrets Policy
-- **Issue:** `initializeDefaultInternalEvidenceAuthority()` permitted `options.authorityConfig` to override loaded credentials and strict enforcement. Additionally, `SecretLoader` in production allowed silent environment variable fallback on Secrets Manager failure.
+### 5.5 Finding 5 — Strict Production SecretLoader Boundary & Registry Verification
+- **Issue:** `InitializeAuthorityOptions` allowed callers to inject arbitrary `secretLoader` or `secretLoaderConfig`, potentially bypassing real AWS Secrets Manager in production. Furthermore, arbitrary custom in-memory replay registries could bypass the `MemoryReplayRegistry` type check.
 - **Remediation:**
-  - Restricted `InitializeAuthorityOptions` to `SafeAuthorityConfigOverrides`, explicitly omitting security-sensitive properties (`signingKey`, `rotatedVerificationKeys`, `serviceCredentials`, `strictEnforcement`).
-  - Authoritative secrets loaded from Secrets Manager are applied strictly after optional non-security configuration, neutralizing any attempted overrides.
-  - `SecretLoader` in production mode enforces an explicit fail-closed policy: if Secrets Manager retrieval fails, it throws `SECRETS_MANAGER_FETCH_FAILED` immediately without silent environment fallback.
+  - `InitializeAuthorityOptions` strictly accepts only `{ forceRefresh?: boolean }`. Any injected loader, loader config, or authority config throws `FATAL_CONFIG_ERROR` in production.
+  - Production `initializeDefaultInternalEvidenceAuthority` always instantiates the genuine `SecretLoader` internally and constructs its own genuine `DynamoDBReplayRegistry`.
+  - Test-only dependency injection is isolated to `_initializeDefaultInternalEvidenceAuthorityForTesting`, which strictly blocks execution under `NODE_ENV === 'production'`.
+  - In production mode, any replay registry that is not an instance of `DynamoDBReplayRegistry` (including arbitrary custom in-memory registries) is strictly rejected with `FATAL_REGISTRY_CONFIG_ERROR`.
 
 ---
 

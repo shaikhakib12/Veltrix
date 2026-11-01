@@ -183,14 +183,9 @@ export class InternalEvidenceAuthority {
     if (this.isProduction) {
       if (config?.replayRegistry) {
         // Explicitly injected MemoryReplayRegistry MUST be rejected in production
-        if (
-          config.replayRegistry instanceof MemoryReplayRegistry ||
-          config.replayRegistry instanceof EvidenceReplayRegistry ||
-          config.replayRegistry.constructor.name === 'MemoryReplayRegistry' ||
-          config.replayRegistry.constructor.name === 'EvidenceReplayRegistry'
-        ) {
+        if (!(config.replayRegistry instanceof DynamoDBReplayRegistry)) {
           throw new Error(
-            'FATAL_REGISTRY_CONFIG_ERROR: Injected MemoryReplayRegistry is prohibited in production mode. Persistent distributed storage (DynamoDBReplayRegistry) is required.'
+            'FATAL_REGISTRY_CONFIG_ERROR: Injected MemoryReplayRegistry is prohibited in production mode. Arbitrary or in-memory replay registry injection is prohibited in production mode. Production strictly requires DynamoDBReplayRegistry.'
           );
         }
         this.replayRegistry = config.replayRegistry;
@@ -726,13 +721,34 @@ export type SafeAuthorityConfigOverrides = Omit<
   'signingKey' | 'rotatedVerificationKeys' | 'serviceCredentials' | 'strictEnforcement'
 >;
 
+/**
+ * Production authority initialization options.
+ * Does not accept arbitrary custom loaders, mock configurations, or client overrides.
+ * All types are strictly typed without 'any'.
+ */
 export interface InitializeAuthorityOptions {
-  secretLoader?: any;
-  secretLoaderConfig?: any;
-  /**
-   * Optional non-security configuration overrides (e.g. custom replayRegistry for isolated tests).
-   * Security credentials and strict enforcement cannot be overridden through this configuration.
-   */
+  /** Whether to force a refresh of cached secrets from AWS Secrets Manager. */
+  forceRefresh?: boolean;
+}
+
+/**
+ * Test factory options for isolated unit and integration testing.
+ * Strictly prohibited in production environments.
+ */
+export interface TestAuthorityFactoryOptions {
+  secretLoader?: {
+    loadSecrets(forceRefresh?: boolean): Promise<{
+      signingKey?: string;
+      rotatedVerificationKeys?: string[];
+      serviceCredentials?: Partial<Record<ApprovedVerifierIdentity, string[]>>;
+    }>;
+  };
+  secretLoaderConfig?: {
+    client?: any;
+    signingKeySecretId?: string;
+    serviceCredentialsSecretId?: string;
+    strictEnforcement?: boolean;
+  };
   authorityConfig?: SafeAuthorityConfigOverrides;
   forceRefresh?: boolean;
 }
@@ -741,28 +757,45 @@ let defaultAuthority: InternalEvidenceAuthority | undefined;
 let isDefaultAuthorityInitialized = false;
 
 /**
- * Asynchronously initializes the default InternalEvidenceAuthority singleton by loading
- * credentials from AWS Secrets Manager (or secure environment in non-production).
+ * Asynchronously initializes the default InternalEvidenceAuthority singleton for production runtime.
  *
- * In production mode:
- * - Must successfully load 256-bit signing key from Secrets Manager.
- * - Must successfully load service credentials for approved verifiers.
- * - Fails closed (throws FATAL_KEY_CONFIG_ERROR) if secrets cannot be loaded.
- * - Never falls back to generated development keys or missing service credentials.
+ * Security Invariants:
+ * 1. Instantiates genuine SecretLoader internally; arbitrary custom loaders or clients are forbidden.
+ * 2. In production, retrieves secrets directly from AWS Secrets Manager resources.
+ * 3. In production, constructs its own internal DynamoDBReplayRegistry; arbitrary custom registries are forbidden.
+ * 4. Fails closed (throws FATAL_KEY_CONFIG_ERROR) if Secrets Manager retrieval fails or secrets are invalid.
  */
 export async function initializeDefaultInternalEvidenceAuthority(
   options?: InitializeAuthorityOptions
 ): Promise<InternalEvidenceAuthority> {
   const isProduction = process.env.NODE_ENV === 'production';
 
+  // Security Invariant: Detect and reject custom loader or config injection in production
+  if (isProduction) {
+    const rawOpts = options as any;
+    if (rawOpts?.secretLoader || rawOpts?.secretLoaderConfig) {
+      throw new Error(
+        'FATAL_CONFIG_ERROR: Injected secretLoader or custom secretLoaderConfig is prohibited in production mode. Production must instantiate and use the genuine Secrets Manager loader internally.'
+      );
+    }
+    if (rawOpts?.authorityConfig) {
+      throw new Error(
+        'FATAL_CONFIG_ERROR: Injected authorityConfig is prohibited in production mode. Production authority configuration cannot be overridden.'
+      );
+    }
+  }
+
+  // In non-production, if a test passed custom mock loader or config, route through test factory
+  if (!isProduction && ((options as any)?.secretLoader || (options as any)?.authorityConfig)) {
+    return _initializeDefaultInternalEvidenceAuthorityForTesting(options as any);
+  }
+
   const { SecretLoader } = await import('../auth/secret-loader.js');
 
-  const loader =
-    options?.secretLoader ||
-    new SecretLoader({
-      strictEnforcement: isProduction,
-      ...options?.secretLoaderConfig,
-    });
+  // Production ALWAYS instantiates the genuine SecretLoader internally
+  const loader = new SecretLoader({
+    strictEnforcement: isProduction,
+  });
 
   let loadedSecrets: any;
   try {
@@ -796,36 +829,58 @@ export async function initializeDefaultInternalEvidenceAuthority(
     }
   }
 
-  // 1. Non-security configuration applied first
+  // Production authority constructs its own genuine DynamoDBReplayRegistry internally
+  const authority = new InternalEvidenceAuthority({
+    signingKey: loadedSecrets.signingKey,
+    rotatedVerificationKeys: loadedSecrets.rotatedVerificationKeys,
+    serviceCredentials: loadedSecrets.serviceCredentials,
+    strictEnforcement: isProduction,
+  });
+
+  defaultAuthority = authority;
+  isDefaultAuthorityInitialized = true;
+  return defaultAuthority;
+}
+
+/**
+ * Test-only factory to initialize the default authority with mock loaders or registries.
+ * Strictly prohibited and blocked in production mode.
+ */
+export async function _initializeDefaultInternalEvidenceAuthorityForTesting(
+  options?: TestAuthorityFactoryOptions
+): Promise<InternalEvidenceAuthority> {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'FATAL_SECURITY_ERROR: _initializeDefaultInternalEvidenceAuthorityForTesting is strictly prohibited in production mode.'
+    );
+  }
+
+  const { SecretLoader } = await import('../auth/secret-loader.js');
+
+  const loader =
+    options?.secretLoader ||
+    new SecretLoader({
+      strictEnforcement: false,
+      ...options?.secretLoaderConfig,
+    });
+
+  const loadedSecrets = await loader.loadSecrets(options?.forceRefresh);
+
   const nonSecurityConfig: Record<string, any> = options?.authorityConfig
     ? { ...options.authorityConfig }
     : {};
 
-  // Strictly sanitize any attempted runtime injection of security properties
   delete nonSecurityConfig.signingKey;
   delete nonSecurityConfig.rotatedVerificationKeys;
   delete nonSecurityConfig.serviceCredentials;
   delete nonSecurityConfig.strictEnforcement;
 
-  // Enforce production replay registry restrictions
-  if (
-    isProduction &&
-    nonSecurityConfig.replayRegistry &&
-    (nonSecurityConfig.replayRegistry instanceof MemoryReplayRegistry ||
-      nonSecurityConfig.replayRegistry instanceof EvidenceReplayRegistry)
-  ) {
-    throw new Error(
-      'FATAL_REGISTRY_CONFIG_ERROR: Injected MemoryReplayRegistry is prohibited in production mode. Use DynamoDBReplayRegistry.'
-    );
-  }
-
-  // 2. Authoritative security configuration applied afterward from validated Secrets Manager secrets
   const authority = new InternalEvidenceAuthority({
     ...nonSecurityConfig,
     signingKey: loadedSecrets.signingKey,
     rotatedVerificationKeys: loadedSecrets.rotatedVerificationKeys,
     serviceCredentials: loadedSecrets.serviceCredentials,
-    strictEnforcement: isProduction,
+    strictEnforcement: false,
   });
 
   defaultAuthority = authority;
