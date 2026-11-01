@@ -24,7 +24,10 @@ export interface EventQueryOptions {
 
 export interface StorageInterface {
   // --- Security Events Telemetry ---
-  saveEvent(event: SecurityEvent): Promise<{ saved: boolean; isDuplicate: boolean }>;
+  saveEvent(
+    event: SecurityEvent,
+    payloadHash?: string
+  ): Promise<{ saved: boolean; isDuplicate: boolean; eventId?: string }>;
   getEvents(
     orgId: string,
     options?: EventQueryOptions

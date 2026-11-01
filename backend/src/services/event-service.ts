@@ -11,6 +11,7 @@ import {
 import type { StorageInterface, EventQueryOptions } from '../storage/storage-interface.js';
 import { getStorage } from '../storage/index.js';
 import { generateUuidV7, isValidUuid } from '../utils/uuid.js';
+import { computePayloadHash } from '../utils/idempotency.js';
 
 export interface SingleIngestionResult {
   status: 'ACCEPTED' | 'DUPLICATE_SUPPRESSED';
@@ -58,20 +59,21 @@ export class EventService {
 
     // 3. Normalization
     const normalizedEvent = this.normalizeEvent(data, tenantOrgId, headerIdempotencyKey);
+    const payloadHash = computePayloadHash(rawPayload);
 
-    // 4. Persistence with atomic conditional deduplication
-    const persistResult = await this.storage.saveEvent(normalizedEvent);
+    // 4. Persistence with atomic conditional deduplication & payload consistency check
+    const persistResult = await this.storage.saveEvent(normalizedEvent, payloadHash);
 
     if (persistResult.isDuplicate) {
       return {
         status: 'DUPLICATE_SUPPRESSED',
-        eventId: normalizedEvent.eventId,
+        eventId: persistResult.eventId || normalizedEvent.eventId,
       };
     }
 
     return {
       status: 'ACCEPTED',
-      eventId: normalizedEvent.eventId,
+      eventId: persistResult.eventId || normalizedEvent.eventId,
       event: normalizedEvent,
     };
   }
@@ -142,7 +144,8 @@ export class EventService {
       const normalized = this.normalizeEvent(validData, tenantOrgId);
 
       try {
-        const persistResult = await this.storage.saveEvent(normalized);
+        const itemPayloadHash = computePayloadHash(itemRaw);
+        const persistResult = await this.storage.saveEvent(normalized, itemPayloadHash);
         if (persistResult.isDuplicate) {
           duplicates++;
           results.push({
@@ -250,7 +253,7 @@ export class EventService {
 
     const eventId = data.eventId && isValidUuid(data.eventId)
       ? data.eventId
-      : generateUuidV7();
+      : generateUuidV7(new Date(eventTimestamp).getTime());
 
     const idempotencyKey = data.idempotencyKey || headerIdempotencyKey || eventId;
 

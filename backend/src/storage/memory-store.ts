@@ -17,6 +17,7 @@ export class MemoryStore implements StorageInterface {
   // Primary stores partitioned by orgId where applicable
   private eventsByOrg: Map<string, SecurityEvent[]> = new Map();
   private eventDeduplicationKeys: Map<string, Set<string>> = new Map();
+  private idempotencyRecordsByOrg: Map<string, Map<string, { payloadHash: string; eventId: string }>> = new Map();
 
   private incidentsByOrg: Map<string, Map<string, Incident>> = new Map();
   private rulesByOrg: Map<string, Map<string, DetectionRule>> = new Map();
@@ -31,27 +32,58 @@ export class MemoryStore implements StorageInterface {
   // --- Security Events Telemetry ---
 
   async saveEvent(
-    event: SecurityEvent
-  ): Promise<{ saved: boolean; isDuplicate: boolean }> {
+    event: SecurityEvent,
+    payloadHash?: string
+  ): Promise<{ saved: boolean; isDuplicate: boolean; eventId?: string }> {
     const orgId = event.orgId;
     if (!this.eventDeduplicationKeys.has(orgId)) {
       this.eventDeduplicationKeys.set(orgId, new Set());
+      this.idempotencyRecordsByOrg.set(orgId, new Map());
       this.eventsByOrg.set(orgId, []);
     }
 
-    const dedupSet = this.eventDeduplicationKeys.get(orgId)!;
+    const idempotencyRecords = this.idempotencyRecordsByOrg.get(orgId)!;
     const idempotencyKey = event.idempotencyKey || event.eventId;
 
-    // Atomic deduplication check
+    // Payload consistency check for idempotency keys AND event IDs
+    // (A different idempotency key cannot bypass event ID payload consistency)
+    const existingByIdemp = idempotencyRecords.get(idempotencyKey);
+    const existingByEventId = idempotencyRecords.get(event.eventId);
+    const existing = existingByIdemp || existingByEventId;
+
+    if (existing) {
+      if (payloadHash && existing.payloadHash && existing.payloadHash !== payloadHash) {
+        const err = new Error(
+          `Idempotency key or Event ID was previously used with a different request payload.`
+        );
+        (err as unknown as { code: string }).code = 'IDEMPOTENCY_PAYLOAD_MISMATCH';
+        throw err;
+      }
+      return { saved: false, isDuplicate: true, eventId: existing.eventId };
+    }
+
+    const dedupSet = this.eventDeduplicationKeys.get(orgId)!;
     if (dedupSet.has(idempotencyKey)) {
-      return { saved: false, isDuplicate: true };
+      return { saved: false, isDuplicate: true, eventId: event.eventId };
     }
 
     dedupSet.add(idempotencyKey);
+    idempotencyRecords.set(idempotencyKey, {
+      payloadHash: payloadHash || '',
+      eventId: event.eventId,
+    });
+    if (event.eventId !== idempotencyKey) {
+      idempotencyRecords.set(event.eventId, {
+        payloadHash: payloadHash || '',
+        eventId: event.eventId,
+      });
+      dedupSet.add(event.eventId);
+    }
+
     const orgEvents = this.eventsByOrg.get(orgId)!;
     orgEvents.push({ ...event });
 
-    return { saved: true, isDuplicate: false };
+    return { saved: true, isDuplicate: false, eventId: event.eventId };
   }
 
   async getEvents(
@@ -405,6 +437,7 @@ export class MemoryStore implements StorageInterface {
   async clearAll(): Promise<void> {
     this.eventsByOrg.clear();
     this.eventDeduplicationKeys.clear();
+    this.idempotencyRecordsByOrg.clear();
     this.incidentsByOrg.clear();
     this.rulesByOrg.clear();
     this.threatIndicators.clear();

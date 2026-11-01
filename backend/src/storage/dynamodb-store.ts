@@ -82,12 +82,14 @@ export class DynamoDBStore implements StorageInterface {
   // --- Security Events Telemetry (Time-Sharded & Idempotent) ---
 
   async saveEvent(
-    event: SecurityEvent
-  ): Promise<{ saved: boolean; isDuplicate: boolean }> {
+    event: SecurityEvent,
+    payloadHash?: string
+  ): Promise<{ saved: boolean; isDuplicate: boolean; eventId?: string }> {
     const orgId = event.orgId;
     const dateStr = event.timestamp.slice(0, 10); // YYYY-MM-DD
     const pk = `ORG#${orgId}#DATE#${dateStr}`;
     const sk = `EVENT#${event.timestamp}#${event.eventId}`;
+    const idempotencyKey = event.idempotencyKey || event.eventId;
 
     const ttlEpoch = Math.floor(new Date(event.timestamp).getTime() / 1000) + 30 * 86400;
 
@@ -109,27 +111,151 @@ export class DynamoDBStore implements StorageInterface {
       sourceSystem: event.sourceSystem,
       metadata: event.metadata,
       isSimulated: event.isSimulated || false,
-      idempotencyKey: event.idempotencyKey || event.eventId,
+      idempotencyKey,
+      payloadHash: payloadHash || '',
       ttl: ttlEpoch,
     };
+
+    const { PK: _p, SK: _s, ...itemPayload } = item;
+
+    // Atomically create Main Event, ID Pointer, and Idempotency Record in a single TransactWriteCommand
+    const transactItems: Array<{
+      Put: {
+        TableName: string;
+        Item: Record<string, unknown>;
+        ConditionExpression: string;
+      };
+    }> = [
+      {
+        Put: {
+          TableName: this.eventsTable,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
+        },
+      },
+      {
+        Put: {
+          TableName: this.eventsTable,
+          Item: {
+            PK: `ORG#${orgId}#EVENTID#${event.eventId}`,
+            SK: 'METADATA',
+            ...itemPayload,
+          },
+          ConditionExpression: 'attribute_not_exists(PK)',
+        },
+      },
+    ];
+
+    if (idempotencyKey !== event.eventId) {
+      transactItems.push({
+        Put: {
+          TableName: this.eventsTable,
+          Item: {
+            PK: `ORG#${orgId}#IDEMPOTENCY#${idempotencyKey}`,
+            SK: 'RECORD',
+            orgId,
+            idempotencyKey,
+            eventId: event.eventId,
+            payloadHash: payloadHash || '',
+            ttl: ttlEpoch,
+          },
+          ConditionExpression: 'attribute_not_exists(PK)',
+        },
+      });
+    }
 
     try {
       await this.executeWithRetry(() =>
         this.docClient.send(
-          new PutCommand({
-            TableName: this.eventsTable,
-            Item: item,
-            ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
+          new TransactWriteCommand({
+            TransactItems: transactItems,
           })
         )
       );
-      return { saved: true, isDuplicate: false };
+      return { saved: true, isDuplicate: false, eventId: event.eventId };
     } catch (err: unknown) {
-      if ((err as { name?: string })?.name === 'ConditionalCheckFailedException') {
-        // Atomic duplicate caught; suppress downstream processing
-        return { saved: false, isDuplicate: true };
+      const errName = (err as { name?: string })?.name;
+      if (
+        errName === 'ConditionalCheckFailedException' ||
+        errName === 'TransactionCanceledException'
+      ) {
+        // Atomic duplicate caught; verify payload consistency
+        return await this.handleDuplicatePayloadConsistency(
+          orgId,
+          idempotencyKey,
+          event.eventId,
+          payloadHash
+        );
       }
       throw err;
+    }
+  }
+
+  private async handleDuplicatePayloadConsistency(
+    orgId: string,
+    idempotencyKey: string,
+    eventId: string,
+    payloadHash?: string
+  ): Promise<{ saved: boolean; isDuplicate: boolean; eventId?: string }> {
+    try {
+      let existingRecord: { payloadHash?: string; eventId?: string } | undefined;
+
+      // 1. Check existing event ID pointer
+      const pointerResult = await this.executeWithRetry(() =>
+        this.docClient.send(
+          new GetCommand({
+            TableName: this.eventsTable,
+            Key: {
+              PK: `ORG#${orgId}#EVENTID#${eventId}`,
+              SK: 'METADATA',
+            },
+          })
+        )
+      );
+
+      if (pointerResult.Item) {
+        existingRecord = pointerResult.Item as { payloadHash?: string; eventId?: string };
+      } else if (idempotencyKey !== eventId) {
+        // 2. Check existing idempotency record
+        const idempResult = await this.executeWithRetry(() =>
+          this.docClient.send(
+            new GetCommand({
+              TableName: this.eventsTable,
+              Key: {
+                PK: `ORG#${orgId}#IDEMPOTENCY#${idempotencyKey}`,
+                SK: 'RECORD',
+              },
+            })
+          )
+        );
+        if (idempResult.Item) {
+          existingRecord = idempResult.Item as { payloadHash?: string; eventId?: string };
+        }
+      }
+
+      if (
+        existingRecord &&
+        payloadHash &&
+        existingRecord.payloadHash &&
+        existingRecord.payloadHash !== payloadHash
+      ) {
+        const mismatchErr = new Error(
+          `Idempotency key or Event ID was previously used with a different request payload.`
+        );
+        (mismatchErr as unknown as { code: string }).code = 'IDEMPOTENCY_PAYLOAD_MISMATCH';
+        throw mismatchErr;
+      }
+
+      return {
+        saved: false,
+        isDuplicate: true,
+        eventId: existingRecord?.eventId || eventId,
+      };
+    } catch (err: unknown) {
+      if ((err as { code?: string })?.code === 'IDEMPOTENCY_PAYLOAD_MISMATCH') {
+        throw err;
+      }
+      return { saved: false, isDuplicate: true, eventId };
     }
   }
 
@@ -253,25 +379,69 @@ export class DynamoDBStore implements StorageInterface {
 
   async getEventById(orgId: string, eventId: string): Promise<SecurityEvent | null> {
     try {
-      // High-efficiency targeted single-partition Query via UUIDv7 date extraction (eliminates table scans)
+      // 1. Direct O(1) lookup via ID pointer (works instantly for UUIDv4, UUIDv7, delayed events)
+      try {
+        const pointerResult = await this.executeWithRetry(() =>
+          this.docClient.send(
+            new GetCommand({
+              TableName: this.eventsTable,
+              Key: {
+                PK: `ORG#${orgId}#EVENTID#${eventId}`,
+                SK: 'METADATA',
+              },
+            })
+          )
+        );
+        if (pointerResult.Item) {
+          const item = pointerResult.Item as SecurityEvent & Record<string, unknown>;
+          const { PK, SK, GSI1_PK, GSI1_SK, GSI2_PK, GSI2_SK, ...event } = item;
+          return event as unknown as SecurityEvent;
+        }
+      } catch {
+        // Fallback to targeted partition query
+      }
+
+      // 2. Targeted single-partition Query via UUIDv7 date extraction
       const extractedDate = extractDateFromUuidV7(eventId);
-      const targetDate = extractedDate || new Date().toISOString().slice(0, 10);
-      const pk = `ORG#${orgId}#DATE#${targetDate}`;
+      const candidateDates: string[] = [];
 
-      const command = new QueryCommand({
-        TableName: this.eventsTable,
-        KeyConditionExpression: 'PK = :pk',
-        FilterExpression: 'eventId = :eventId',
-        ExpressionAttributeValues: {
-          ':pk': pk,
-          ':eventId': eventId,
-        },
-        Limit: 1,
-      });
+      if (extractedDate) {
+        candidateDates.push(extractedDate);
+        // Cover UTC midnight boundary and clock skew (+/- 1 day)
+        const dateObj = new Date(extractedDate + 'T00:00:00.000Z');
+        const prevDay = new Date(dateObj.getTime() - 86400000).toISOString().slice(0, 10);
+        const nextDay = new Date(dateObj.getTime() + 86400000).toISOString().slice(0, 10);
+        candidateDates.push(prevDay, nextDay);
+      } else {
+        // UUIDv4 or untimed identifier: check today and yesterday partitions (no full table scans)
+        const today = new Date().toISOString().slice(0, 10);
+        const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+        candidateDates.push(today, yesterday);
+      }
 
-      const response = await this.executeWithRetry(() => this.docClient.send(command));
-      const items = (response.Items || []) as SecurityEvent[];
-      return items[0] || null;
+      for (const targetDate of candidateDates) {
+        const pk = `ORG#${orgId}#DATE#${targetDate}`;
+        const queryRes = await this.executeWithRetry(() =>
+          this.docClient.send(
+            new QueryCommand({
+              TableName: this.eventsTable,
+              KeyConditionExpression: 'PK = :pk',
+              FilterExpression: 'eventId = :eventId',
+              ExpressionAttributeValues: {
+                ':pk': pk,
+                ':eventId': eventId,
+              },
+              Limit: 1,
+            })
+          )
+        );
+        const items = (queryRes.Items || []) as SecurityEvent[];
+        if (items.length > 0 && items[0]) {
+          return items[0];
+        }
+      }
+
+      return null;
     } catch {
       return null;
     }
