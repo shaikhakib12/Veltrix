@@ -44,3 +44,13 @@ jobs:
 
       - name: Build All Packages
         run: npm run build
+
+      - name: Verify Production Artifact Exclusion
+        run: |
+          test_files=$(find backend/dist -type f \( -iname "*test*" -o -iname "*.spec.*" \))
+          if [ -n "$test_files" ]; then
+            echo "::error::Test artifacts detected in production build backend/dist:"
+            echo "$test_files"
+            exit 1
+          fi
+          echo "Production artifact exclusion verified: 0 test files in backend/dist."
