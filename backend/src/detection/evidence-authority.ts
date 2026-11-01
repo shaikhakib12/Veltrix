@@ -1,4 +1,6 @@
 import { createHmac, createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import type { LoadedSecrets } from '../auth/secret-loader.js';
 import type {
   InternalTrustedEvidenceContext,
   EvidenceProvenance,
@@ -702,8 +704,14 @@ export class InternalEvidenceAuthority {
 
   /**
    * Resets replay registry (used for test isolation).
+   * Strictly prohibited in production environments.
    */
   clearReplayRegistryForTesting(): void {
+    if (this.isProduction || process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'FATAL_SECURITY_ERROR: clearReplayRegistryForTesting is strictly prohibited in production mode.'
+      );
+    }
     if (this.replayRegistry.clearForTesting) {
       this.replayRegistry.clearForTesting();
     }
@@ -735,20 +743,24 @@ export interface InitializeAuthorityOptions {
  * Test factory options for isolated unit and integration testing.
  * Strictly prohibited in production environments.
  */
+export interface TestSecretLoader {
+  loadSecrets(forceRefresh?: boolean): Promise<{
+    signingKey?: string;
+    rotatedVerificationKeys?: string[];
+    serviceCredentials?: Partial<Record<ApprovedVerifierIdentity, string[]>>;
+  }>;
+}
+
+export interface TestSecretLoaderConfig {
+  client?: SecretsManagerClient;
+  signingKeySecretId?: string;
+  serviceCredentialsSecretId?: string;
+  strictEnforcement?: boolean;
+}
+
 export interface TestAuthorityFactoryOptions {
-  secretLoader?: {
-    loadSecrets(forceRefresh?: boolean): Promise<{
-      signingKey?: string;
-      rotatedVerificationKeys?: string[];
-      serviceCredentials?: Partial<Record<ApprovedVerifierIdentity, string[]>>;
-    }>;
-  };
-  secretLoaderConfig?: {
-    client?: any;
-    signingKeySecretId?: string;
-    serviceCredentialsSecretId?: string;
-    strictEnforcement?: boolean;
-  };
+  secretLoader?: TestSecretLoader;
+  secretLoaderConfig?: TestSecretLoaderConfig;
   authorityConfig?: SafeAuthorityConfigOverrides;
   forceRefresh?: boolean;
 }
@@ -772,13 +784,13 @@ export async function initializeDefaultInternalEvidenceAuthority(
 
   // Security Invariant: Detect and reject custom loader or config injection in production
   if (isProduction) {
-    const rawOpts = options as any;
-    if (rawOpts?.secretLoader || rawOpts?.secretLoaderConfig) {
+    const rawOpts = options as Record<string, unknown> | undefined;
+    if (rawOpts?.['secretLoader'] || rawOpts?.['secretLoaderConfig']) {
       throw new Error(
         'FATAL_CONFIG_ERROR: Injected secretLoader or custom secretLoaderConfig is prohibited in production mode. Production must instantiate and use the genuine Secrets Manager loader internally.'
       );
     }
-    if (rawOpts?.authorityConfig) {
+    if (rawOpts?.['authorityConfig']) {
       throw new Error(
         'FATAL_CONFIG_ERROR: Injected authorityConfig is prohibited in production mode. Production authority configuration cannot be overridden.'
       );
@@ -786,8 +798,9 @@ export async function initializeDefaultInternalEvidenceAuthority(
   }
 
   // In non-production, if a test passed custom mock loader or config, route through test factory
-  if (!isProduction && ((options as any)?.secretLoader || (options as any)?.authorityConfig)) {
-    return _initializeDefaultInternalEvidenceAuthorityForTesting(options as any);
+  const nonProdOpts = options as (InitializeAuthorityOptions & TestAuthorityFactoryOptions) | undefined;
+  if (!isProduction && (nonProdOpts?.secretLoader || nonProdOpts?.authorityConfig)) {
+    return _initializeDefaultInternalEvidenceAuthorityForTesting(nonProdOpts);
   }
 
   const { SecretLoader } = await import('../auth/secret-loader.js');
@@ -797,7 +810,7 @@ export async function initializeDefaultInternalEvidenceAuthority(
     strictEnforcement: isProduction,
   });
 
-  let loadedSecrets: any;
+  let loadedSecrets: LoadedSecrets;
   try {
     loadedSecrets = await loader.loadSecrets(options?.forceRefresh);
   } catch (err) {
@@ -866,14 +879,14 @@ export async function _initializeDefaultInternalEvidenceAuthorityForTesting(
 
   const loadedSecrets = await loader.loadSecrets(options?.forceRefresh);
 
-  const nonSecurityConfig: Record<string, any> = options?.authorityConfig
+  const nonSecurityConfig: SafeAuthorityConfigOverrides = options?.authorityConfig
     ? { ...options.authorityConfig }
     : {};
 
-  delete nonSecurityConfig.signingKey;
-  delete nonSecurityConfig.rotatedVerificationKeys;
-  delete nonSecurityConfig.serviceCredentials;
-  delete nonSecurityConfig.strictEnforcement;
+  delete (nonSecurityConfig as Record<string, unknown>)['signingKey'];
+  delete (nonSecurityConfig as Record<string, unknown>)['rotatedVerificationKeys'];
+  delete (nonSecurityConfig as Record<string, unknown>)['serviceCredentials'];
+  delete (nonSecurityConfig as Record<string, unknown>)['strictEnforcement'];
 
   const authority = new InternalEvidenceAuthority({
     ...nonSecurityConfig,
@@ -927,18 +940,30 @@ export function issueTrustedEvidenceContext(
 
 /**
  * Test-only utility to reset or override the default authority.
+ * Strictly prohibited in production environments.
  */
 export function _resetInternalEvidenceAuthorityForTesting(
   authority?: InternalEvidenceAuthority
 ): void {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'FATAL_SECURITY_ERROR: _resetInternalEvidenceAuthorityForTesting is strictly prohibited in production mode.'
+    );
+  }
   defaultAuthority = authority;
   isDefaultAuthorityInitialized = Boolean(authority);
 }
 
 /**
  * Test-only utility to clear default replay registry.
+ * Strictly prohibited in production environments.
  */
 export function clearReplayRegistryForTesting(): void {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'FATAL_SECURITY_ERROR: clearReplayRegistryForTesting is strictly prohibited in production mode.'
+    );
+  }
   if (defaultAuthority) {
     defaultAuthority.clearReplayRegistryForTesting();
   }
