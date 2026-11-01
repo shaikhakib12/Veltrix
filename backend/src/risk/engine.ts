@@ -129,10 +129,13 @@ export class RiskScoringEngine {
 
     // 7. Base product term
     const baseProduct = baseSeverity * freqMultiplier * assetMultiplier * threatMultiplier;
+    const safeBaseProduct = Number.isFinite(baseProduct) ? baseProduct : 10;
+    const safeVulnTerm = Number.isFinite(vulnTerm) ? vulnTerm : 0;
 
     // 8. Final Raw Score & Capping
-    const rawScore = baseProduct + vulnTerm + sequenceBonus;
-    const finalScore = Math.min(100, Math.max(0, Math.round(rawScore)));
+    const rawScore = safeBaseProduct + safeVulnTerm + sequenceBonus;
+    const safeScore = Number.isFinite(rawScore) ? rawScore : 0;
+    const finalScore = Math.min(100, Math.max(0, Math.round(safeScore)));
     const riskBand = this.computeRiskBand(finalScore);
 
     // 9. Transparent explanation string
@@ -142,7 +145,7 @@ export class RiskScoringEngine {
       `M_freq(${freqMultiplier.toFixed(2)}) * ` +
       `M_asset(${assetMultiplier.toFixed(2)}) * ` +
       `M_threat(${threatMultiplier.toFixed(2)}) + ` +
-      `C_vuln(${vulnTerm.toFixed(1)}) + ` +
+      `C_vuln(${safeVulnTerm.toFixed(1)}) + ` +
       `B_seq(${sequenceBonus}))`;
 
     const factors: WebRiskFactors = {
@@ -190,13 +193,17 @@ export class RiskScoringEngine {
   } {
     const weight = this.overlapWeights[overlapLevel] ?? 0;
     const kConfidence = this.confidenceMultipliers[confidence] ?? 0.4;
-    const cvssRatio = Math.min(10, Math.max(0, findingCvss)) / 10;
+    const safeCvss =
+      typeof findingCvss === 'number' && Number.isFinite(findingCvss)
+        ? Math.min(10, Math.max(0, findingCvss))
+        : 0;
+    const cvssRatio = safeCvss / 10;
     const termValue = Math.round(weight * cvssRatio * kConfidence * 10) / 10;
 
     return {
       overlapLevel,
       weight,
-      findingCvss,
+      findingCvss: safeCvss,
       confidenceMultiplier: kConfidence,
       termValue,
     };

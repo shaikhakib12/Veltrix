@@ -87,7 +87,11 @@ export function WebsiteAttackMonitoring() {
   // Handle quick incident containment
   const handleContainIncident = async (incidentId: string) => {
     try {
-      await updateIncidentStatus(incidentId, 'CONTAINED', 'Automated containment approved via SOC console');
+      await updateIncidentStatus(
+        incidentId,
+        'CONTAINED',
+        'Incident acknowledged and marked CONTAINED by SOC analyst; response action recommendations require Phase 10 execution.'
+      );
       void loadData();
     } catch (err: any) {
       alert(`Error containing incident: ${err.message}`);
@@ -346,6 +350,20 @@ export function WebsiteAttackMonitoring() {
                         <div className="text-[11px] text-cyan-400 font-mono mt-0.5">
                           IP: {inc.sourceIp || 'Unknown'} | Domain: {inc.domain || inc.siteId || 'Global'}
                         </div>
+                        {inc.suggestedResponses && inc.suggestedResponses.length > 0 && (
+                          <div className="mt-1 flex flex-wrap items-center gap-1">
+                            <span className="text-[10px] text-slate-400">Recommended:</span>
+                            {inc.suggestedResponses.map((sr) => (
+                              <span
+                                key={sr}
+                                className="px-1.5 py-0.5 text-[9px] font-mono rounded bg-slate-800 text-cyan-300 border border-slate-700"
+                              >
+                                {sr}
+                              </span>
+                            ))}
+                            <span className="text-[9px] text-slate-500 italic">(Recommended Response - Phase 10)</span>
+                          </div>
+                        )}
                       </td>
                       <td className="p-3">
                         <div className="flex items-center space-x-2">
@@ -381,7 +399,7 @@ export function WebsiteAttackMonitoring() {
                             onClick={() => void handleContainIncident(inc.incidentId)}
                             className="px-2.5 py-1 text-[11px] font-medium rounded bg-rose-900/60 hover:bg-rose-800 text-rose-200 border border-rose-700 transition"
                           >
-                            Block IP / Contain
+                            Mark Contained
                           </button>
                         )}
                       </td>

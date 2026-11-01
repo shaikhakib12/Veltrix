@@ -46,19 +46,51 @@ export class AttackCorrelationEngine {
   }
 
   /**
+   * Normalizes source IP addresses by stripping ports, trimming whitespace,
+   * and unwrapping IPv6 brackets.
+   */
+  normalizeSourceIp(rawIp?: string): string {
+    if (!rawIp || typeof rawIp !== 'string') return '0.0.0.0';
+    const trimmed = rawIp.trim();
+    const unbracketed = trimmed.replace(/^\[|\]$/g, '');
+    const colonCount = (unbracketed.match(/:/g) || []).length;
+    if (colonCount === 1) {
+      return unbracketed.split(':')[0] || '0.0.0.0';
+    }
+    return unbracketed || '0.0.0.0';
+  }
+
+  /**
+   * Returns true if the IP is generic, loopback, or unroutable (0.0.0.0, 127.0.0.1, ::1, unknown).
+   */
+  isGenericOrLocalIp(ip: string): boolean {
+    const normalized = ip.toLowerCase();
+    return (
+      !normalized ||
+      normalized === '0.0.0.0' ||
+      normalized === '127.0.0.1' ||
+      normalized === '::1' ||
+      normalized === 'localhost' ||
+      normalized === 'unknown'
+    );
+  }
+
+  /**
    * Computes a deterministic correlation fingerprint for grouping related activity:
-   * SHA-256(orgId:siteId:sourceIp:windowBucket)
+   * SHA-256(orgId:siteId:sourceIp) for genuinely sliding temporal grouping.
+   * For generic unroutable/loopback IPs, includes detectionId to prevent cross-actor false grouping.
    */
   computeCorrelationKey(
     orgId: string,
     siteId: string | undefined,
     sourceIp: string,
-    timestampMs: number
-  ): { correlationKey: string; windowBucket: number } {
-    const windowBucket = Math.floor(timestampMs / (this.windowSeconds * 1000));
-    const canonical = `${orgId}:${siteId || 'global'}:${sourceIp}:${windowBucket}`;
+    detectionId?: string
+  ): { correlationKey: string } {
+    const isGeneric = this.isGenericOrLocalIp(sourceIp);
+    const entityPart = isGeneric && detectionId ? `${sourceIp}:${detectionId}` : sourceIp;
+    const canonical = `${orgId}:${siteId || 'global'}:${entityPart}`;
     const correlationKey = createHash('sha256').update(canonical, 'utf8').digest('hex');
-    return { correlationKey, windowBucket };
+    return { correlationKey };
   }
 
   /**
@@ -72,38 +104,59 @@ export class AttackCorrelationEngine {
     const details = detection.evidence?.details || {};
     const siteId = typeof details.siteId === 'string' ? details.siteId : undefined;
     const domain = typeof details.domain === 'string' ? details.domain : undefined;
-    const sourceIp = detection.evidence?.targetEntity?.type === 'IP'
+    const rawIp = detection.evidence?.targetEntity?.type === 'IP'
       ? detection.evidence.targetEntity.value
       : (typeof details.sourceIp === 'string' ? details.sourceIp : '0.0.0.0');
+    const sourceIp = this.normalizeSourceIp(rawIp);
+    const isGeneric = this.isGenericOrLocalIp(sourceIp);
 
     const detectionTimeMs = new Date(detection.detectedAt).getTime();
     const { correlationKey } = this.computeCorrelationKey(
       orgId,
       siteId,
       sourceIp,
-      detectionTimeMs
+      detection.detectionId
     );
 
-    // 1. Check if an active incident already exists for this correlation bucket
-    let incidentId = this.activeIncidents.get(correlationKey);
+    // 1. Check if an active incident already exists in memory
+    let incidentId = isGeneric ? undefined : this.activeIncidents.get(correlationKey);
     let existingIncident: Incident | null = null;
 
     if (incidentId) {
       existingIncident = await this.storage.getIncidentById(orgId, incidentId);
+      if (existingIncident) {
+        // Evaluate genuine sliding window against the latest activity timestamp
+        const latestActivityMs = new Date(existingIncident.updatedAt || existingIncident.createdAt).getTime();
+        const elapsedMs = Math.abs(detectionTimeMs - latestActivityMs);
+        if (
+          existingIncident.status === 'RESOLVED' ||
+          existingIncident.status === 'FALSE_POSITIVE' ||
+          elapsedMs > this.windowSeconds * 1000
+        ) {
+          // Sliding window has closed or incident was resolved; clear stale tracking
+          existingIncident = null;
+          this.activeIncidents.delete(correlationKey);
+        }
+      }
     }
 
-    // If not found in active map, check storage for recent open incident from the same IP/site
-    if (!existingIncident) {
-      const recentIncidents = await this.storage.getIncidents(orgId, { limit: 20 });
+    // 2. Fallback to storage for active incident from same source IP and site
+    if (!existingIncident && !isGeneric) {
+      const recentIncidents = await this.storage.getIncidents(orgId, {
+        siteId,
+        status: 'NEW',
+        limit: 50,
+      });
       for (const inc of recentIncidents.items) {
         if (
-          inc.status !== 'RESOLVED' &&
-          inc.status !== 'FALSE_POSITIVE' &&
           inc.sourceIp === sourceIp &&
-          (!siteId || inc.siteId === siteId)
+          (!siteId || inc.siteId === siteId) &&
+          inc.status !== 'RESOLVED' &&
+          inc.status !== 'FALSE_POSITIVE'
         ) {
-          const incTime = new Date(inc.createdAt).getTime();
-          if (Math.abs(detectionTimeMs - incTime) <= this.windowSeconds * 1000) {
+          const latestActivityMs = new Date(inc.updatedAt || inc.createdAt).getTime();
+          const elapsedMs = Math.abs(detectionTimeMs - latestActivityMs);
+          if (elapsedMs <= this.windowSeconds * 1000) {
             existingIncident = inc;
             incidentId = inc.incidentId;
             this.activeIncidents.set(correlationKey, incidentId);
@@ -156,9 +209,21 @@ export class AttackCorrelationEngine {
 
     // 5. Update or Create Incident
     if (existingIncident) {
+      // --- IDEMPOTENCY CHECK ---
+      const alreadyRecorded = existingIncident.timeline.some(
+        (t) => (t.details as { detectionId?: string } | undefined)?.detectionId === detection.detectionId
+      );
+      if (alreadyRecorded) {
+        return {
+          incident: existingIncident,
+          isNewIncident: false,
+          correlationKey,
+        };
+      }
+
       // --- UPDATE EXISTING INCIDENT ---
       const updatedEventIds = Array.from(
-        new Set([...existingIncident.associatedEventIds, ...detection.relatedEventIds])
+        new Set([...existingIncident.associatedEventIds, ...(detection.relatedEventIds || [])])
       );
 
       const existingAttackTypes = new Set(existingIncident.attackTypes || []);
@@ -235,6 +300,16 @@ export class AttackCorrelationEngine {
         suggestedResponses.push('REVOKE_SESSION', 'STEP_UP_AUTH');
       }
 
+      const earliestTimestamp = new Date(
+        Math.min(new Date(existingIncident.createdAt).getTime(), detectionTimeMs)
+      ).toISOString();
+      const latestTimestamp = new Date(
+        Math.max(
+          new Date(existingIncident.updatedAt || existingIncident.createdAt).getTime(),
+          detectionTimeMs
+        )
+      ).toISOString();
+
       const updatedIncident: Incident = {
         ...existingIncident,
         severity: highestSeverity,
@@ -247,7 +322,8 @@ export class AttackCorrelationEngine {
         associatedEventIds: updatedEventIds,
         timeline: updatedTimeline,
         suggestedResponses,
-        updatedAt: new Date().toISOString(),
+        createdAt: earliestTimestamp,
+        updatedAt: latestTimestamp,
       };
 
       await this.storage.saveIncident(updatedIncident);
@@ -262,7 +338,7 @@ export class AttackCorrelationEngine {
       const uniqueAttackTypes = [attackType];
       const riskResult = this.riskEngine.calculateRisk({
         detectionsSeverity: [detection.severity],
-        eventCount: detection.relatedEventIds.length,
+        eventCount: (detection.relatedEventIds || []).length,
         uniqueAttackTypes,
         highestConfidence: confidenceLevel,
         isThreatIntelFlagged: isThreatFlagged,
@@ -316,7 +392,7 @@ export class AttackCorrelationEngine {
         highestConfidence: confidenceLevel,
         attackTypes: uniqueAttackTypes,
         status: 'NEW' as IncidentStatus,
-        associatedEventIds: [...detection.relatedEventIds],
+        associatedEventIds: [...(detection.relatedEventIds || [])],
         timeline: initialTimeline,
         suggestedResponses,
         createdAt: detection.detectedAt,
@@ -324,7 +400,9 @@ export class AttackCorrelationEngine {
       };
 
       await this.storage.saveIncident(newIncident);
-      this.activeIncidents.set(correlationKey, newIncidentId);
+      if (!isGeneric) {
+        this.activeIncidents.set(correlationKey, newIncidentId);
+      }
 
       return {
         incident: newIncident,
