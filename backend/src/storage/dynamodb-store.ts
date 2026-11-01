@@ -4,6 +4,7 @@ import {
   PutCommand,
   GetCommand,
   QueryCommand,
+  DeleteCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { createHash } from 'node:crypto';
@@ -884,11 +885,12 @@ export class DynamoDBStore implements StorageInterface {
   // --- Threat Indicators ---
 
   async saveIndicator(indicator: ThreatIndicator): Promise<void> {
+    const orgScope = indicator.orgId || 'global';
     const item = {
-      PK: `INDICATOR#${indicator.type}`,
+      PK: `INDICATOR#${indicator.type}#${orgScope}`,
       SK: `VALUE#${indicator.value}`,
-      GSI1_PK: indicator.severity,
-      GSI1_SK: indicator.confidence,
+      GSI1_PK: `INDICATORID#${indicator.indicatorId}`,
+      GSI1_SK: indicator.severity,
       ...indicator,
     };
 
@@ -902,34 +904,101 @@ export class DynamoDBStore implements StorageInterface {
     );
   }
 
+  async getIndicatorById(indicatorId: string, orgId?: string): Promise<ThreatIndicator | null> {
+    const command = new QueryCommand({
+      TableName: this.indicatorsTable,
+      IndexName: 'GSI1-SeverityIndex',
+      KeyConditionExpression: 'GSI1_PK = :pk',
+      ExpressionAttributeValues: {
+        ':pk': `INDICATORID#${indicatorId}`,
+      },
+      Limit: 1,
+    });
+    const response = await this.executeWithRetry(() => this.docClient.send(command));
+    const item = (response.Items?.[0] as ThreatIndicator) || null;
+    if (item && orgId && item.orgId && item.orgId !== 'global' && item.orgId !== orgId) {
+      return null;
+    }
+    return item;
+  }
+
   async getIndicatorByValue(
     type: ThreatIndicator['type'],
-    value: string
+    value: string,
+    orgId?: string
   ): Promise<ThreatIndicator | null> {
-    const command = new GetCommand({
+    const orgScope = orgId || 'global';
+    let command = new GetCommand({
       TableName: this.indicatorsTable,
       Key: {
-        PK: `INDICATOR#${type}`,
+        PK: `INDICATOR#${type}#${orgScope}`,
         SK: `VALUE#${value}`,
       },
     });
 
-    const response = await this.executeWithRetry(() => this.docClient.send(command));
-    return (response.Item as ThreatIndicator) || null;
+    let response = await this.executeWithRetry(() => this.docClient.send(command));
+    if (response.Item) {
+      return response.Item as ThreatIndicator;
+    }
+
+    if (orgScope !== 'global') {
+      command = new GetCommand({
+        TableName: this.indicatorsTable,
+        Key: {
+          PK: `INDICATOR#${type}#global`,
+          SK: `VALUE#${value}`,
+        },
+      });
+      response = await this.executeWithRetry(() => this.docClient.send(command));
+      return (response.Item as ThreatIndicator) || null;
+    }
+
+    return null;
   }
 
-  async listIndicators(limit = 100): Promise<ThreatIndicator[]> {
+  async listIndicators(orgId?: string, limit = 100): Promise<ThreatIndicator[]> {
+    const orgScope = orgId || 'global';
     const command = new QueryCommand({
       TableName: this.indicatorsTable,
       KeyConditionExpression: 'PK = :pk',
       ExpressionAttributeValues: {
-        ':pk': 'INDICATOR#IP',
+        ':pk': `INDICATOR#IP#${orgScope}`,
       },
       Limit: limit,
     });
 
     const response = await this.executeWithRetry(() => this.docClient.send(command));
     return (response.Items || []) as ThreatIndicator[];
+  }
+
+  async updateIndicator(
+    indicatorId: string,
+    updates: Partial<ThreatIndicator>,
+    orgId?: string
+  ): Promise<ThreatIndicator | null> {
+    const existing = await this.getIndicatorById(indicatorId, orgId);
+    if (!existing) return null;
+    const updated = { ...existing, ...updates, indicatorId };
+    await this.saveIndicator(updated);
+    return updated;
+  }
+
+  async deleteIndicator(indicatorId: string, orgId?: string): Promise<boolean> {
+    const existing = await this.getIndicatorById(indicatorId, orgId);
+    if (!existing) return false;
+    const orgScope = existing.orgId || 'global';
+    await this.executeWithRetry(() =>
+      this.docClient.send(
+        new DeleteCommand({
+          TableName: this.indicatorsTable,
+          Key: {
+            PK: `INDICATOR#${existing.type}#${orgScope}`,
+            SK: `VALUE#${existing.value}`,
+          },
+        })
+      )
+    );
+    return true;
   }
 
   // --- Defensive Response Executions ---

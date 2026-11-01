@@ -157,6 +157,8 @@ export interface Incident {
   updatedAt: string;
 }
 
+export type IndicatorProvenance = 'VERIFIED_FEED' | 'MANUAL_ANALYST';
+
 export interface ThreatIndicator {
   indicatorId: string;
   type: 'IP' | 'DOMAIN' | 'HASH' | 'USER_AGENT';
@@ -165,8 +167,13 @@ export interface ThreatIndicator {
   severity: Severity;
   confidence: number; // 0 - 100
   source: string;
+  provenance: IndicatorProvenance;
+  orgId?: string; // Tenant-specific for manual indicators, 'global' or undefined for global verified feeds
+  submittedBy?: string; // Verified username of manual analyst
+  retrievedAt?: string; // Retrieval timestamp for external feeds
   firstSeen: string;
   lastSeen: string;
+  expiresAt?: string;
   isFlagged: boolean;
   metadata?: Record<string, unknown>;
 }

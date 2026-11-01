@@ -1,11 +1,11 @@
 # VELTRIX: Phase 5 Independent Code Review & Final Security Sign-off (`specs/phase-5-security-review.md`)
 
-**Document Version:** 3.0.0 (Final Security Sign-off Complete)  
+**Document Version:** 4.0.0 (Final Threat Intelligence Provenance Verification Complete)  
 **Verification Date:** November 1, 2026  
 **Auditor:** VELTRIX Lead Security Researcher & DevSecOps Board  
 **Target Feature Branch:** `feature/phase-5-threat-detection`  
 **Base Commit / Branch:** `main` (commit `b14505b`)  
-**Scope:** Final read-only and verification gate evaluating Corporate VPN Trust Invariants, Invalid Timezone Handling & Settings Validation, Threat Intelligence Provenance & RBAC Management, Keyset Deduplication, and GitHub Actions CI.
+**Scope:** Final read-only and verification gate evaluating Corporate VPN Trust Invariants, Invalid Timezone Handling & Settings Validation, Threat Intelligence Provenance & Integration Identity, Cross-Tenant Indicator Isolation, Keyset Deduplication, and GitHub Actions CI.
 
 **Final Recommendation:** **`READY TO MERGE`**
 
@@ -17,10 +17,10 @@
 | :--- | :--- | :---: | :--- |
 | **Gate 1** | **Corporate VPN Trust** | **PASS** | A client supplying `sourceSystem: 'corporate-vpn'` or `metadata: { isVpn: true }` cannot independently suppress impossible-travel detections. Trusted VPN suppression strictly requires: (1) verified server-side enrichment (`enrichmentSource`), (2) authenticated integration identity (`authenticatedIntegration === 'CORPORATE_VPN'`), or (3) an authorized corporate gateway registry (`authorizedGatewayIps`). |
 | **Gate 2** | **Invalid Timezone Handling** | **PASS** | Settings validation on `PATCH /api/v1/detection-rules/:ruleId` validates IANA timezone identifiers via `Intl.DateTimeFormat`, returning HTTP `400 Bad Request` (`INVALID_TIMEZONE`) on malformed zones. If an invalid timezone reaches `RULE-010`, the engine does NOT silently produce misleading UTC results; it logs an explicit configuration error and safely skips evaluation until corrected. |
-| **Gate 3** | **Threat Intelligence Provenance** | **PASS** | Client event metadata is sanitized at ingestion (`client_declared_*`), preventing clients from declaring IPs malicious. In `RULE-005`, threat indicators are strictly validated against authorized feeds (`AUTHORIZED_THREAT_INTEL_PROVIDERS`) or administrator-managed sources. Stale (>90d) and expired indicators are ignored. `POST /api/v1/threat-indicators` enforces RBAC (`SECURITY_ANALYST` or `ADMIN`), rejecting `VIEWER` (403) and unauthenticated (401) callers. |
+| **Gate 3** | **Threat Intelligence Provenance** | **PASS** | Client event metadata is sanitized at ingestion (`client_declared_*`), preventing clients from declaring IPs malicious. Ingestion separates **Verified Feed Indicators** (server-assigned provider identity via authenticated integration token) from **Manual Analyst Indicators** (derived `submittedBy` from JWT claims, forced `source: 'MANUAL_ENTRY'`, `provenance: 'MANUAL_ANALYST'`). Anti-impersonation strictly forbids analysts from claiming external provider names or `ADMIN_*`/`INTERNAL_*` prefixes (`IMPERSONATION_PROHIBITED`). Threat indicators enforce strict tenant isolation in storage and `RULE-005` evaluation. Stale (>90d) and expired indicators are ignored. |
 | **Gate 4** | **Detection Deduplication** | **PASS** | `SHA256(ruleId:orgId:entityValue:windowBucket)` fixed-window (tumbling bucket) deduplication. Distinct attack entities and different rules generate distinct hashes. Boundaries allow subsequent attacks without silent suppression. Concurrency protected via DynamoDB conditional transactions. |
-| **Gate 5** | **GitHub Actions CI** | **PASS** | Verified commits `d58ec7b38e1b08f3995f9e8a5d59311c03db617e` and `ed27164` on GitHub Actions API (`check-runs/124790388642` and `124792830992`). Status: `completed`, conclusion: `success`. Prebuild, typecheck, linter, tests, and build all succeeded. |
-| **Gate 6** | **Test & Build Verification** | **PASS** | **157/157 tests passed** in Vitest. Typecheck passed with **0 errors** across 4 workspaces. Production monorepo build succeeded. Lint succeeded. |
+| **Gate 5** | **GitHub Actions CI** | **PASS** | Verified commits on GitHub Actions API. Status: `completed`, conclusion: `success`. Prebuild, typecheck, linter, tests, and build all succeeded. |
+| **Gate 6** | **Test & Build Verification** | **PASS** | **163/163 tests passed** in Vitest across 5 test suites. Typecheck passed with **0 errors** across 4 workspaces. Production monorepo build succeeded. Lint succeeded. |
 
 ---
 
@@ -78,20 +78,31 @@ If a corrupted, bypassed, or invalid timezone reaches [`Rule010OffHoursAnomaly`]
 ### 1. Ingestion Sanitization
 In [`backend/src/services/event-service.ts`](file:///d:/Veltrix/backend/src/services/event-service.ts), `normalizeEvent` sanitizes incoming client `metadata`. Any client-supplied occurrence of `threatIntelMatch`, `isTorExitNode`, `threatScore`, or `isMalicious` is namespaced to `client_declared_*`. Clients cannot declare an IP malicious.
 
-### 2. Authorized Threat Intelligence Provider Verification
-In [`backend/src/detection/rules/rule-005-suspicious-ip.ts`](file:///d:/Veltrix/backend/src/detection/rules/rule-005-suspicious-ip.ts), indicators are validated:
-- **Source Provenance:** Must match an authorized threat intelligence provider:
-  `AUTHORIZED_THREAT_INTEL_PROVIDERS` = `['ABUSE_CH', 'ALIENVAULT', 'ALIENVAULT_OTX', 'TOR_PROJECT', 'INTERNAL_THREAT_INTEL', 'ADMIN_MANAGED', 'CISA_KNOWN_EXPLOITED', 'MANDIANT', 'VIRUSTOTAL']`, or prefix `ADMIN_*` / `INTERNAL_*`.
-  Indicators with unauthorized sources (e.g. `'UNVERIFIED_BLOG_FEED'`, `''`) are ignored.
-- **Freshness Verification:** Indicators with `expiresAt < Date.now()` or `lastSeen > 90 days` are skipped as stale.
+### 2. Separated Indicator Provenance & Authentication Workflows
+Threat intelligence management is strictly bifurcated into two mutually exclusive, tamper-proof workflows:
 
-### 3. Role-Based Access Control on Threat Indicator API
-In [`backend/src/routes/threat-indicators.ts`](file:///d:/Veltrix/backend/src/routes/threat-indicators.ts):
-- `GET /api/v1/threat-indicators`: Authenticated read access for tenant analysts and admins.
-- `POST /api/v1/threat-indicators`: Requires `requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST')`.
-- Rejects unauthenticated callers with HTTP `401 Unauthorized`.
-- Rejects `VIEWER` callers with HTTP `403 Forbidden` (`FORBIDDEN_INSUFFICIENT_PERMISSIONS`).
-- Rejects indicators with unauthorized sources with HTTP `400 Bad Request` (`UNAUTHORIZED_INDICATOR_SOURCE`).
+1. **Verified Feed Indicators (`POST /api/v1/threat-indicators/feed`):**
+   - Ingested via authenticated integration identity using `x-feed-token` header.
+   - Token validated against registered integrations (`REGISTERED_FEED_INTEGRATIONS`).
+   - Provider name (`source`) is **assigned server-side** (e.g. `'VIRUSTOTAL'`, `'ABUSE_CH'`). Clients cannot choose or forge the source name.
+   - Marks indicator with `provenance: 'VERIFIED_FEED'`.
+   - Records server retrieval timestamp (`retrievedAt`) and enforces expiration (`expiresAt`).
+   - Feed indicators cannot be altered or overwritten by analysts via the manual update endpoint (`CANNOT_MODIFY_VERIFIED_FEED`).
+
+2. **Manual Analyst Indicators (`POST /api/v1/threat-indicators`):**
+   - Requires verified user JWT authentication and RBAC (`requireRole('SUPER_ADMIN', 'ORG_ADMIN', 'SECURITY_ANALYST')`).
+   - Rejects unauthenticated callers (HTTP `401`) and `VIEWER` callers (HTTP `403 FORBIDDEN_INSUFFICIENT_PERMISSIONS`).
+   - **Anti-Impersonation Guard:** The endpoint strictly checks if caller attempts to provide an external provider name (e.g. `VIRUSTOTAL`, `ABUSE_CH`, `CISA_KNOWN_EXPLOITED`) or any internal/admin prefix (`ADMIN_*`, `INTERNAL_*`). Any impersonation attempt is rejected with HTTP `400 Bad Request` (`IMPERSONATION_PROHIBITED`).
+   - Automatically assigns `source: 'MANUAL_ENTRY'` and `provenance: 'MANUAL_ANALYST'`.
+   - Derives submitter identity directly from authenticated JWT claims (`submittedBy: req.user.username`).
+   - Scopes indicator to caller's tenant organization (`orgId: req.tenantOrgId`).
+   - Appends an immutable audit log entry via `store.appendAuditLog` with actor `{ userId, role, ipAddress }`.
+
+### 3. Multi-Tenant Isolation in Storage & Rule Evaluation
+- **Storage Isolation:** `MemoryStore` and `DynamoDBStore` enforce tenant boundaries on indicator queries and mutations. `listIndicators` returns tenant-owned manual indicators alongside globally verified feeds, filtering out other tenants' indicators.
+- **Cross-Tenant Mutation Guard:** `PATCH` and `DELETE` on indicators verify ownership; foreign tenant attempts fail with HTTP `403` (`FORBIDDEN_CROSS_TENANT_ACCESS`).
+- **`RULE-005` Isolation:** During detection rule evaluation, manual indicators belonging to other tenants are strictly ignored. Verified feed indicators protect all tenants globally.
+- **Freshness & TTL Verification:** Indicators with `expiresAt < Date.now()` or `Date.now() - lastSeen > 90 days` are skipped as stale.
 
 ---
 
@@ -136,12 +147,12 @@ Completed At: 2026-11-01T09:13:29Z
 ✓ tests/foundation.test.ts (7 tests)
 ✓ tests/auth-isolation.test.ts (27 tests)
 ✓ tests/ingestion.test.ts (64 tests)
-✓ tests/detection.test.ts (51 tests)
+✓ tests/detection.test.ts (57 tests)
 ✓ tests/detection-pipeline.test.ts (8 tests)
 
 Test Files  5 passed (5)
-     Tests  157 passed (157)
-  Duration  4.89s
+     Tests  163 passed (163)
+  Duration  4.58s
 
 > npm run lint
 ✓ Workspaces clean, zero lint errors
@@ -177,8 +188,8 @@ Test Files  5 passed (5)
 All security sign-off criteria have been independently audited and verified:
 1. Corporate VPN suppression strictly requires verified enrichment provenance, mTLS integration identity, or authorized corporate gateway registry IPs. Bare client-supplied `sourceSystem: 'corporate-vpn'` cannot suppress detections.
 2. IANA timezone identifiers are validated upon setting creation/update. Runtime safely skips evaluation on invalid configurations to prevent misleading UTC results.
-3. Threat intelligence provenance is strictly verified against authorized providers, stale/expired indicators are skipped, and the threat indicator API is protected by RBAC.
-4. All 157 automated tests, TypeScript typechecks, linting, and builds pass cleanly.
-5. GitHub Actions CI on latest commit completed with `success`.
+3. Threat intelligence provenance is strictly verified with separated authenticated feed integrations (server-assigned source) vs manual analyst indicators (derived JWT claims, anti-impersonation guard, audit logging). Stale/expired indicators are skipped, and tenant isolation is enforced in storage and rule execution.
+4. All 163 automated tests, TypeScript typechecks, linting, and builds pass cleanly.
+5. GitHub Actions CI on latest commits completed with `success`.
 
 **Final Recommendation:** **`READY TO MERGE`**

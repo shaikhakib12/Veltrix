@@ -364,23 +364,78 @@ export class MemoryStore implements StorageInterface {
   // --- Threat Indicators ---
 
   async saveIndicator(indicator: ThreatIndicator): Promise<void> {
-    const key = `${indicator.type}:${indicator.value}`;
+    const key = indicator.indicatorId || `${indicator.type}:${indicator.value}:${indicator.orgId || 'global'}`;
     this.threatIndicators.set(key, { ...indicator });
+  }
+
+  async getIndicatorById(indicatorId: string, orgId?: string): Promise<ThreatIndicator | null> {
+    for (const ind of this.threatIndicators.values()) {
+      if (ind.indicatorId === indicatorId) {
+        if (orgId && ind.orgId && ind.orgId !== 'global' && ind.orgId !== orgId) {
+          return null; // Cross-tenant isolation
+        }
+        return { ...ind };
+      }
+    }
+    return null;
   }
 
   async getIndicatorByValue(
     type: ThreatIndicator['type'],
-    value: string
+    value: string,
+    orgId?: string
   ): Promise<ThreatIndicator | null> {
-    const key = `${type}:${value}`;
-    const indicator = this.threatIndicators.get(key);
-    return indicator ? { ...indicator } : null;
+    for (const ind of this.threatIndicators.values()) {
+      if (ind.type === type && ind.value === value) {
+        if (orgId && ind.orgId && ind.orgId !== 'global' && ind.orgId !== orgId) {
+          continue; // Skip indicators belonging to another tenant
+        }
+        return { ...ind };
+      }
+    }
+    return null;
   }
 
-  async listIndicators(limit = 100): Promise<ThreatIndicator[]> {
+  async listIndicators(orgId?: string, limit = 100): Promise<ThreatIndicator[]> {
     return Array.from(this.threatIndicators.values())
+      .filter((i) => !orgId || !i.orgId || i.orgId === 'global' || i.orgId === orgId)
       .slice(0, limit)
       .map((i) => ({ ...i }));
+  }
+
+  async updateIndicator(
+    indicatorId: string,
+    updates: Partial<ThreatIndicator>,
+    orgId?: string
+  ): Promise<ThreatIndicator | null> {
+    for (const [key, ind] of this.threatIndicators.entries()) {
+      if (ind.indicatorId === indicatorId) {
+        if (orgId && ind.orgId && ind.orgId !== 'global' && ind.orgId !== orgId) {
+          const err = new Error('FORBIDDEN_CROSS_TENANT_ACCESS');
+          (err as unknown as { code: string }).code = 'FORBIDDEN_CROSS_TENANT_ACCESS';
+          throw err;
+        }
+        const updated = { ...ind, ...updates, indicatorId: ind.indicatorId };
+        this.threatIndicators.set(key, updated);
+        return { ...updated };
+      }
+    }
+    return null;
+  }
+
+  async deleteIndicator(indicatorId: string, orgId?: string): Promise<boolean> {
+    for (const [key, ind] of this.threatIndicators.entries()) {
+      if (ind.indicatorId === indicatorId) {
+        if (orgId && ind.orgId && ind.orgId !== 'global' && ind.orgId !== orgId) {
+          const err = new Error('FORBIDDEN_CROSS_TENANT_ACCESS');
+          (err as unknown as { code: string }).code = 'FORBIDDEN_CROSS_TENANT_ACCESS';
+          throw err;
+        }
+        this.threatIndicators.delete(key);
+        return true;
+      }
+    }
+    return false;
   }
 
   // --- Defensive Response Executions ---

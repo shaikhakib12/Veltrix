@@ -233,11 +233,33 @@ export const ThreatIndicatorCreateSchema = z.object({
   threatType: z.string().min(1, 'Threat type is required'),
   severity: SeveritySchema,
   confidence: z.number().int().min(0).max(100),
-  source: z.string().min(1, 'Source is required'),
+  source: z.string().optional(),
   description: z.string().optional(),
   firstSeen: z.string().datetime({ offset: true }).optional(),
   lastSeen: z.string().datetime({ offset: true }).optional(),
   expiresAt: z.string().datetime({ offset: true }).optional(),
   isFlagged: z.boolean().default(true),
+  metadata: z.record(z.unknown()).optional(),
+}).strict();
+
+export const FeedIndicatorIngestSchema = z.object({
+  type: z.enum(['IP', 'DOMAIN', 'HASH', 'USER_AGENT']),
+  value: z.string().min(1, 'Value is required'),
+  threatType: z.string().min(1, 'Threat type is required'),
+  severity: SeveritySchema,
+  confidence: z.number().int().min(0).max(100),
+  description: z.string().optional(),
+  firstSeen: z.string().datetime({ offset: true }).optional(),
+  lastSeen: z.string().datetime({ offset: true }).optional(),
+  expiresAt: z.string().datetime({ offset: true }).optional(),
+  isFlagged: z.boolean().default(true),
+  metadata: z.record(z.unknown()).optional(),
+}).strict();
+
+export const ThreatIndicatorUpdateSchema = z.object({
+  severity: SeveritySchema.optional(),
+  confidence: z.number().int().min(0).max(100).optional(),
+  isFlagged: z.boolean().optional(),
+  expiresAt: z.string().datetime({ offset: true }).optional(),
   metadata: z.record(z.unknown()).optional(),
 }).strict();

@@ -39,31 +39,20 @@ export class Rule005SuspiciousIp extends BaseDetectionRule {
     // Build complete set of malicious IPs from local indicators + evaluation context
     const suspiciousIps = new Set(Rule005SuspiciousIp.KNOWN_SUSPICIOUS_IPS);
     if (threatIndicators && Array.isArray(threatIndicators)) {
+      const authorizedFeedProviders = [
+        'ABUSE_CH',
+        'ALIENVAULT',
+        'ALIENVAULT_OTX',
+        'TOR_PROJECT',
+        'CISA_KNOWN_EXPLOITED',
+        'MANDIANT',
+        'VIRUSTOTAL',
+      ];
+
       for (const indicator of threatIndicators) {
         if (indicator.type === 'IP') {
-          // Source provenance verification: reject indicators lacking a valid source or from unauthorized providers
-          if (!indicator.source || typeof indicator.source !== 'string' || indicator.source.trim().length === 0) {
-            continue;
-          }
-          const sourceUpper = indicator.source.trim().toUpperCase();
-          const authorizedSources = [
-            'ABUSE_CH',
-            'ALIENVAULT',
-            'ALIENVAULT_OTX',
-            'TOR_PROJECT',
-            'INTERNAL_THREAT_INTEL',
-            'ADMIN_MANAGED',
-            'CISA_KNOWN_EXPLOITED',
-            'MANDIANT',
-            'VIRUSTOTAL',
-          ];
-          const isAuthorized = authorizedSources.some((s) => sourceUpper.includes(s)) ||
-            sourceUpper.startsWith('ADMIN_') || sourceUpper.startsWith('INTERNAL_');
-          if (!isAuthorized) {
-            continue;
-          }
-          // Freshness verification: reject expired threat intelligence indicators
-          const expiresAt = (indicator as unknown as { expiresAt?: string }).expiresAt;
+          // 1. Freshness verification: reject expired threat intelligence indicators
+          const expiresAt = indicator.expiresAt || (indicator as unknown as { expiresAt?: string }).expiresAt;
           if (expiresAt && new Date(expiresAt).getTime() < Date.now()) {
             continue;
           }
@@ -74,7 +63,32 @@ export class Rule005SuspiciousIp extends BaseDetectionRule {
               continue;
             }
           }
-          suspiciousIps.add(indicator.value);
+
+          // 2. Separate Provenance Workflows: Verified Feed vs Manual Analyst
+          if (indicator.provenance === 'VERIFIED_FEED') {
+            // Verified Feed: source must be one of the authorized external providers
+            const sourceUpper = (indicator.source || '').toUpperCase().trim();
+            if (!authorizedFeedProviders.some((p) => sourceUpper.includes(p))) {
+              continue;
+            }
+            suspiciousIps.add(indicator.value);
+          } else if (indicator.provenance === 'MANUAL_ANALYST') {
+            // Manual Analyst: Must belong to the evaluated organization (cross-tenant protection)
+            if (indicator.orgId && indicator.orgId !== 'global' && indicator.orgId !== context.organizationId) {
+              continue; // Cross-tenant indicator ignored!
+            }
+            suspiciousIps.add(indicator.value);
+          } else {
+            // Fallback for legacy fixtures: check source validity
+            const sourceUpper = (indicator.source || '').toUpperCase().trim();
+            const isAuthorized = authorizedFeedProviders.some((p) => sourceUpper.includes(p)) || sourceUpper === 'MANUAL_ENTRY';
+            if (isAuthorized) {
+              if (indicator.orgId && indicator.orgId !== 'global' && indicator.orgId !== context.organizationId) {
+                continue;
+              }
+              suspiciousIps.add(indicator.value);
+            }
+          }
         }
       }
     }

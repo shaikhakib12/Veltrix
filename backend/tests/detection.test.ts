@@ -1804,7 +1804,154 @@ describe('Phase 5: Threat Detection Engine (TASK-501 through TASK-505)', () => {
         expect(validRes.body.data.condition.timezone).toBe('Europe/London');
       });
 
-      it('RULE-005: rejects threat intelligence indicators from unauthorized or unverified sources', async () => {
+      // ==========================================================================
+      // Final Threat Intelligence Provenance Verification (8 Required Tests)
+      // ==========================================================================
+
+      it('1. An analyst cannot impersonate VirusTotal by supplying its source name', async () => {
+        const spoofAttempt = {
+          type: 'IP',
+          value: '198.51.100.199',
+          threatType: 'C2',
+          severity: 'HIGH',
+          confidence: 90,
+          source: 'VIRUSTOTAL', // Spoofed external provider name!
+          description: 'Fake VirusTotal indicator attempt',
+        };
+
+        const res = await request(app)
+          .post('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send(spoofAttempt);
+
+        expect(res.status).toBe(400);
+        expect(res.body.error.code).toBe('IMPERSONATION_PROHIBITED');
+        expect(res.body.error.message).toContain('cannot impersonate external threat intelligence providers');
+      });
+
+      it('2. An unauthorized provider is rejected', async () => {
+        // Feed endpoint with invalid/unauthorized integration token
+        const feedRes = await request(app)
+          .post('/api/v1/threat-indicators/feed')
+          .set('x-feed-token', 'unauthorized-token-123')
+          .send({
+            type: 'IP',
+            value: '198.51.100.199',
+            threatType: 'BOTNET',
+            severity: 'HIGH',
+            confidence: 90,
+          });
+
+        expect(feedRes.status).toBe(401);
+        expect(feedRes.body.error.code).toBe('UNAUTHORIZED_FEED_INTEGRATION');
+
+        // Manual analyst endpoint attempting unrestricted ADMIN_* prefix
+        const prefixRes = await request(app)
+          .post('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({
+            type: 'IP',
+            value: '198.51.100.199',
+            threatType: 'BOTNET',
+            severity: 'HIGH',
+            confidence: 90,
+            source: 'ADMIN_TRUSTED_FEED',
+          });
+
+        expect(prefixRes.status).toBe(400);
+        expect(prefixRes.body.error.code).toBe('IMPERSONATION_PROHIBITED');
+      });
+
+      it('3. A legitimate authenticated integration can create a verified indicator with server-assigned provider', async () => {
+        const feedPayload = {
+          type: 'IP',
+          value: '198.51.100.101',
+          threatType: 'C2_NODE',
+          severity: 'CRITICAL',
+          confidence: 95,
+          description: 'Verified VirusTotal malicious scanner',
+        };
+
+        const res = await request(app)
+          .post('/api/v1/threat-indicators/feed')
+          .set('x-feed-token', 'feed-token-virustotal-prod')
+          .send(feedPayload);
+
+        expect(res.status).toBe(201);
+        expect(res.body.data.source).toBe('VIRUSTOTAL'); // Assigned SERVER-SIDE!
+        expect(res.body.data.provenance).toBe('VERIFIED_FEED');
+        expect(res.body.data.retrievedAt).toBeDefined();
+        expect(res.body.data.metadata.provenanceVerified).toBe(true);
+      });
+
+      it('4. Manual indicators retain the submitter identity from verified JWT claims', async () => {
+        const manualPayload = {
+          type: 'IP',
+          value: '198.51.100.102',
+          threatType: 'MALWARE_HOST',
+          severity: 'HIGH',
+          confidence: 80,
+          description: 'Reported by local SOC investigation',
+        };
+
+        const res = await request(app)
+          .post('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send(manualPayload);
+
+        expect(res.status).toBe(201);
+        expect(res.body.data.provenance).toBe('MANUAL_ANALYST');
+        expect(res.body.data.source).toBe('MANUAL_ENTRY');
+        expect(res.body.data.submittedBy).toBe('analyst.shield'); // Derived from JWT claims!
+        expect(res.body.data.orgId).toBe(orgA);
+      });
+
+      it('5. Manual indicators are clearly distinguishable from verified feed indicators', async () => {
+        // Create verified feed indicator
+        await request(app)
+          .post('/api/v1/threat-indicators/feed')
+          .set('x-feed-token', 'feed-token-virustotal-prod')
+          .send({
+            type: 'IP',
+            value: '198.51.100.101',
+            threatType: 'C2',
+            severity: 'CRITICAL',
+            confidence: 95,
+          });
+
+        // Create manual analyst indicator
+        await request(app)
+          .post('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({
+            type: 'IP',
+            value: '198.51.100.102',
+            threatType: 'MALWARE_HOST',
+            severity: 'HIGH',
+            confidence: 80,
+          });
+
+        const getRes = await request(app)
+          .get('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`);
+
+        expect(getRes.status).toBe(200);
+        const indicators = getRes.body.data.indicators;
+
+        const feedInd = indicators.find((i: any) => i.value === '198.51.100.101');
+        const manualInd = indicators.find((i: any) => i.value === '198.51.100.102');
+
+        expect(feedInd).toBeDefined();
+        expect(feedInd.provenance).toBe('VERIFIED_FEED');
+        expect(feedInd.source).toBe('VIRUSTOTAL');
+
+        expect(manualInd).toBeDefined();
+        expect(manualInd.provenance).toBe('MANUAL_ANALYST');
+        expect(manualInd.source).toBe('MANUAL_ENTRY');
+        expect(manualInd.submittedBy).toBe('analyst.shield');
+      });
+
+      it('6. Expired indicators are ignored by RULE-005', async () => {
         const rule = new Rule005SuspiciousIp();
         const event: SecurityEvent = {
           eventId: generateUuidV7(),
@@ -1813,97 +1960,157 @@ describe('Phase 5: Threat Detection Engine (TASK-501 through TASK-505)', () => {
           eventType: 'network.connection',
           severity: 'HIGH',
           timestamp: new Date().toISOString(),
-          sourceIp: '198.51.100.240',
-          username: 'test-user',
-          sourceSystem: 'firewall',
+          sourceIp: '198.51.100.103',
+          username: 'victim',
+          sourceSystem: 'fw',
         };
 
-        // Indicator from unauthorized source
-        const unauthorizedIndicator = {
+        // Expired verified feed indicator
+        const expiredFeedInd = {
           indicatorId: generateUuidV7(),
           type: 'IP' as const,
-          value: '198.51.100.240',
+          value: '198.51.100.103',
           severity: 'HIGH' as const,
           confidence: 90,
-          source: 'UNVERIFIED_BLOG_FEED', // Unauthorized!
+          source: 'VIRUSTOTAL',
+          provenance: 'VERIFIED_FEED' as const,
+          expiresAt: new Date(Date.now() - 3600000).toISOString(), // Expired 1 hour ago
           firstSeen: new Date().toISOString(),
           lastSeen: new Date().toISOString(),
           isFlagged: true,
           threatType: 'C2',
         };
 
-        const res1 = await rule.evaluate({
+        const detections = await rule.evaluate({
           organizationId: orgA,
           events: [event],
           currentTime: new Date(),
-          threatIndicators: [unauthorizedIndicator],
+          threatIndicators: [expiredFeedInd],
         });
-        expect(res1.length).toBe(0);
 
-        // Indicator from authorized source (ABUSE_CH)
-        const authorizedIndicator = {
-          ...unauthorizedIndicator,
-          source: 'ABUSE_CH',
-        };
-
-        const res2 = await rule.evaluate({
-          organizationId: orgA,
-          events: [event],
-          currentTime: new Date(),
-          threatIndicators: [authorizedIndicator],
-        });
-        expect(res2.length).toBe(1);
-        expect(res2[0].ruleId).toBe('RULE-005');
+        // Expired indicator is ignored
+        expect(detections.length).toBe(0);
       });
 
-      it('POST /api/v1/threat-indicators enforces RBAC, validates sources, and prevents unauthorized modification', async () => {
-        const newIndicator = {
-          type: 'IP',
-          value: '198.51.100.199',
-          threatType: 'BOTNET',
+      it('7. Cross-tenant indicator access is prevented', async () => {
+        // 1. Analyst from Org A creates a manual indicator
+        const createRes = await request(app)
+          .post('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({
+            type: 'IP',
+            value: '198.51.100.104',
+            threatType: 'INTERNAL_ATTACK',
+            severity: 'HIGH',
+            confidence: 85,
+            description: 'Org A internal threat',
+          });
+
+        expect(createRes.status).toBe(201);
+        const indicatorIdOrgA = createRes.body.data.indicatorId;
+
+        // 2. Analyst from Org B queries indicators -> cannot see Org A's manual indicator
+        const listResOrgB = await request(app)
+          .get('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgB}`);
+
+        expect(listResOrgB.status).toBe(200);
+        const foundInOrgB = listResOrgB.body.data.indicators.some((i: any) => i.indicatorId === indicatorIdOrgA);
+        expect(foundInOrgB).toBe(false);
+
+        // 3. Analyst from Org B attempts to PATCH Org A's indicator -> 404 or 403 Forbidden
+        const patchResOrgB = await request(app)
+          .patch(`/api/v1/threat-indicators/${indicatorIdOrgA}`)
+          .set('Authorization', `Bearer ${analystTokenOrgB}`)
+          .send({ severity: 'LOW' });
+
+        expect([403, 404]).toContain(patchResOrgB.status);
+
+        // 4. RULE-005 evaluation for Org B does NOT trigger on Org A's manual indicator
+        const rule = new Rule005SuspiciousIp();
+        const eventOrgB: SecurityEvent = {
+          eventId: generateUuidV7(),
+          orgId: orgB,
+          category: 'NETWORK',
+          eventType: 'network.connection',
           severity: 'HIGH',
-          confidence: 90,
-          source: 'ABUSE_CH',
-          description: 'Malicious scanner IP',
+          timestamp: new Date().toISOString(),
+          sourceIp: '198.51.100.104',
+          username: 'user-b',
+          sourceSystem: 'fw',
         };
+
+        const detectionsOrgB = await rule.evaluate({
+          organizationId: orgB,
+          events: [eventOrgB],
+          currentTime: new Date(),
+          threatIndicators: [createRes.body.data], // Belongs to orgA!
+        });
+
+        // Cross-tenant manual indicator does NOT alert for orgB
+        expect(detectionsOrgB.length).toBe(0);
+      });
+
+      it('8. Unauthorized users cannot modify existing indicators', async () => {
+        // Create an indicator in Org A
+        const createRes = await request(app)
+          .post('/api/v1/threat-indicators')
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({
+            type: 'IP',
+            value: '198.51.100.105',
+            threatType: 'PROBE',
+            severity: 'MEDIUM',
+            confidence: 70,
+          });
+
+        expect(createRes.status).toBe(201);
+        const indId = createRes.body.data.indicatorId;
 
         // 1. Unauthenticated request -> 401
         const unauthRes = await request(app)
-          .post('/api/v1/threat-indicators')
-          .send(newIndicator);
+          .patch(`/api/v1/threat-indicators/${indId}`)
+          .send({ confidence: 50 });
         expect(unauthRes.status).toBe(401);
 
-        // 2. VIEWER role -> 403 Forbidden
+        // 2. READ_ONLY_VIEWER -> 403 Forbidden
         const viewerRes = await request(app)
-          .post('/api/v1/threat-indicators')
+          .patch(`/api/v1/threat-indicators/${indId}`)
           .set('Authorization', `Bearer ${viewerTokenOrgA}`)
-          .send(newIndicator);
+          .send({ confidence: 50 });
         expect(viewerRes.status).toBe(403);
         expect(viewerRes.body.error.code).toBe('FORBIDDEN_INSUFFICIENT_PERMISSIONS');
 
-        // 3. Unauthorized source provider -> 400 Bad Request
-        const badSourceRes = await request(app)
-          .post('/api/v1/threat-indicators')
-          .set('Authorization', `Bearer ${analystTokenOrgA}`)
-          .send({ ...newIndicator, source: 'RANDOM_SCRAPER' });
-        expect(badSourceRes.status).toBe(400);
-        expect(badSourceRes.body.error.code).toBe('UNAUTHORIZED_INDICATOR_SOURCE');
+        // 3. Modifying a verified feed indicator -> 403 Forbidden
+        const feedCreateRes = await request(app)
+          .post('/api/v1/threat-indicators/feed')
+          .set('x-feed-token', 'feed-token-virustotal-prod')
+          .send({
+            type: 'IP',
+            value: '198.51.100.106',
+            threatType: 'C2',
+            severity: 'CRITICAL',
+            confidence: 99,
+          });
+        expect(feedCreateRes.status).toBe(201);
+        const feedIndId = feedCreateRes.body.data.indicatorId;
 
-        // 4. Authorized SECURITY_ANALYST with valid provider -> 201 Created
-        const successRes = await request(app)
-          .post('/api/v1/threat-indicators')
+        const analystModifyFeedRes = await request(app)
+          .patch(`/api/v1/threat-indicators/${feedIndId}`)
           .set('Authorization', `Bearer ${analystTokenOrgA}`)
-          .send(newIndicator);
-        expect(successRes.status).toBe(201);
-        expect(successRes.body.data.value).toBe('198.51.100.199');
-        expect(successRes.body.data.source).toBe('ABUSE_CH');
+          .send({ severity: 'LOW' });
 
-        // 5. GET /api/v1/threat-indicators is readable by authenticated users
-        const getRes = await request(app)
-          .get('/api/v1/threat-indicators')
-          .set('Authorization', `Bearer ${viewerTokenOrgA}`);
-        expect(getRes.status).toBe(200);
-        expect(getRes.body.data.indicators.length).toBeGreaterThanOrEqual(1);
+        expect(analystModifyFeedRes.status).toBe(403);
+        expect(analystModifyFeedRes.body.error.code).toBe('CANNOT_MODIFY_VERIFIED_FEED');
+
+        // 4. Authorized SECURITY_ANALYST can modify their own manual indicator
+        const analystModifyRes = await request(app)
+          .patch(`/api/v1/threat-indicators/${indId}`)
+          .set('Authorization', `Bearer ${analystTokenOrgA}`)
+          .send({ confidence: 95 });
+
+        expect(analystModifyRes.status).toBe(200);
+        expect(analystModifyRes.body.data.confidence).toBe(95);
       });
     });
   });

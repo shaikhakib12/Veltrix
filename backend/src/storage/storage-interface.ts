@@ -87,9 +87,17 @@ export interface StorageInterface {
   saveIndicator(indicator: ThreatIndicator): Promise<void>;
   getIndicatorByValue(
     type: ThreatIndicator['type'],
-    value: string
+    value: string,
+    orgId?: string
   ): Promise<ThreatIndicator | null>;
-  listIndicators(limit?: number): Promise<ThreatIndicator[]>;
+  getIndicatorById(indicatorId: string, orgId?: string): Promise<ThreatIndicator | null>;
+  listIndicators(orgId?: string, limit?: number): Promise<ThreatIndicator[]>;
+  updateIndicator(
+    indicatorId: string,
+    updates: Partial<ThreatIndicator>,
+    orgId?: string
+  ): Promise<ThreatIndicator | null>;
+  deleteIndicator(indicatorId: string, orgId?: string): Promise<boolean>;
 
   // --- Defensive Response Executions ---
   saveExecution(execution: ResponseExecution): Promise<void>;
