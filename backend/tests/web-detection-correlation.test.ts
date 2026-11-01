@@ -15,11 +15,19 @@ import {
   Rule104BotActivity,
   Rule105AuthFlowTampering,
 } from '../src/detection/rules/web/index.js';
+import * as webParser from '../src/detection/web-parser.js';
 import { normalizeWebTelemetry } from '../src/detection/web-parser.js';
+import {
+  InternalEvidenceAuthority,
+  getDefaultInternalEvidenceAuthority,
+  issueTrustedEvidenceContext,
+  INTERNAL_SERVICE_CREDENTIALS,
+} from '../src/detection/evidence-authority.js';
 import { JwtService } from '../src/auth/jwt-service.js';
 import { LocalAuthProvider } from '../src/auth/local-auth-provider.js';
 import { resetAuthProviderForTesting } from '../src/auth/index.js';
 import { resetStorageForTesting } from '../src/storage/index.js';
+import { EventService } from '../src/services/event-service.js';
 
 describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-701 to TASK-707)', () => {
   let storage: MemoryStore;
@@ -320,7 +328,7 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         },
       };
 
-      // Tier 3: Potential Exploitation (DB syntax error in application response)
+      // Tier 3: Potential Exploitation (DB syntax error in application response, attested by authenticated collector)
       const potentialEvent: SecurityEvent = {
         eventId: '01a19700-0000-7000-8000-000000000012',
         orgId,
@@ -330,6 +338,17 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         category: 'NETWORK',
         sourceIp: '198.51.100.32',
         sourceSystem: 'sdk:nodejs:express',
+        trustedEvidenceContext: issueTrustedEvidenceContext({
+          serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['collector:nginx:authenticated'],
+          provenance: 'AUTHENTICATED_COLLECTOR',
+          verifierIdentity: 'collector:nginx:authenticated',
+          eventId: '01a19700-0000-7000-8000-000000000012',
+          orgId,
+          siteId,
+          verifiedResponseEvidence: {
+            errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
+          },
+        }),
         metadata: {
           siteId,
           requestUri: "/items?id=1' OR 1=1--",
@@ -338,7 +357,7 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         },
       };
 
-      // Tier 4: Confirmed Exploitation (Schema data leakage token detected)
+      // Tier 4: Confirmed Exploitation (Schema data leakage token detected by trusted sensor)
       const confirmedEvent: SecurityEvent = {
         eventId: '01a19700-0000-7000-8000-000000000013',
         orgId,
@@ -347,12 +366,20 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         severity: 'CRITICAL',
         category: 'NETWORK',
         sourceIp: '198.51.100.33',
-        sourceSystem: 'sdk:nodejs:express',
+        sourceSystem: 'sensor:canary:db',
+        trustedEvidenceContext: issueTrustedEvidenceContext({
+          serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:db'],
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'sensor:canary:db',
+          eventId: '01a19700-0000-7000-8000-000000000013',
+          orgId,
+          siteId,
+          verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
+        }),
         metadata: {
           siteId,
           requestUri: '/items?id=-1+UNION+SELECT+1,table_name,column_name+FROM+information_schema.columns',
           httpStatus: 200,
-          corroboratingSignals: ['DATA_LEAKAGE_INDICATOR'],
         },
       };
 
@@ -543,7 +570,18 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         severity: 'CRITICAL',
         category: 'NETWORK',
         sourceIp: '198.51.100.55',
-        sourceSystem: 'sdk:nodejs:express',
+        sourceSystem: 'sensor:canary:files',
+        trustedEvidenceContext: issueTrustedEvidenceContext({
+          serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:files'],
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'sensor:canary:files',
+          eventId: '01a19700-0000-7000-8000-000000000033',
+          orgId,
+          siteId,
+          verifiedResponseEvidence: {
+            responseBody: 'root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin',
+          },
+        }),
         metadata: {
           siteId,
           requestUri: '/get-doc?name=../../etc/passwd',
@@ -1267,6 +1305,589 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       expect(res2!.incident.createdAt).toBe(earlierTime.toISOString());
       // Latest timestamp preserved as updatedAt
       expect(res2!.incident.updatedAt).toBe(laterTime.toISOString());
+    });
+  });
+
+  describe('10. PR #10 Final Cryptographic Integrity & Context Binding Hardening', () => {
+    const authority = getDefaultInternalEvidenceAuthority();
+
+    // Required Test 1: Modifying signed responseBody invalidates the signature
+    it('1. modifying signed responseBody invalidates the signature', () => {
+      const genuineContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:files'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'sensor:canary:files',
+        eventId: '01a19700-0000-7000-8000-000000000301',
+        orgId,
+        siteId,
+        verifiedResponseEvidence: {
+          responseBody: 'root:x:0:0:root:/root:/bin/bash',
+        },
+      });
+
+      expect(authority.verifyContext(genuineContext, { eventId: '01a19700-0000-7000-8000-000000000301', orgId, siteId })).toBe(true);
+
+      // Tamper with responseBody
+      const tamperedContext = {
+        ...genuineContext,
+        verifiedResponseEvidence: {
+          ...genuineContext.verifiedResponseEvidence,
+          responseBody: 'root:x:0:0:root:/root:/bin/sh\ndaemon:x:1:1:tampered',
+        },
+      };
+
+      expect(authority.verifyContext(tamperedContext, { eventId: '01a19700-0000-7000-8000-000000000301', orgId, siteId })).toBe(false);
+
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000301',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.traversal',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.201',
+          sourceSystem: 'client:external',
+          metadata: { siteId, requestUri: '/doc?f=../../etc/passwd' },
+        },
+        { trustedContext: tamperedContext }
+      );
+
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+    });
+
+    // Required Test 2: Modifying signed errorMessage invalidates the signature
+    it('2. modifying signed errorMessage invalidates the signature', () => {
+      const genuineContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['collector:nginx:authenticated'],
+        provenance: 'AUTHENTICATED_COLLECTOR',
+        verifierIdentity: 'collector:nginx:authenticated',
+        eventId: '01a19700-0000-7000-8000-000000000302',
+        orgId,
+        siteId,
+        verifiedResponseEvidence: {
+          errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
+        },
+      });
+
+      expect(authority.verifyContext(genuineContext, { eventId: '01a19700-0000-7000-8000-000000000302', orgId, siteId })).toBe(true);
+
+      // Tamper with errorMessage
+      const tamperedContext = {
+        ...genuineContext,
+        verifiedResponseEvidence: {
+          errorMessage: 'Tampered database error message near SELECT.',
+        },
+      };
+
+      expect(authority.verifyContext(tamperedContext, { eventId: '01a19700-0000-7000-8000-000000000302', orgId, siteId })).toBe(false);
+
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000302',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.202',
+          sourceSystem: 'client:external',
+          metadata: { siteId, requestUri: "/items?id=1'" },
+        },
+        { trustedContext: tamperedContext }
+      );
+
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.confidenceLevel).not.toBe('POTENTIAL_EXPLOITATION');
+    });
+
+    // Required Test 3: Modifying signed wafAction invalidates the signature
+    it('3. modifying signed wafAction invalidates the signature', () => {
+      const genuineContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['waf:edge-gateway:authenticated'],
+        provenance: 'AUTHENTICATED_COLLECTOR',
+        verifierIdentity: 'waf:edge-gateway:authenticated',
+        eventId: '01a19700-0000-7000-8000-000000000303',
+        orgId,
+        siteId,
+        verifiedResponseEvidence: {
+          wafAction: 'BLOCK',
+          wafRuleId: 'OWASP-CRS-942100',
+        },
+      });
+
+      expect(authority.verifyContext(genuineContext, { eventId: '01a19700-0000-7000-8000-000000000303', orgId, siteId })).toBe(true);
+
+      // Tamper with wafAction
+      const tamperedContext = {
+        ...genuineContext,
+        verifiedResponseEvidence: {
+          ...genuineContext.verifiedResponseEvidence,
+          wafAction: 'ALLOW' as const,
+        },
+      };
+
+      expect(authority.verifyContext(tamperedContext, { eventId: '01a19700-0000-7000-8000-000000000303', orgId, siteId })).toBe(false);
+
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000303',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.203',
+          sourceSystem: 'waf:edge',
+          metadata: { siteId, httpStatus: 200 },
+        },
+        { trustedContext: tamperedContext }
+      );
+
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.wafAction).toBeUndefined();
+    });
+
+    // Required Test 4: Modifying evidenceReferences invalidates the signature
+    it('4. modifying evidenceReferences invalidates the signature', () => {
+      const genuineContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId: '01a19700-0000-7000-8000-000000000304',
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        evidenceReferences: ['canary-token-alpha-001'],
+      });
+
+      expect(authority.verifyContext(genuineContext, { eventId: '01a19700-0000-7000-8000-000000000304', orgId, siteId })).toBe(true);
+
+      // Tamper with evidenceReferences
+      const tamperedContext = {
+        ...genuineContext,
+        evidenceReferences: ['canary-token-alpha-001', 'forged-reference-002'],
+      };
+
+      expect(authority.verifyContext(tamperedContext, { eventId: '01a19700-0000-7000-8000-000000000304', orgId, siteId })).toBe(false);
+
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000304',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'CRITICAL',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.204',
+          sourceSystem: 'sensor:canary:db',
+          metadata: { siteId, requestUri: "/items?id=1'" },
+        },
+        { trustedContext: tamperedContext }
+      );
+
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+    });
+
+    // Required Test 5: Changing eventId invalidates the context
+    it('5. changing eventId invalidates the context', () => {
+      const genuineContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:db'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'sensor:canary:db',
+        eventId: '01a19700-0000-7000-8000-000000000305',
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
+      });
+
+      // A. Tampering with eventId on context invalidates HMAC signature
+      const tamperedContext = {
+        ...genuineContext,
+        eventId: '01a19700-0000-7000-8000-000000000999',
+      };
+      expect(authority.verifyContext(tamperedContext)).toBe(false);
+
+      // B. Attaching original genuine context to a different event is rejected by event binding
+      const parsedOtherEvent = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000999',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.205',
+          sourceSystem: 'client:external',
+          metadata: { siteId, requestUri: "/items?id=1'" },
+        },
+        { trustedContext: genuineContext }
+      );
+
+      expect(parsedOtherEvent.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsedOtherEvent.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+    });
+
+    // Required Test 6: Changing orgId invalidates the context
+    it('6. changing orgId invalidates the context', () => {
+      const genuineContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:db'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'sensor:canary:db',
+        eventId: '01a19700-0000-7000-8000-000000000306',
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
+      });
+
+      // A. Tampering with orgId on context invalidates HMAC signature
+      const tamperedContext = {
+        ...genuineContext,
+        orgId: 'org-tenant-b-malicious',
+      };
+      expect(authority.verifyContext(tamperedContext)).toBe(false);
+
+      // B. Attaching genuine context to another tenant event is rejected by tenant binding
+      const parsedTenantB = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000306',
+          orgId: 'org-tenant-b-malicious',
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.206',
+          sourceSystem: 'client:external',
+          metadata: { siteId, requestUri: "/items?id=1'" },
+        },
+        { trustedContext: genuineContext }
+      );
+
+      expect(parsedTenantB.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsedTenantB.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+    });
+
+    // Required Test 7: Changing siteId invalidates the context
+    it('7. changing siteId invalidates the context', () => {
+      const genuineContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:db'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'sensor:canary:db',
+        eventId: '01a19700-0000-7000-8000-000000000307',
+        orgId,
+        siteId: 'site-vault-prod',
+        verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
+      });
+
+      // Tampering with siteId on context invalidates HMAC signature
+      const tamperedContext = {
+        ...genuineContext,
+        siteId: 'site-public-portal',
+      };
+      expect(authority.verifyContext(tamperedContext)).toBe(false);
+
+      const parsed = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000307',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.207',
+          sourceSystem: 'client:external',
+          metadata: { siteId: 'site-public-portal', requestUri: "/items?id=1'" },
+        },
+        { trustedContext: tamperedContext }
+      );
+
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+    });
+
+    // Required Test 8: Expired or future-dated contexts are rejected
+    it('8. expired or future-dated contexts are rejected', () => {
+      const now = Date.now();
+
+      // A. Creation with expired timestamp is rejected at creation
+      const expiredTimestamp = new Date(now - 20 * 60 * 1000).toISOString(); // 20 min ago
+      expect(() => {
+        authority.createContext({
+          serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:db'],
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'sensor:canary:db',
+          eventId: '01a19700-0000-7000-8000-000000000308a',
+          orgId,
+          siteId,
+          verificationTimestamp: expiredTimestamp,
+        });
+      }).toThrow(/INVALID_TIMESTAMP.*Expired/);
+
+      // B. Creation with future timestamp is rejected at creation
+      const futureTimestamp = new Date(now + 10 * 60 * 1000).toISOString(); // 10 min in future
+      expect(() => {
+        authority.createContext({
+          serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['sensor:canary:db'],
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'sensor:canary:db',
+          eventId: '01a19700-0000-7000-8000-000000000308b',
+          orgId,
+          siteId,
+          verificationTimestamp: futureTimestamp,
+        });
+      }).toThrow(/INVALID_TIMESTAMP.*Future-dated/);
+
+      // C. Manually crafted contexts with expired or future timestamps fail verification
+      const craftedExpired = {
+        version: 'VELTRIX_EVIDENCE_V2' as const,
+        verifiedProvenance: 'TRUSTED_SERVER_COMPONENT' as const,
+        verifierIdentity: 'sensor:canary:db',
+        verificationTimestamp: expiredTimestamp,
+        eventId: '01a19700-0000-7000-8000-000000000308c',
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
+        evidenceReferences: [],
+        authoritySignature: '0'.repeat(64),
+      };
+      expect(authority.verifyContext(craftedExpired)).toBe(false);
+
+      const craftedFuture = {
+        ...craftedExpired,
+        verificationTimestamp: futureTimestamp,
+      };
+      expect(authority.verifyContext(craftedFuture)).toBe(false);
+    });
+
+    // Required Test 9: A context from one website cannot be replayed for another
+    it('9. a context from one website cannot be replayed for another', () => {
+      const genuineSiteAContext = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId: '01a19700-0000-7000-8000-000000000309',
+        orgId,
+        siteId: 'site-internal-vault',
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      // An untampered genuine context created for 'site-internal-vault' is replayed for 'site-public-blog'
+      const parsedReplay = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000309',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.209',
+          sourceSystem: 'client:external',
+          metadata: { siteId: 'site-public-blog', requestUri: "/posts?id=1'" },
+        },
+        { trustedContext: genuineSiteAContext }
+      );
+
+      // Website mismatch rejects context and falls back to UNTRUSTED_CLIENT
+      expect(parsedReplay.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsedReplay.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
+      expect(parsedReplay.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+    });
+
+    // Required Test 10: Unauthorized code paths cannot issue trusted evidence
+    it('10. unauthorized code paths cannot issue trusted evidence', async () => {
+      // A. Missing serviceAuthToken throws UNAUTHORIZED_SERVICE
+      expect(() => {
+        authority.createContext({
+          serviceAuthToken: '',
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'canary-service:v1',
+          eventId: '01a19700-0000-7000-8000-000000000310a',
+          orgId,
+          siteId,
+          verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        });
+      }).toThrow(/UNAUTHORIZED_SERVICE.*Missing service authentication/);
+
+      // B. Invalid serviceAuthToken throws UNAUTHORIZED_SERVICE
+      expect(() => {
+        authority.createContext({
+          serviceAuthToken: 'forged-invalid-secret-key-12345',
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'canary-service:v1',
+          eventId: '01a19700-0000-7000-8000-000000000310b',
+          orgId,
+          siteId,
+          verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        });
+      }).toThrow(/UNAUTHORIZED_SERVICE.*Invalid service authentication/);
+
+      // C. Service token for another service cannot be used for a different verifier
+      expect(() => {
+        authority.createContext({
+          serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['collector:nginx:authenticated'],
+          provenance: 'TRUSTED_SERVER_COMPONENT',
+          verifierIdentity: 'sensor:canary:db',
+          eventId: '01a19700-0000-7000-8000-000000000310c',
+          orgId,
+          siteId,
+          verifiedSignalIdentifiers: ['DATA_LEAKAGE_INDICATOR'],
+        });
+      }).toThrow(/UNAUTHORIZED_SERVICE.*Invalid service authentication/);
+
+      // D. web-parser.ts does NOT export createContext or InternalEvidenceAuthority
+      const webParserExports = Object.keys(webParser);
+      expect(webParserExports).not.toContain('createInternalTrustedEvidenceContext');
+      expect(webParserExports).not.toContain('InternalEvidenceAuthority');
+      expect(webParserExports).not.toContain('getDefaultInternalEvidenceAuthority');
+
+      // E. Public ingestion schema rejects event containing trustedEvidenceContext
+      const eventService = new EventService(storage);
+      const payloadWithContext = {
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.209',
+        sourceSystem: 'client:external',
+        trustedEvidenceContext: {
+          version: 'VELTRIX_EVIDENCE_V2',
+          verifiedProvenance: 'TRUSTED_SERVER_COMPONENT',
+          verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+          verifierIdentity: 'canary-service:v1',
+          verificationTimestamp: new Date().toISOString(),
+          eventId: '01a19700-0000-7000-8000-000000000310e',
+          orgId,
+          siteId,
+          evidenceReferences: [],
+          authoritySignature: 'forged',
+        },
+      };
+      await expect(eventService.ingestSingleEvent(payloadWithContext, orgId)).rejects.toThrow();
+    });
+
+    // Required Test 11: Genuine authenticated evidence continues working
+    it('11. genuine authenticated evidence continues working', async () => {
+      // A. Verified canary token breach elevates to CONFIRMED_EXPLOITATION
+      const trustedCanary = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId: '01a19700-0000-7000-8000-000000000311a',
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+        evidenceReferences: ['canary-db-prod-token-42'],
+      });
+
+      const parsedCanary = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000311a',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'CRITICAL',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.211',
+          sourceSystem: 'sensor:canary:db',
+          metadata: { siteId },
+        },
+        { trustedContext: trustedCanary }
+      );
+
+      expect(parsedCanary.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(parsedCanary.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+      expect(parsedCanary.corroboratingSignals).toContain('CANARY_TOKEN_BREACH');
+
+      // B. Authenticated collector with verifiedResponseEvidence elevates to POTENTIAL_EXPLOITATION
+      const trustedCollector = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['collector:nginx:authenticated'],
+        provenance: 'AUTHENTICATED_COLLECTOR',
+        verifierIdentity: 'collector:nginx:authenticated',
+        eventId: '01a19700-0000-7000-8000-000000000311b',
+        orgId,
+        siteId,
+        verifiedResponseEvidence: {
+          errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
+        },
+      });
+
+      const parsedCollector = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000311b',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.211',
+          sourceSystem: 'collector:nginx',
+          metadata: { siteId, httpStatus: 500 },
+        },
+        { trustedContext: trustedCollector }
+      );
+
+      expect(parsedCollector.evidenceProvenance).toBe('AUTHENTICATED_COLLECTOR');
+      expect(parsedCollector.confidenceLevel).toBe('POTENTIAL_EXPLOITATION');
+      expect(parsedCollector.corroboratingSignals).toContain('UNHANDLED_DB_SYNTAX_ERROR');
+
+      // C. Authenticated WAF with verifiedResponseEvidence elevates to BLOCKED_ATTEMPT
+      const trustedWaf = authority.createContext({
+        serviceAuthToken: INTERNAL_SERVICE_CREDENTIALS['waf:edge-gateway:authenticated'],
+        provenance: 'AUTHENTICATED_COLLECTOR',
+        verifierIdentity: 'waf:edge-gateway:authenticated',
+        eventId: '01a19700-0000-7000-8000-000000000311c',
+        orgId,
+        siteId,
+        verifiedResponseEvidence: {
+          wafAction: 'BLOCK',
+          wafRuleId: 'OWASP-CRS-942100',
+        },
+      });
+
+      const parsedWaf = normalizeWebTelemetry(
+        {
+          eventId: '01a19700-0000-7000-8000-000000000311c',
+          orgId,
+          timestamp: new Date().toISOString(),
+          eventType: 'web.attack.sqli',
+          severity: 'HIGH',
+          category: 'NETWORK',
+          sourceIp: '198.51.100.211',
+          sourceSystem: 'waf:edge',
+          metadata: { siteId, httpStatus: 403 },
+        },
+        { trustedContext: trustedWaf }
+      );
+
+      expect(parsedWaf.wafAction).toBe('BLOCK');
+      expect(parsedWaf.corroboratingSignals).toContain('WAF_INTERVENTION');
+      expect(parsedWaf.confidenceLevel).toBe('BLOCKED_ATTEMPT');
+
+      // D. Full Rule101, Rule102, Rule103 evaluations remain functional
+      const sqliDetections = await new Rule101SqlInjection().evaluate({
+        organizationId: orgId,
+        events: [
+          {
+            eventId: '01a19700-0000-7000-8000-000000000311d',
+            orgId,
+            timestamp: new Date().toISOString(),
+            eventType: 'web.request.normal',
+            severity: 'MEDIUM',
+            category: 'NETWORK',
+            sourceIp: '198.51.100.211',
+            sourceSystem: 'sdk:nodejs:express',
+            metadata: {
+              siteId,
+              requestUri: '/products?q=1%27+UNION+SELECT+null%2Cusername%2Cpassword+FROM+users--',
+              httpStatus: 200,
+            },
+          },
+        ],
+      });
+      expect(sqliDetections).toHaveLength(1);
+      expect(sqliDetections[0].ruleId).toBe('RULE-101');
+      expect((sqliDetections[0].evidence.details as any).confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
     });
   });
 });

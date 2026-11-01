@@ -31,6 +31,43 @@ export type WebConfidenceTier = (typeof WEB_CONFIDENCE_TIERS)[number];
 export type WebAttackType = (typeof WEB_ATTACK_TYPES)[number];
 export type RiskBand = (typeof RISK_BANDS)[number];
 
+export type EvidenceProvenance =
+  | 'TRUSTED_SERVER_COMPONENT'
+  | 'AUTHENTICATED_COLLECTOR'
+  | 'UNTRUSTED_CLIENT';
+
+/**
+ * Independently captured and verified response evidence payload.
+ * Encapsulates response bodies, error messages, and WAF interventions captured
+ * by an authenticated server component, separate from client-controlled metadata.
+ */
+export interface VerifiedResponseEvidence {
+  responseBody?: string;
+  errorMessage?: string;
+  wafAction?: 'ALLOW' | 'BLOCK' | 'CHALLENGE' | 'LOG';
+  wafRuleId?: string;
+  capturedAt?: string;
+}
+
+/**
+ * Internal-only trusted evidence context used by approved server components
+ * (such as active verification workers, canary probes, and internal audit jobs).
+ * External clients, SDK users, webhooks, and integrations cannot construct this.
+ */
+export interface InternalTrustedEvidenceContext {
+  version: 'VELTRIX_EVIDENCE_V2';
+  verifiedProvenance: 'TRUSTED_SERVER_COMPONENT' | 'AUTHENTICATED_COLLECTOR';
+  verifierIdentity: string;
+  verificationTimestamp: string;
+  eventId: string;
+  orgId: string;
+  siteId?: string;
+  verifiedSignalIdentifiers: string[];
+  evidenceReferences: string[];
+  authoritySignature?: string;
+  verifiedResponseEvidence?: VerifiedResponseEvidence;
+}
+
 export interface WebSecurityEventMetadata {
   siteId?: string;
   domain?: string;
@@ -46,6 +83,12 @@ export interface WebSecurityEventMetadata {
   ja3Fingerprint?: string;
   confidenceLevel?: WebConfidenceTier;
   corroboratingSignals?: string[];
+  untrustedClientSignals?: string[];
+  serverVerified?: boolean;
+  evidenceProvenance?: EvidenceProvenance;
+  verifiedSignals?: string[];
+  responseSample?: string;
+  errorMessage?: string;
   [key: string]: unknown;
 }
 
@@ -63,6 +106,7 @@ export interface SecurityEvent {
   isSimulated?: boolean;
   idempotencyKey?: string;
   ingestedAt?: string; // Server-side ISO 8601 UTC receipt timestamp
+  trustedEvidenceContext?: InternalTrustedEvidenceContext;
 }
 
 export interface IngestionItemResult {

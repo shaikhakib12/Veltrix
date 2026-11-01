@@ -6,7 +6,7 @@
 **Branch:** `feature/phase-7-web-attack-monitoring`  
 **Target Branch:** `main`  
 **Base Commit:** `58d5719` (Merged PR #6 Phase 6 Security Hardening)  
-**PR Reference:** [PR #7 (shaikhakib12/Veltrix#7)](https://github.com/shaikhakib12/Veltrix/pull/7)  
+**PR References:** [PR #7 (Merged into main)](https://github.com/shaikhakib12/Veltrix/pull/7) | [PR #9 (Security Hardening Follow-up)](https://github.com/shaikhakib12/Veltrix/pull/9)  
 **Audit Scope:** Web attack classification parser, detection rules (`RULE-101` to `RULE-105`), multi-stage attack correlation engine, explainable risk scoring engine, vulnerability correlator, incident REST APIs, frontend components, and automated test harness.  
 **Auditor:** VELTRIX Lead Cybersecurity & Systems Auditor (Independent Review)  
 **Final Status:** **ALL AUDIT FINDINGS REMEDIATED & VERIFIED — READY FOR REVIEW**  
@@ -15,16 +15,17 @@
 
 ## 1. Executive Summary
 
-An exhaustive, independent security audit and code review of the Phase 7 implementation (TASK-701 through TASK-707) was conducted across seven target domains:
+An exhaustive, independent security audit and code review of the Phase 7 implementation (TASK-701 through TASK-707) was conducted across eight target domains:
 1. **Attack Correlation:** Sliding vs. fixed window boundaries, NAT/shared IP collisions, loopback/generic IP isolation, duplicate and out-of-order event idempotency, and concurrent worker collision defense.
 2. **Mathematical Risk Scoring:** Invariant clamping in $[0, 100]$, `NaN` poisoning prevention, missing/malformed CVSS handling, bounded frequency multipliers, and transparent human-readable explanations.
-3. **Detection Confidence Classification:** Evidence tiering (`SUSPICIOUS_ATTEMPT`, `BLOCKED_ATTEMPT`, `POTENTIAL_EXPLOITATION`, `CONFIRMED_EXPLOITATION`), sensitive parameter scrubbing, ReDoS bounds, and false positive suppression.
+3. **Detection Confidence Classification & Provenance Boundaries:** Evidence tiering (`SUSPICIOUS_ATTEMPT`, `BLOCKED_ATTEMPT`, `POTENTIAL_EXPLOITATION`, `CONFIRMED_EXPLOITATION`), sensitive parameter scrubbing, ReDoS bounds, and trusted server provenance model preventing untrusted client metadata escalation.
 4. **SOAR Safety & Containment:** Clear boundary enforcement separating recommendations from execution (Phase 10 SOAR), ensuring the SOC dashboard does not falsely claim active perimeter blocks.
 5. **API & Storage Integrity:** `MemoryStore` and `DynamoDBStore` parity, `siteId` filtering on incidents and detections, direct $O(1)$ lookup for incident IDs, and API key prohibition on administrative routes (`FORBIDDEN_API_KEY_SCOPE_PROHIBITED`).
 6. **Automated Pipeline Processing:** End-to-end telemetry flow from SDK/collector ingestion through normalization, rule evaluation, correlation, risk scoring, persistence, and REST APIs.
 7. **Specification Consistency:** Exact alignment of task definitions, scopes, and deliverables across `specs/tasks.md`, `specs/website-security-roadmap-update.md`, and `specs/phase-7-completion-report.md`.
+8. **Trust Boundary Hardening:** Separation of externally reported client signals from server-verified evidence, prohibiting forged canary tokens, data leakage claims, or privilege mutations from obtaining confirmed exploitation.
 
-All **8 security audit findings** identified during review have been fully remediated in source code and verified with targeted regression tests. The test suite now comprises **238 automated tests (100% pass rate)** across all monorepo workspaces.
+All **9 security audit findings** identified during review have been fully remediated in source code and verified with targeted regression tests. The test suite now comprises **245 automated tests (100% pass rate)** across all monorepo workspaces.
 
 ---
 
@@ -40,6 +41,7 @@ All **8 security audit findings** identified during review have been fully remed
 | **SEC-P7-006** | Low | `frontend/src/components/WebsiteAttackMonitoring.tsx` | SOC button label misleadingly implied active perimeter IP blocking | **REMEDIATED** |
 | **SEC-P7-007** | Medium | `backend/src/storage/dynamodb-store.ts` | Missing `siteId` filtering & $O(1)$ incident ID lookup in DynamoDB | **REMEDIATED** |
 | **SEC-P7-008** | Low | `backend/src/correlation/engine.ts` | Unhandled undefined `detection.relatedEventIds` in risk calculation | **REMEDIATED** |
+| **SEC-P7-009** | Critical | `backend/src/detection/web-parser.ts` | Untrusted client evidence promotion & missing provenance trust boundary | **REMEDIATED** |
 
 ---
 
@@ -109,6 +111,56 @@ All **8 security audit findings** identified during review have been fully remed
 - **Explanation:** If a synthetic or external detection object omitted `relatedEventIds`, accessing `.length` threw an unhandled `TypeError` during incident risk calculation.
 - **Fix Applied:** Defensively guarded all references with `(detection.relatedEventIds || [])`.
 
+#### Finding SEC-P7-009: Untrusted Client Evidence Promotion & Missing Provenance Trust Boundary
+- **Severity:** Critical
+- **Affected File:** `backend/src/detection/web-parser.ts`, `backend/src/detection/evidence-authority.ts`, `backend/src/services/event-service.ts`, `backend/src/storage/dynamodb-store.ts`, `backend/src/storage/memory-store.ts`, `packages/shared/src/types/index.ts`
+- **Explanation:**
+  1. **Complete HMAC Coverage & Cryptographic Integrity:** `computeSignature()` previously only signed a subset of fields. Unsigned fields such as `evidenceReferences` and `verifiedResponseEvidence` could potentially be altered without invalidating the signature.
+  2. **Event, Tenant, and Site Binding:** A signed evidence context could previously be detached and replayed across different events, tenants, or website assets without binding verification, or reused after expiration.
+  3. **Authority Access & Service Authentication:** `InternalEvidenceAuthority` previously relied purely on an allowlist of verifier identity strings without authenticating the calling service, and `web-parser.ts` re-exported authority creation helpers publicly.
+  4. **Client-Controlled Response Evidence & WAF Actions:** Client-controlled metadata (`metadata.responseSample`, `metadata.errorMessage`, `metadata.wafAction`) could not be trusted to establish server-verified exploitation or blocked attempts.
+- **Fix Applied:**
+  1. **Deterministic Canonical Serialization & Complete HMAC Coverage:**
+     - Canonical string serialization (`computeCanonicalPayload`) integrity-protects EVERY security-relevant field:
+       - `version`: `'VELTRIX_EVIDENCE_V2'`
+       - `eventId`: bound event identifier
+       - `orgId`: bound organization identifier
+       - `siteId`: bound website asset identifier
+       - `provenance`: `'TRUSTED_SERVER_COMPONENT'` or `'AUTHENTICATED_COLLECTOR'`
+       - `verifierIdentity`: verified caller identity
+       - `signals`: sorted list of verified signal identifiers
+       - `evidenceReferences`: sorted list of reference IDs
+       - `timestamp`: ISO 8601 UTC timestamp
+       - `responseBodyHash`: SHA-256 hash of verified response body (or `'NONE'`)
+       - `errorMessageHash`: SHA-256 hash of verified error message (or `'NONE'`)
+       - `wafAction`: verified WAF intervention action (`ALLOW`, `BLOCK`, `CHALLENGE`, `LOG`, or `'NONE'`)
+       - `wafRuleId`: verified WAF rule identifier
+     - Signature verified using constant-time comparison (`timingSafeEqual`).
+  2. **Anti-Replay, Event Binding & Freshness Verification:**
+     - Context explicitly carries `eventId`, `orgId`, and `siteId`.
+     - `normalizeWebTelemetry` verifies that `context.eventId === event.eventId`, `context.orgId === event.orgId`, and `context.siteId === (event.metadata?.siteId || '')`. Any cross-event, cross-tenant, or cross-site replay is rejected.
+     - Freshness checks enforce that verification timestamps cannot be in the future (> 60s clock skew) or older than 15 minutes (`MAX_EVIDENCE_AGE_MS = 900,000 ms`).
+  3. **Caller Service Authentication & Restricted Authority:**
+     - `createContext()` requires a valid `serviceAuthToken` matching pre-shared credentials (`INTERNAL_SERVICE_CREDENTIALS`) for the approved verifier identity.
+     - Unauthorized code paths without the secret credential cannot construct signed evidence contexts.
+     - Removed public re-exports of `createInternalTrustedEvidenceContext`, `InternalEvidenceAuthority`, and `getDefaultInternalEvidenceAuthority` from `web-parser.ts`.
+     - Preserved authenticated WAF collector verification via authorized collector credentials.
+  4. **Ingestion & Persistence Storage Boundary Protection:**
+     - Public ingestion schema rejects any event carrying `trustedEvidenceContext`.
+     - `DynamoDBStore` and `MemoryStore` strip `trustedEvidenceContext` on save, returning undefined on read.
+- **Test Evidence:** 11 dedicated regression tests in `backend/tests/web-detection-correlation.test.ts` > Section 10:
+  - `1. modifying signed responseBody invalidates the signature`
+  - `2. modifying signed errorMessage invalidates the signature`
+  - `3. modifying signed wafAction invalidates the signature`
+  - `4. modifying evidenceReferences invalidates the signature`
+  - `5. changing eventId invalidates the context`
+  - `6. changing orgId invalidates the context`
+  - `7. changing siteId invalidates the context`
+  - `8. expired or future-dated contexts are rejected`
+  - `9. a context from one website cannot be replayed for another`
+  - `10. unauthorized code paths cannot issue trusted evidence`
+  - `11. genuine authenticated evidence continues working`
+
 ---
 
 ## 3. RBAC Matrix Verification
@@ -131,12 +183,12 @@ All **8 security audit findings** identified during review have been fully remed
 
 ```
 Test Files  9 passed (9 across monorepo)
-     Tests  230 passed (230) - @veltrix/backend
+     Tests  241 passed (241) - @veltrix/backend
      Tests  8 passed (8)     - @veltrix/sdk-node
-  Total:    238 / 238 passed (100% pass rate)
+  Total:    249 / 249 passed (100% pass rate)
 ```
 
-- All 34 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including the 6 newly added security audit regression tests in Section 9).
+- All 45 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including the 6 regression tests in Section 9 and 11 trust-boundary regression tests in Section 10).
 - Full tenant boundary isolation and API key prohibition regression tests pass.
 - False positive suppression verified across all 5 web attack rules.
 
@@ -153,6 +205,6 @@ Test Files  9 passed (9 across monorepo)
 
 ## 6. Audit Conclusion
 
-The Phase 7 implementation fulfills all security, architectural, and quality standards mandated by the VELTRIX project roadmap. All audit findings have been remediated, verified, and accompanied by comprehensive regression tests.
+The Phase 7 implementation fulfills all security, architectural, and quality standards mandated by the VELTRIX project roadmap. All 9 audit findings have been remediated, verified, and accompanied by comprehensive regression tests.
 
-The branch `feature/phase-7-web-attack-monitoring` is certified **SECURE & READY FOR PULL REQUEST REVIEW**.
+The branch `feature/phase-7-web-attack-monitoring` and follow-up Pull Request **PR #9** are certified **SECURE & READY FOR PULL REQUEST REVIEW**.
