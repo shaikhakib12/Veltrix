@@ -226,15 +226,168 @@ All requests made by the Web console, CLI, and telemetry clients must include:
 - **Response 200 OK:** Returns normalized `SecurityEvent`.
 - **Response 404 Not Found (`EVENT_NOT_FOUND`):** Returned if event does not exist or belongs to another organization.
 
-### 2.3 Threat Detection & Rules (Module C)
-- **`GET /detection-rules`**
-  - **Response 200 OK:** Array of all 10 Sigma-inspired detection rules.
-- **`PATCH /detection-rules/:ruleId`**
-  - **Request Body:** `{ "enabled": boolean, "threshold": number, "timeWindowSeconds": number }`
-  - **Response 200 OK:** `{ "success": true, "rule": { ... } }`
-- **`POST /detection-rules/test`** (Rule Dry-Run)
-  - **Request Body:** `{ "rule": { ... }, "sampleEvents": [ { ... } ] }`
-  - **Response 200 OK:** `{ "matched": boolean, "matchedCount": 5, "triggers": [...] }`
+### 2.3 Threat Detection & Rules (Module C - Phase 5)
+
+#### 2.3.1 On-Demand Threat Detection (`POST /api/v1/detections/run`)
+- **Authentication:** Bearer JWT required.
+- **Authorization:** Requires role `SUPER_ADMIN`, `ORG_ADMIN`, or `SECURITY_ANALYST`.
+- **Request Body (`DetectionRunRequestSchema`):**
+  ```json
+  {
+    "startTime": "2026-11-01T00:00:00.000Z",
+    "endTime": "2026-11-01T01:00:00.000Z",
+    "ruleIds": ["RULE-001", "RULE-002"],
+    "limit": 500,
+    "persistDetections": true
+  }
+  ```
+- **Response 200 OK:**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "organizationId": "org-cyber-shield",
+      "totalEvaluatedEvents": 142,
+      "matchedDetectionsCount": 2,
+      "detections": [
+        {
+          "detectionId": "018d5f30-74e1-7cb2-b43a-e9fa651f8b1c",
+          "ruleId": "RULE-001",
+          "ruleName": "Brute Force Authentication",
+          "orgId": "org-cyber-shield",
+          "severity": "HIGH",
+          "confidence": 85,
+          "category": "AUTHENTICATION",
+          "title": "Brute Force Authentication Detected from 198.51.100.10",
+          "description": "5 failed authentication attempts detected from IP 198.51.100.10 targeting user1 within 120s.",
+          "detectedAt": "2026-11-01T00:45:10.000Z",
+          "relatedEventIds": ["ev-1", "ev-2", "ev-3", "ev-4", "ev-5"],
+          "evidence": {
+            "matchedRuleId": "RULE-001",
+            "matchedThreshold": 5,
+            "actualCount": 5,
+            "timeWindowSeconds": 120,
+            "targetEntity": { "type": "IP", "value": "198.51.100.10" },
+            "triggeringEvents": ["ev-1", "ev-2", "ev-3", "ev-4", "ev-5"]
+          },
+          "mitreAttack": {
+            "techniqueId": "T1110.001",
+            "techniqueName": "Password Guessing",
+            "tactic": "Credential Access"
+          },
+          "status": "ACTIVE"
+        }
+      ],
+      "executionTimeMs": 14,
+      "evaluatedRuleIds": ["RULE-001", "RULE-002"]
+    },
+    "meta": { "timestamp": "2026-11-01T01:00:00.000Z" }
+  }
+  ```
+
+#### 2.3.2 Query Detections (`GET /api/v1/detections`)
+- **Authentication:** Bearer JWT required.
+- **Query Parameters:** `ruleId`, `severity` (LOW, MEDIUM, HIGH, CRITICAL), `status` (ACTIVE, RESOLVED, SUPPRESSED), `startTime`, `endTime`, `limit` (1..100, default 50), `cursor`.
+- **Response 200 OK:** Returns paginated detections with HMAC-SHA256 signed cursor:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "items": [ ... ],
+      "nextCursor": "eypvcmdJZCI6Im9yZy1jeWJlci1zaGllbGQiLCJvZmZzZXQiOjUwfQ==",
+      "total": 35
+    },
+    "meta": {
+      "timestamp": "2026-11-01T01:05:00.000Z",
+      "cursor": "eypvcmdJZCI6Im9yZy1jeWJlci1zaGllbGQiLCJvZmZzZXQiOjUwfQ==",
+      "hasMore": false,
+      "total": 35
+    }
+  }
+  ```
+
+#### 2.3.3 Single Detection Retrieval (`GET /api/v1/detections/:detectionId`)
+- **Authentication:** Bearer JWT required.
+- **Parameters:** `detectionId` (path parameter).
+- **Response 200 OK:** Returns single `Detection` item.
+- **Response 404 Not Found:** If detection does not exist or belongs to another organization.
+
+#### 2.3.4 List Detection Rules (`GET /api/v1/detection-rules`)
+- **Authentication:** Bearer JWT required.
+- **Response 200 OK:** Array of all 10 Sigma-inspired detection rules merged with tenant-specific overrides:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "rules": [
+        {
+          "ruleId": "RULE-001",
+          "orgId": "org-cyber-shield",
+          "name": "Brute Force Authentication",
+          "description": "Detects multiple failed login attempts from a single IP address targeting accounts within a sliding window.",
+          "category": "AUTHENTICATION",
+          "severity": "HIGH",
+          "threshold": 5,
+          "slidingWindowSeconds": 120,
+          "isEnabled": true,
+          "mitreAttack": {
+            "techniqueId": "T1110.001",
+            "techniqueName": "Password Guessing",
+            "tactic": "Credential Access"
+          }
+        }
+      ]
+    }
+  }
+  ```
+
+#### 2.3.5 Mutate Detection Rule Configuration (`PATCH /api/v1/detection-rules/:ruleId`)
+- **Authentication:** Bearer JWT required.
+- **Authorization:** Restricted to `SUPER_ADMIN` and `ORG_ADMIN`.
+- **Request Body (`DetectionRuleUpdateSchema`):**
+  ```json
+  {
+    "threshold": 10,
+    "slidingWindowSeconds": 240,
+    "isEnabled": true,
+    "severity": "CRITICAL"
+  }
+  ```
+- **Response 200 OK:** Returns updated `DetectionRule` object.
+
+#### 2.3.6 Dry-Run Rule Against Sample Telemetry (`POST /api/v1/detection-rules/test`)
+- **Authentication:** Bearer JWT required.
+- **Authorization:** Requires role `SUPER_ADMIN`, `ORG_ADMIN`, or `SECURITY_ANALYST`.
+- **Request Body (`DetectionRuleTestRequestSchema`):**
+  ```json
+  {
+    "ruleId": "RULE-001",
+    "threshold": 5,
+    "slidingWindowSeconds": 120,
+    "sampleEvents": [
+      {
+        "category": "AUTHENTICATION",
+        "eventType": "auth.login.failed",
+        "severity": "LOW",
+        "sourceIp": "198.51.100.5",
+        "username": "analyst",
+        "sourceSystem": "test-runner",
+        "timestamp": "2026-11-01T00:00:01.000Z"
+      }
+    ]
+  }
+  ```
+- **Response 200 OK:**
+  ```json
+  {
+    "success": true,
+    "data": {
+      "matched": true,
+      "matchedCount": 1,
+      "detections": [ ... ]
+    }
+  }
+  ```
 
 ---
 

@@ -12,6 +12,7 @@ import type { StorageInterface, EventQueryOptions } from '../storage/storage-int
 import { getStorage } from '../storage/index.js';
 import { generateUuidV7, isValidUuid } from '../utils/uuid.js';
 import { computePayloadHash } from '../utils/idempotency.js';
+import { type DetectionPipeline, getDetectionPipeline } from '../detection/pipeline.js';
 
 export interface SingleIngestionResult {
   status: 'ACCEPTED' | 'DUPLICATE_SUPPRESSED';
@@ -21,9 +22,11 @@ export interface SingleIngestionResult {
 
 export class EventService {
   private storage: StorageInterface;
+  private detectionPipeline: DetectionPipeline;
 
-  constructor(storage?: StorageInterface) {
+  constructor(storage?: StorageInterface, detectionPipeline?: DetectionPipeline) {
     this.storage = storage || getStorage();
+    this.detectionPipeline = detectionPipeline || getDetectionPipeline();
   }
 
   /**
@@ -71,6 +74,13 @@ export class EventService {
       };
     }
 
+    // Automatically dispatch to asynchronous detection pipeline without blocking HTTP write path
+    try {
+      this.detectionPipeline.dispatch(normalizedEvent);
+    } catch (pipelineErr) {
+      console.warn('[VELTRIX] Failed to dispatch event to detection pipeline:', pipelineErr);
+    }
+
     return {
       status: 'ACCEPTED',
       eventId: persistResult.eventId || normalizedEvent.eventId,
@@ -112,6 +122,7 @@ export class EventService {
     }
 
     const results: IngestionItemResult[] = [];
+    const acceptedEvents: SecurityEvent[] = [];
     let accepted = 0;
     let duplicates = 0;
     let rejected = 0;
@@ -155,6 +166,7 @@ export class EventService {
           });
         } else {
           accepted++;
+          acceptedEvents.push(normalized);
           results.push({
             eventId: normalized.eventId,
             status: 'ACCEPTED',
@@ -167,6 +179,15 @@ export class EventService {
           status: 'FAILED',
           message: err instanceof Error ? err.message : 'Database storage failure',
         });
+      }
+    }
+
+    // Automatically dispatch accepted batch events to detection pipeline
+    if (acceptedEvents.length > 0) {
+      try {
+        this.detectionPipeline.dispatchBatch(acceptedEvents);
+      } catch (pipelineErr) {
+        console.warn('[VELTRIX] Failed to dispatch batch events to detection pipeline:', pipelineErr);
       }
     }
 

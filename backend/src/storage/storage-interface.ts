@@ -4,6 +4,8 @@ import type {
   IncidentStatus,
   Severity,
   DetectionRule,
+  Detection,
+  DetectionQueryOptions,
   ThreatIndicator,
   ResponseExecution,
   AuditLog,
@@ -34,6 +36,16 @@ export interface StorageInterface {
   ): Promise<{ items: SecurityEvent[]; nextCursor?: string; total?: number }>;
   getEventById(orgId: string, eventId: string): Promise<SecurityEvent | null>;
 
+  // --- Threat Detections ---
+  saveDetection(
+    detection: Detection
+  ): Promise<{ saved: boolean; isDuplicate: boolean }>;
+  getDetections(
+    orgId: string,
+    options?: DetectionQueryOptions
+  ): Promise<{ items: Detection[]; nextCursor?: string; total?: number }>;
+  getDetectionById(orgId: string, detectionId: string): Promise<Detection | null>;
+
   // --- Incidents Management ---
   saveIncident(incident: Incident): Promise<void>;
   getIncidents(
@@ -57,6 +69,15 @@ export interface StorageInterface {
   getRules(orgId: string): Promise<DetectionRule[]>;
   getRuleById(orgId: string, ruleId: string): Promise<DetectionRule | null>;
   updateRule(
+    orgId: string,
+    ruleId: string,
+    updates: Partial<DetectionRule>
+  ): Promise<DetectionRule | null>;
+
+  saveDetectionRule(rule: DetectionRule): Promise<void>;
+  getDetectionRules(orgId: string): Promise<DetectionRule[]>;
+  getDetectionRuleById(orgId: string, ruleId: string): Promise<DetectionRule | null>;
+  updateDetectionRule(
     orgId: string,
     ruleId: string,
     updates: Partial<DetectionRule>

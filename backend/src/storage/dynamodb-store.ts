@@ -10,6 +10,8 @@ import { createHash } from 'node:crypto';
 import type {
   SecurityEvent,
   Incident,
+  Detection,
+  DetectionQueryOptions,
   IncidentStatus,
   Severity,
   DetectionRule,
@@ -447,6 +449,222 @@ export class DynamoDBStore implements StorageInterface {
     }
   }
 
+  // --- Threat Detections ---
+
+  async saveDetection(
+    detection: Detection
+  ): Promise<{ saved: boolean; isDuplicate: boolean }> {
+    const orgId = detection.orgId;
+    const pk = `ORG#${orgId}`;
+    const sk = `DETECTION#${detection.detectedAt}#${detection.detectionId}`;
+    const dedupKey = detection.dedupKey || detection.detectionId;
+    const ttlEpoch = detection.ttl || Math.floor(new Date(detection.detectedAt).getTime() / 1000) + 90 * 86400;
+
+    const item = {
+      PK: pk,
+      SK: sk,
+      GSI1_PK: `ORG#${orgId}#RULE#${detection.ruleId}`,
+      GSI1_SK: detection.detectedAt,
+      GSI2_PK: `ORG#${orgId}#SEVERITY#${detection.severity}`,
+      GSI2_SK: detection.detectedAt,
+      detectionId: detection.detectionId,
+      ruleId: detection.ruleId,
+      ruleName: detection.ruleName,
+      orgId: detection.orgId,
+      severity: detection.severity,
+      confidence: detection.confidence,
+      category: detection.category,
+      title: detection.title,
+      description: detection.description,
+      detectedAt: detection.detectedAt,
+      relatedEventIds: detection.relatedEventIds,
+      evidence: detection.evidence,
+      mitreAttack: detection.mitreAttack,
+      status: detection.status || 'ACTIVE',
+      dedupKey,
+      ttl: ttlEpoch,
+    };
+
+    const transactItems: Array<{
+      Put: {
+        TableName: string;
+        Item: Record<string, unknown>;
+        ConditionExpression: string;
+      };
+    }> = [
+      // 1. Primary detection record
+      {
+        Put: {
+          TableName: this.incidentsTable,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(PK) AND attribute_not_exists(SK)',
+        },
+      },
+      // 2. Direct O(1) detectionId pointer
+      {
+        Put: {
+          TableName: this.incidentsTable,
+          Item: {
+            ...item,
+            PK: `ORG#${orgId}#DETECTIONID#${detection.detectionId}`,
+            SK: 'METADATA',
+          },
+          ConditionExpression: 'attribute_not_exists(PK)',
+        },
+      },
+      // 3. Deduplication key record
+      {
+        Put: {
+          TableName: this.incidentsTable,
+          Item: {
+            PK: `ORG#${orgId}#DEDUP#${dedupKey}`,
+            SK: 'DETECTION',
+            detectionId: detection.detectionId,
+            orgId,
+            ttl: ttlEpoch,
+          },
+          ConditionExpression: 'attribute_not_exists(PK)',
+        },
+      },
+    ];
+
+    try {
+      await this.executeWithRetry(() =>
+        this.docClient.send(
+          new TransactWriteCommand({
+            TransactItems: transactItems,
+          })
+        )
+      );
+      return { saved: true, isDuplicate: false };
+    } catch (err: unknown) {
+      const errName = (err as { name?: string })?.name;
+      if (
+        errName === 'ConditionalCheckFailedException' ||
+        errName === 'TransactionCanceledException'
+      ) {
+        return { saved: false, isDuplicate: true };
+      }
+      throw err;
+    }
+  }
+
+  async getDetections(
+    orgId: string,
+    options?: DetectionQueryOptions
+  ): Promise<{ items: Detection[]; nextCursor?: string; total?: number }> {
+    let indexName: string | undefined;
+    let keyCondition = 'PK = :pk AND begins_with(SK, :skPrefix)';
+    const exprValues: Record<string, unknown> = {
+      ':pk': `ORG#${orgId}`,
+      ':skPrefix': 'DETECTION#',
+    };
+    const exprNames: Record<string, string> = {};
+    const filterConditions: string[] = [];
+
+    if (options?.severity) {
+      indexName = 'GSI2-SeverityIndex';
+      keyCondition = 'GSI2_PK = :gsi2pk';
+      exprValues[':gsi2pk'] = `ORG#${orgId}#SEVERITY#${options.severity}`;
+      delete exprValues[':pk'];
+      delete exprValues[':skPrefix'];
+
+      if (options.startTime && options.endTime) {
+        keyCondition += ' AND GSI2_SK BETWEEN :startTime AND :endTime';
+        exprValues[':startTime'] = options.startTime;
+        exprValues[':endTime'] = options.endTime;
+      } else if (options.startTime) {
+        keyCondition += ' AND GSI2_SK >= :startTime';
+        exprValues[':startTime'] = options.startTime;
+      } else if (options.endTime) {
+        keyCondition += ' AND GSI2_SK <= :endTime';
+        exprValues[':endTime'] = options.endTime;
+      }
+    } else {
+      if (options?.startTime && options?.endTime) {
+        keyCondition = 'PK = :pk AND SK BETWEEN :startSk AND :endSk';
+        exprValues[':startSk'] = `DETECTION#${options.startTime}`;
+        exprValues[':endSk'] = `DETECTION#${options.endTime}#\uffff`;
+        delete exprValues[':skPrefix'];
+      } else if (options?.startTime) {
+        keyCondition = 'PK = :pk AND SK >= :startSk';
+        exprValues[':startSk'] = `DETECTION#${options.startTime}`;
+        delete exprValues[':skPrefix'];
+      }
+    }
+
+    if (options?.ruleId) {
+      filterConditions.push('#rId = :rId');
+      exprNames['#rId'] = 'ruleId';
+      exprValues[':rId'] = options.ruleId;
+    }
+    if (options?.status) {
+      filterConditions.push('#st = :st');
+      exprNames['#st'] = 'status';
+      exprValues[':st'] = options.status;
+    }
+
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    if (options?.cursor) {
+      try {
+        const verified = verifyCursor(options.cursor, orgId, options as any);
+        exclusiveStartKey = verified.exclusiveStartKey;
+      } catch {
+        throw new Error('INVALID_CURSOR');
+      }
+    }
+
+    const command = new QueryCommand({
+      TableName: this.incidentsTable,
+      IndexName: indexName,
+      KeyConditionExpression: keyCondition,
+      ExpressionAttributeValues: exprValues,
+      ExpressionAttributeNames: Object.keys(exprNames).length > 0 ? exprNames : undefined,
+      FilterExpression: filterConditions.length > 0 ? filterConditions.join(' AND ') : undefined,
+      ScanIndexForward: false,
+      Limit: options?.limit || 50,
+      ExclusiveStartKey: exclusiveStartKey,
+    });
+
+    const response = await this.executeWithRetry(() => this.docClient.send(command));
+    const items = (response.Items || []) as Detection[];
+    const filterHash = computeFilterHash(options as any);
+    const nextCursor = response.LastEvaluatedKey
+      ? signCursor({
+          orgId,
+          filterHash,
+          exclusiveStartKey: response.LastEvaluatedKey as Record<string, unknown>,
+        })
+      : undefined;
+
+    return { items, nextCursor, total: items.length };
+  }
+
+  async getDetectionById(orgId: string, detectionId: string): Promise<Detection | null> {
+    try {
+      const result = await this.executeWithRetry(() =>
+        this.docClient.send(
+          new GetCommand({
+            TableName: this.incidentsTable,
+            Key: {
+              PK: `ORG#${orgId}#DETECTIONID#${detectionId}`,
+              SK: 'METADATA',
+            },
+          })
+        )
+      );
+
+      if (!result.Item) {
+        return null;
+      }
+
+      const { PK, SK, GSI1_PK, GSI1_SK, GSI2_PK, GSI2_SK, ...detection } = result.Item as Record<string, unknown>;
+      return detection as unknown as Detection;
+    } catch {
+      return null;
+    }
+  }
+
   // --- Incidents Management ---
 
   async saveIncident(incident: Incident): Promise<void> {
@@ -640,6 +858,28 @@ export class DynamoDBStore implements StorageInterface {
     await this.saveRule(updated);
     return updated;
   }
+
+  // --- Detection Rules Aliases for StorageInterface ---
+  async saveDetectionRule(rule: DetectionRule): Promise<void> {
+    return this.saveRule(rule);
+  }
+
+  async getDetectionRules(orgId: string): Promise<DetectionRule[]> {
+    return this.getRules(orgId);
+  }
+
+  async getDetectionRuleById(orgId: string, ruleId: string): Promise<DetectionRule | null> {
+    return this.getRuleById(orgId, ruleId);
+  }
+
+  async updateDetectionRule(
+    orgId: string,
+    ruleId: string,
+    updates: Partial<DetectionRule>
+  ): Promise<DetectionRule | null> {
+    return this.updateRule(orgId, ruleId, updates);
+  }
+
 
   // --- Threat Indicators ---
 

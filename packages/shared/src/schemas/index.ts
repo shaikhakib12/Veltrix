@@ -138,3 +138,90 @@ export const AuthRegisterRequestSchema = z.object({
 export const AuthRefreshRequestSchema = z.object({
   refreshToken: z.string().min(1, 'Refresh token is required'),
 });
+
+// Detection Schemas (TASK-501 to TASK-504)
+export const DetectionEvidenceSchema = z.object({
+  matchedRuleId: z.string().min(1),
+  matchedThreshold: z.number().int().positive(),
+  actualCount: z.number().int().nonnegative().optional(),
+  timeWindowSeconds: z.number().int().positive().optional(),
+  targetEntity: z
+    .object({
+      type: z.enum(['IP', 'USER', 'SYSTEM', 'RESOURCE']),
+      value: z.string().min(1),
+    })
+    .optional(),
+  triggeringEvents: z.array(z.string()).optional(),
+  details: z.record(z.unknown()).optional(),
+});
+
+export const DetectionSchema = z.object({
+  detectionId: z.string().min(1),
+  ruleId: z.string().min(1),
+  ruleName: z.string().min(1),
+  orgId: z.string().min(1),
+  severity: SeveritySchema,
+  confidence: z.number().min(0).max(100),
+  category: EventCategorySchema,
+  title: z.string().min(3),
+  description: z.string().min(5),
+  detectedAt: z.string().datetime(),
+  relatedEventIds: z.array(z.string()),
+  evidence: DetectionEvidenceSchema,
+  mitreAttack: z
+    .object({
+      techniqueId: z.string(),
+      techniqueName: z.string(),
+      tactic: z.string(),
+    })
+    .optional(),
+  status: z.enum(['ACTIVE', 'RESOLVED', 'SUPPRESSED']).default('ACTIVE'),
+  dedupKey: z.string().optional(),
+  ttl: z.number().int().positive().optional(),
+});
+
+export const DetectionQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+    cursor: z.string().optional(),
+    ruleId: z.string().optional(),
+    severity: SeveritySchema.optional(),
+    status: z.enum(['ACTIVE', 'RESOLVED', 'SUPPRESSED']).optional(),
+    startTime: z.string().datetime({ message: 'startTime must be a valid ISO 8601 UTC timestamp' }).optional(),
+    endTime: z.string().datetime({ message: 'endTime must be a valid ISO 8601 UTC timestamp' }).optional(),
+  })
+  .refine(
+    (data) => {
+      if (data.startTime && data.endTime) {
+        return new Date(data.startTime) <= new Date(data.endTime);
+      }
+      return true;
+    },
+    {
+      message: 'startTime must be before or equal to endTime',
+      path: ['startTime'],
+    }
+  );
+
+export const DetectionRunRequestSchema = z.object({
+  startTime: z.string().datetime({ message: 'startTime must be a valid ISO 8601 UTC timestamp' }).optional(),
+  endTime: z.string().datetime({ message: 'endTime must be a valid ISO 8601 UTC timestamp' }).optional(),
+  ruleIds: z.array(z.string()).optional(),
+  limit: z.coerce.number().int().min(1).max(1000).default(500),
+  persistDetections: z.boolean().default(true),
+});
+
+export const DetectionRuleUpdateSchema = z.object({
+  isEnabled: z.boolean().optional(),
+  severity: SeveritySchema.optional(),
+  threshold: z.number().int().positive().optional(),
+  slidingWindowSeconds: z.number().int().positive().max(86400).optional(),
+  condition: z.record(z.unknown()).optional(),
+});
+
+export const DetectionRuleTestRequestSchema = z.object({
+  ruleId: z.string().min(1),
+  threshold: z.number().int().positive().optional(),
+  slidingWindowSeconds: z.number().int().positive().max(86400).optional(),
+  sampleEvents: z.array(SingleEventIngestSchema).min(1).max(100),
+});

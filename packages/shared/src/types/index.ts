@@ -49,6 +49,53 @@ export interface IngestionResponseData {
   results: IngestionItemResult[];
 }
 
+
+export interface DetectionEvidence {
+  matchedRuleId: string;
+  matchedThreshold: number;
+  actualCount?: number;
+  timeWindowSeconds?: number;
+  targetEntity?: {
+    type: 'IP' | 'USER' | 'SYSTEM' | 'RESOURCE';
+    value: string;
+  };
+  triggeringEvents: string[]; // eventIds
+  details: Record<string, unknown>;
+}
+
+export interface Detection {
+  detectionId: string;
+  ruleId: string;
+  ruleName: string;
+  orgId: string;
+  severity: Severity;
+  confidence: number; // 0 - 100
+  category: EventCategory;
+  title: string;
+  description: string;
+  detectedAt: string; // ISO 8601 UTC
+  relatedEventIds: string[];
+  evidence: DetectionEvidence;
+  mitreAttack?: {
+    techniqueId: string;
+    techniqueName: string;
+    tactic: string;
+  };
+  status?: 'ACTIVE' | 'RESOLVED' | 'SUPPRESSED';
+  dedupKey?: string;
+  ttl?: number;
+}
+
+export interface DetectionQueryOptions {
+  ruleId?: string;
+  severity?: Severity;
+  status?: 'ACTIVE' | 'RESOLVED' | 'SUPPRESSED';
+  startTime?: string;
+  endTime?: string;
+  limit?: number;
+  cursor?: string;
+}
+
 export interface DetectionRule {
   ruleId: string;
   orgId: string;

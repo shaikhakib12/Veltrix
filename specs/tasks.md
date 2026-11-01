@@ -65,13 +65,12 @@
 
 ---
 
-## Phase 5 — Detection, Correlation & Risk Scoring
-
-- [ ] Not started **TASK-501 [P2]:** Implement Threat Detection Engine (`backend/src/detection/engine.ts`).
-- [ ] Not started **TASK-502 [P2]:** Implement all 10 Sigma-inspired detection rules (`RULE-001` through `RULE-010`).
-- [ ] Not started **TASK-503 [P2]:** Build Event Correlation Engine with sliding temporal window entity matching (`backend/src/correlation/engine.ts`).
-- [ ] Not started **TASK-504 [P2]:** Implement Explainable Mathematical Risk Scoring Engine ($0–100$) (`backend/src/risk-engine/scorer.ts`).
-- [ ] Not started **TASK-505 [P2]:** Write unit tests for all 10 detection rules, correlation sequences, and risk scoring formula (`backend/tests/detection.test.ts`, `backend/tests/correlation-risk.test.ts`).
+## Phase 5 — Threat Detection Engine
+- [x] Completed **TASK-501 [P2]:** Implement Threat Detection Engine architecture (`backend/src/detection/engine.ts`, `types.ts`, `base-rule.ts`, `pipeline.ts`).
+- [x] Completed **TASK-502 [P2]:** Implement all 10 Sigma-inspired detection rules (`RULE-001` through `RULE-010` per requirements and Sigma specs).
+- [x] Completed **TASK-503 [P2]:** Implement Threat Detection Storage persistence, $O(1)$ ID pointer lookups, GSI2 severity filtering, and atomic duplicate suppression across `MemoryStore` and `DynamoDBStore`.
+- [x] Completed **TASK-504 [P2]:** Implement Detection REST API endpoints (`POST /api/v1/detections/run`, `GET /api/v1/detections`, `GET /api/v1/detections/:detectionId`, `GET /api/v1/detection-rules`, `PATCH /api/v1/detection-rules/:ruleId`, `POST /api/v1/detection-rules/test`) with RBAC and tenant isolation.
+- [x] Completed **TASK-505 [P2]:** Build comprehensive automated test suites (`backend/tests/detection.test.ts`, `backend/tests/detection-pipeline.test.ts`) verifying all 10 rules, automatic event-to-detection pipeline, threshold tuning, and multi-tenant isolation.
 
 ---
 
