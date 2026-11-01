@@ -290,6 +290,11 @@ export class EventService {
         'isMalicious',
         'isTrusted',
         'trustedEnrichment',
+        'serverVerified',
+        'trustedProvenance',
+        'evidenceProvenance',
+        '_provenance',
+        'verifiedSignals',
       ];
       for (const [key, val] of Object.entries(data.metadata)) {
         if (securityOverrideKeys.includes(key)) {
@@ -298,6 +303,8 @@ export class EventService {
           sanitizedMetadata[key] = val;
         }
       }
+      sanitizedMetadata.evidenceProvenance = 'UNTRUSTED_CLIENT';
+      sanitizedMetadata.serverVerified = false;
     }
 
     return {

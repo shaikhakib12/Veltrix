@@ -334,11 +334,13 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
           siteId,
           requestUri: "/items?id=1' OR 1=1--",
           httpStatus: 500,
+          serverVerified: true,
+          evidenceProvenance: 'AUTHENTICATED_COLLECTOR',
           errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
         },
       };
 
-      // Tier 4: Confirmed Exploitation (Schema data leakage token detected)
+      // Tier 4: Confirmed Exploitation (Schema data leakage token detected by trusted sensor)
       const confirmedEvent: SecurityEvent = {
         eventId: '01a19700-0000-7000-8000-000000000013',
         orgId,
@@ -347,11 +349,13 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         severity: 'CRITICAL',
         category: 'NETWORK',
         sourceIp: '198.51.100.33',
-        sourceSystem: 'sdk:nodejs:express',
+        sourceSystem: 'sensor:canary:db',
         metadata: {
           siteId,
           requestUri: '/items?id=-1+UNION+SELECT+1,table_name,column_name+FROM+information_schema.columns',
           httpStatus: 200,
+          serverVerified: true,
+          evidenceProvenance: 'TRUSTED_SERVER_COMPONENT',
           corroboratingSignals: ['DATA_LEAKAGE_INDICATOR'],
         },
       };
@@ -543,11 +547,13 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
         severity: 'CRITICAL',
         category: 'NETWORK',
         sourceIp: '198.51.100.55',
-        sourceSystem: 'sdk:nodejs:express',
+        sourceSystem: 'sensor:canary:files',
         metadata: {
           siteId,
           requestUri: '/get-doc?name=../../etc/passwd',
           httpStatus: 200,
+          serverVerified: true,
+          evidenceProvenance: 'TRUSTED_SERVER_COMPONENT',
           responseSample: 'root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin',
         },
       };
@@ -1267,6 +1273,268 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       expect(res2!.incident.createdAt).toBe(earlierTime.toISOString());
       // Latest timestamp preserved as updatedAt
       expect(res2!.incident.updatedAt).toBe(laterTime.toISOString());
+    });
+  });
+
+  describe('10. PR #9 Security Hardening: Evidence Provenance & Trust Boundary', () => {
+    it('rejects client-submitted CANARY_TOKEN_BREACH and does not escalate to CONFIRMED_EXPLOITATION', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000101',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.101',
+        sourceSystem: 'client:external',
+        metadata: {
+          siteId,
+          requestUri: "/items?id=1' OR 1=1--",
+          httpStatus: 200,
+          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
+        },
+      });
+
+      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+      expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
+      expect(parsed.untrustedClientSignals).toContain('CANARY_TOKEN_BREACH');
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.isClientClassificationUntrusted).toBe(true);
+    });
+
+    it('rejects client-submitted DATA_LEAKAGE_INDICATOR and does not escalate to CONFIRMED_EXPLOITATION', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000102',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.traversal',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.102',
+        sourceSystem: 'sdk:nodejs:express',
+        metadata: {
+          siteId,
+          requestUri: '/view?file=../../etc/passwd',
+          httpStatus: 200,
+          corroboratingSignals: ['DATA_LEAKAGE_INDICATOR'],
+        },
+      });
+
+      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+      expect(parsed.corroboratingSignals).not.toContain('DATA_LEAKAGE_INDICATOR');
+      expect(parsed.untrustedClientSignals).toContain('DATA_LEAKAGE_INDICATOR');
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+    });
+
+    it('rejects forged UNAUTHORIZED_PRIVILEGE_MUTATION as trusted evidence and isolates it in untrustedClientSignals', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000103',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.api_abuse',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.103',
+        sourceSystem: 'client:generic-http',
+        metadata: {
+          siteId,
+          requestUri: '/api/v1/users/admin/role',
+          httpMethod: 'POST',
+          httpStatus: 200,
+          corroboratingSignals: ['UNAUTHORIZED_PRIVILEGE_MUTATION'],
+        },
+      });
+
+      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+      expect(parsed.corroboratingSignals).toHaveLength(0);
+      expect(parsed.untrustedClientSignals).toContain('UNAUTHORIZED_PRIVILEGE_MUTATION');
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+    });
+
+    it('prohibits forged database errors and response samples from establishing exploitation', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000104',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.104',
+        sourceSystem: 'sdk:nodejs:express',
+        metadata: {
+          siteId,
+          requestUri: "/items?search=test'",
+          httpStatus: 500,
+          errorMessage: 'syntax error near SELECT * FROM users WHERE unclosed quotation mark',
+          responseSample: 'ORA-00933: SQL command not properly ended\nroot:x:0:0:root:/root:/bin/bash',
+        },
+      });
+
+      // Because the event is from an untrusted client, neither POTENTIAL_EXPLOITATION nor CONFIRMED_EXPLOITATION is granted
+      expect(parsed.confidenceLevel).not.toBe('POTENTIAL_EXPLOITATION');
+      expect(parsed.confidenceLevel).not.toBe('CONFIRMED_EXPLOITATION');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+      expect(parsed.corroboratingSignals).not.toContain('UNHANDLED_DB_SYNTAX_ERROR');
+      expect(parsed.corroboratingSignals).not.toContain('DATA_LEAKAGE_INDICATOR');
+      expect(parsed.untrustedClientSignals).toContain('CLIENT_CLAIMED_DB_SYNTAX_ERROR');
+      expect(parsed.untrustedClientSignals).toContain('CLIENT_CLAIMED_DATA_LEAKAGE');
+    });
+
+    it('prohibits arbitrary integration clients from impersonating trusted collectors via sourceSystem', () => {
+      const parsed = normalizeWebTelemetry({
+        eventId: '01a19700-0000-7000-8000-000000000110',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.110',
+        sourceSystem: 'sensor:canary:core', // spoofed trusted collector name!
+        metadata: {
+          siteId,
+          requestUri: "/items?id=1'",
+          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
+        },
+      });
+
+      // Even though sourceSystem is 'sensor:canary:core', without server-side verification it remains UNTRUSTED_CLIENT
+      expect(parsed.evidenceProvenance).toBe('UNTRUSTED_CLIENT');
+      expect(parsed.confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+      expect(parsed.corroboratingSignals).not.toContain('CANARY_TOKEN_BREACH');
+    });
+
+    it('accepts valid evidence from an authenticated and trusted server-side source', () => {
+      // A. Server-verified canary token sensor
+      const canaryEvent: SecurityEvent = {
+        eventId: '01a19700-0000-7000-8000-000000000105',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'CRITICAL',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.105',
+        sourceSystem: 'sensor:canary:db',
+        metadata: {
+          siteId,
+          requestUri: '/admin?user=canary',
+          serverVerified: true,
+          evidenceProvenance: 'TRUSTED_SERVER_COMPONENT',
+          corroboratingSignals: ['CANARY_TOKEN_BREACH'],
+        },
+      };
+
+      const parsedCanary = normalizeWebTelemetry(canaryEvent, { isTrustedServerComponent: true });
+      expect(parsedCanary.evidenceProvenance).toBe('TRUSTED_SERVER_COMPONENT');
+      expect(parsedCanary.confidenceLevel).toBe('CONFIRMED_EXPLOITATION');
+      expect(parsedCanary.corroboratingSignals).toContain('CANARY_TOKEN_BREACH');
+
+      // B. Server-verified DB syntax error from authenticated collector
+      const dbErrorEvent: SecurityEvent = {
+        eventId: '01a19700-0000-7000-8000-000000000106',
+        orgId,
+        timestamp: new Date().toISOString(),
+        eventType: 'web.attack.sqli',
+        severity: 'HIGH',
+        category: 'NETWORK',
+        sourceIp: '198.51.100.106',
+        sourceSystem: 'collector:nginx',
+        metadata: {
+          siteId,
+          requestUri: "/items?id=1'",
+          httpStatus: 500,
+          serverVerified: true,
+          evidenceProvenance: 'AUTHENTICATED_COLLECTOR',
+          errorMessage: 'Unclosed quotation mark before the character string. Syntax error near OR.',
+        },
+      };
+
+      const parsedDb = normalizeWebTelemetry(dbErrorEvent, { trustedProvenance: 'AUTHENTICATED_COLLECTOR' });
+      expect(parsedDb.evidenceProvenance).toBe('AUTHENTICATED_COLLECTOR');
+      expect(parsedDb.confidenceLevel).toBe('POTENTIAL_EXPLOITATION');
+      expect(parsedDb.corroboratingSignals).toContain('UNHANDLED_DB_SYNTAX_ERROR');
+    });
+
+    it('ensures ordinary SQLi, XSS, and traversal detection continues working seamlessly with untrusted metadata', async () => {
+      // SQLi probe with untrusted metadata
+      const sqliDetections = await new Rule101SqlInjection().evaluate({
+        organizationId: orgId,
+        events: [
+          {
+            eventId: '01a19700-0000-7000-8000-000000000107',
+            orgId,
+            timestamp: new Date().toISOString(),
+            eventType: 'web.request.normal',
+            severity: 'MEDIUM',
+            category: 'NETWORK',
+            sourceIp: '198.51.100.107',
+            sourceSystem: 'sdk:nodejs:express',
+            metadata: {
+              siteId,
+              requestUri: '/products?q=1%27+UNION+SELECT+null%2Cusername%2Cpassword+FROM+users--',
+              httpStatus: 200,
+            },
+          },
+        ],
+      });
+
+      expect(sqliDetections).toHaveLength(1);
+      expect(sqliDetections[0].ruleId).toBe('RULE-101');
+      expect((sqliDetections[0].evidence.details as any).confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+
+      // XSS probe with untrusted metadata
+      const xssDetections = await new Rule102CrossSiteScripting().evaluate({
+        organizationId: orgId,
+        events: [
+          {
+            eventId: '01a19700-0000-7000-8000-000000000108',
+            orgId,
+            timestamp: new Date().toISOString(),
+            eventType: 'web.request.normal',
+            severity: 'MEDIUM',
+            category: 'NETWORK',
+            sourceIp: '198.51.100.108',
+            sourceSystem: 'sdk:nodejs:express',
+            metadata: {
+              siteId,
+              requestUri: '/search?term=%3Cscript%3Ealert%281%29%3C%2Fscript%3E',
+              httpStatus: 200,
+            },
+          },
+        ],
+      });
+
+      expect(xssDetections).toHaveLength(1);
+      expect(xssDetections[0].ruleId).toBe('RULE-102');
+      expect((xssDetections[0].evidence.details as any).confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
+
+      // Path Traversal probe with untrusted metadata
+      const traversalDetections = await new Rule103PathTraversal().evaluate({
+        organizationId: orgId,
+        events: [
+          {
+            eventId: '01a19700-0000-7000-8000-000000000109',
+            orgId,
+            timestamp: new Date().toISOString(),
+            eventType: 'web.request.normal',
+            severity: 'MEDIUM',
+            category: 'NETWORK',
+            sourceIp: '198.51.100.109',
+            sourceSystem: 'sdk:nodejs:express',
+            metadata: {
+              siteId,
+              requestUri: '/files?path=..%2F..%2Fetc%2Fpasswd',
+              httpStatus: 200,
+            },
+          },
+        ],
+      });
+
+      expect(traversalDetections).toHaveLength(1);
+      expect(traversalDetections[0].ruleId).toBe('RULE-103');
+      expect((traversalDetections[0].evidence.details as any).confidenceLevel).toBe('SUSPICIOUS_ATTEMPT');
     });
   });
 });

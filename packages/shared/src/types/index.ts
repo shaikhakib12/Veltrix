@@ -31,6 +31,11 @@ export type WebConfidenceTier = (typeof WEB_CONFIDENCE_TIERS)[number];
 export type WebAttackType = (typeof WEB_ATTACK_TYPES)[number];
 export type RiskBand = (typeof RISK_BANDS)[number];
 
+export type EvidenceProvenance =
+  | 'TRUSTED_SERVER_COMPONENT'
+  | 'AUTHENTICATED_COLLECTOR'
+  | 'UNTRUSTED_CLIENT';
+
 export interface WebSecurityEventMetadata {
   siteId?: string;
   domain?: string;
@@ -46,6 +51,12 @@ export interface WebSecurityEventMetadata {
   ja3Fingerprint?: string;
   confidenceLevel?: WebConfidenceTier;
   corroboratingSignals?: string[];
+  untrustedClientSignals?: string[];
+  serverVerified?: boolean;
+  evidenceProvenance?: EvidenceProvenance;
+  verifiedSignals?: string[];
+  responseSample?: string;
+  errorMessage?: string;
   [key: string]: unknown;
 }
 

@@ -29,16 +29,16 @@ Key accomplishments delivered across TASK-701 through TASK-707:
    With transparent factor explanations, `NaN` poisoning prevention, and risk band mapping (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`).
 5. **Configurable Risk Contribution Model & Vulnerability Prioritization (TASK-705):** Cross-references active attack targets against open asset vulnerability findings (`EXACT`, `PATH`, `ASSET`, `NONE` match levels), applying confidence-scaled additive scoring ($C_{\text{vuln\_match}} = w_{\text{overlap}} \times \frac{\text{CVSS}}{10} \times K_{\text{confidence}}$) when attacks strike unmitigated vulnerabilities.
 6. **Incident Persistence & Storage Harness (TASK-706):** Production DynamoDB `Veltrix-Incidents` GSI support, direct $O(1)$ incident ID pointer items, `MemoryStore` parity, `siteId` filtering on incidents and detections, and REST endpoints under `/api/v1/incidents`, `/api/v1/detections/web`, `/api/v1/detections/:detectionId/evidence`, and `/api/v1/websites/:siteId/*`.
-7. **Automated Test Suite & Verification (TASK-707):** 34 comprehensive tests in `backend/tests/web-detection-correlation.test.ts` bringing total workspace test count to **238 / 238 tests passing** (100% pass rate).
+7. **Automated Test Suite & Verification (TASK-707):** 41 comprehensive tests in `backend/tests/web-detection-correlation.test.ts` bringing total workspace test count to **245 / 245 tests passing** (100% pass rate).
 
 ### Verification Key Metrics
-- **Automated Tests:** **238 / 238 passed** (0 failures across all 9 test suites).
-  - 230 tests in `@veltrix/backend` (including 34 dedicated web detection, correlation, and audit regression tests).
+- **Automated Tests:** **245 / 245 passed** (0 failures across all 9 test suites).
+  - 237 tests in `@veltrix/backend` (including 41 dedicated web detection, correlation, and audit regression tests).
   - 8 tests in `@veltrix/sdk-node`.
 - **TypeScript Typecheck:** **0 errors** across all 5 monorepo workspaces (`@veltrix/shared`, `@veltrix/backend`, `@veltrix/sdk-node`, `@veltrix/frontend`, `@veltrix/cli`).
 - **Production Monorepo Build:** Clean production compilation across all workspaces (Vite production bundle generated cleanly).
 - **Linting:** 0 warnings / 0 errors.
-- **Security Audit:** All 8 audit findings (SEC-P7-001 through SEC-P7-008) verified and remediated.
+- **Security Audit:** All 9 audit findings (SEC-P7-001 through SEC-P7-009) verified and remediated.
 
 ---
 
@@ -158,7 +158,7 @@ Implemented in `frontend/src/components/WebsiteAttackMonitoring.tsx` and integra
 
 ## 9. Automated Test Suite Verification (TASK-707)
 
-Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` executes 34 tests covering:
+Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` executes 41 tests covering:
 1. Positive and negative payload verification for `RULE-101` (SQLi).
 2. Positive and negative payload verification for `RULE-102` (XSS).
 3. Positive and negative payload verification for `RULE-103` (Path Traversal).
@@ -169,6 +169,7 @@ Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` execut
 8. Vulnerability-aware attack surface correlation ($C_{\text{vuln\_match}}$).
 9. REST APIs, keyset pagination, tenant isolation (Tenant B cannot access Tenant A data: 404 `WEBSITE_NOT_FOUND`), and API key scoping (`FORBIDDEN_API_KEY_SCOPE_PROHIBITED`).
 10. Security audit regressions: credential redaction in query parameters/raw URIs, NaN poisoning defense, generic IP collision defense, correlation idempotency, sliding window bucket boundary correlation, and out-of-order timestamp preservation.
+11. Evidence provenance & trust boundary: rejection of client-submitted `CANARY_TOKEN_BREACH`, `DATA_LEAKAGE_INDICATOR`, `UNAUTHORIZED_PRIVILEGE_MUTATION`, isolation of forged DB errors, anti-impersonation via `sourceSystem`, and server-verified evidence processing.
 
 ### Full Monorepo Test Results:
 ```
@@ -176,8 +177,8 @@ Dedicated test suite in `backend/tests/web-detection-correlation.test.ts` execut
 > npm run test --workspaces --if-present
 
 @veltrix/sdk-node: 8 passed (8 tests)
-@veltrix/backend: 230 passed (230 tests)
-Total: 238 / 238 passed (100% pass rate)
+@veltrix/backend: 237 passed (237 tests)
+Total: 245 / 245 passed (100% pass rate)
 ```
 
 ---
