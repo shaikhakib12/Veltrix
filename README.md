@@ -1,7 +1,7 @@
 # VELTRIX
 
 > **Beyond Detection. Into Defense.**  
-> Autonomous Cyber Threat Detection and Controlled Response Platform
+> Unified Website Security Monitoring & Authorized Vulnerability Assessment Platform
 
 [![CI Pipeline](https://github.com/shaikhakib12/Veltrix/actions/workflows/ci.yml/badge.svg)](https://github.com/shaikhakib12/Veltrix/actions/workflows/ci.yml)
 [![License: UNLICENSED](https://img.shields.io/badge/License-Proprietary-blue.svg)](LICENSE)
@@ -11,7 +11,7 @@
 
 ## 1. System Overview
 
-**VELTRIX** is an event-driven Security Information and Event Management (SIEM) and Security Orchestration, Automation, and Response (SOAR) platform designed for autonomous cyber threat detection and controlled containment.
+**VELTRIX** is a unified website security platform combining **Continuous Website Attack Monitoring** with **Authorized Website Vulnerability Assessment**. It ingests real-time web telemetry from application SDKs, reverse proxies, and cloud firewalls, detects attack patterns (SQLi, XSS, Path Traversal, Brute Force, Bots, API abuse), performs non-destructive policy-governed vulnerability scans (TLS, headers, cookies, CORS, OWASP ZAP), and correlates attacks with known asset vulnerabilities to compute explainable risk scores.
 
 Modern Security Operations Centers (SOC) face crippling alert fatigue, uncoordinated alerts from disparate systems, and delayed manual containment actions. VELTRIX resolves these challenges by:
 1. **High-Precision Telemetry Ingestion:** Ingests and normalizes multi-source events with UUIDv7 atomic idempotency checking to prevent dropping rapid brute-force attacks.
@@ -107,15 +107,18 @@ For branching policies, PR rules, and coding standards, consult [`docs/team-coll
 
 ---
 
-## 5. Specification Roadmap
+## 5. Platform Development Roadmap
 
-- [x] **Phase 0:** Workspace & Toolchain Inspection
-- [x] **Phase 1:** Specification & Architecture Formulation
-- [x] **Phase 2:** Project Foundation & Monorepo Setup *(Current)*
-- [ ] **Phase 3:** Authentication & Database Integration
-- [ ] **Phase 4:** Event Ingestion API
-- [ ] **Phase 5:** Detection, Correlation & Risk Scoring Engine
-- [ ] **Phase 6:** Defensive Response, Audit Trail & Attack Simulation
-- [ ] **Phase 7:** Frontend SOC Dashboard & Terminal CLI
-- [ ] **Phase 8:** Comprehensive Testing & Verification
-- [ ] **Phase 9:** Competition Packaging & Final Delivery
+- [x] **Phase 1: Specifications & Architecture** — Monorepo design, RFC schemas & formal specifications.
+- [x] **Phase 2: Project Foundation & Monorepo Setup** — Workspaces initialized with shared domain contracts.
+- [x] **Phase 3: Authentication & Database** — Cognito RBAC, multi-tenant isolation & DynamoDB time-sharded partitioning.
+- [x] **Phase 4: Event Ingestion API** — UUIDv7 atomic idempotency, high-precision event deduplication & HMAC-signed cursor queries.
+- [x] **Phase 5: Threat Detection Engine** — 10 Sigma detection rules, automatic event-to-detection pipeline & fixed-window deduplication.
+- [ ] **Phase 6: Website Assets & Integrations** *(In Review - PR #4)* — Tenant website asset registry, DNS/HTTP domain verification & telemetry adapters (Node.js SDK, Express, Nginx, Apache, Cloudflare).
+- [ ] **Phase 7: Website Attack Monitoring & Correlation** — Web attack rules (SQLi, XSS, Path Traversal, Bots), 4-tier confidence classification, and configurable vulnerability-aware correlation.
+- [ ] **Phase 8: Website Vulnerability Assessment** — Safe passive assessment, isolated containerized worker daemon (OWASP ZAP), comprehensive SSRF egress protection & findings registry.
+- [ ] **Phase 9: Threat Intelligence & Incident Management** — Embedded IOC database, IP reputation dossier, incident lifecycle state machine & investigative threads.
+- [ ] **Phase 10: Controlled Response & Audit Trail** — Defensive SOAR containment, zero-bypass approval gates, rollback registry & SHA-256 cryptographic audit ledger.
+- [ ] **Phase 11: Functional SOC Dashboard** — Upgrading React/Tailwind frontend into a unified SOC console connected to real backend APIs.
+- [ ] **Phase 12: CLI, SDK Packaging & Distribution** — `@veltrix/cli` terminal operator client and `@veltrix/sdk-node` package distribution.
+- [ ] **Phase 13: End-to-End Integration, Security Audit & Deployment** — Attack-to-defense simulation lab, adversarial penetration tests, AWS SAM template validation & competition presentation kit.

@@ -1,7 +1,7 @@
 # VELTRIX: REST API Contracts & Endpoint Specifications (`specs/api-contracts.md`)
 
-**Document Version:** 2.1.0 (Post-Audit Hardened)  
-**Status:** In Review (Phase 1 Specification)  
+**Document Version:** 3.0.0 (Unified Website Security Platform Expansion)  
+**Status:** PROPOSED / IN REVIEW (PR #4 Architecture Review)  
 **Base URL:** `/api/v1`  
 **Protocol:** HTTPS / TLS 1.3  
 
@@ -453,3 +453,232 @@ All requests made by the Web console, CLI, and telemetry clients must include:
   - **Response 200 OK:** `{ "scenarioId": "...", "status": "COMPLETED", "injectedEventsCount": 8, "riskScore": 94, "correlatedIncidentId": "...", "durationMs": 42 }`
 - **`POST /simulation/reset`**
   - **Response 200 OK:** `{ "success": true, "message": "Platform state reset" }`
+
+---
+
+### 2.9 Website Asset Inventory & Domain Verification (Module M)
+
+#### 2.9.1 Register Website Asset (`POST /websites`)
+- **Authentication:** Bearer JWT required.
+- **RBAC:** `SUPER_ADMIN`, `ORG_ADMIN`.
+- **Request Body:**
+  ```json
+  {
+    "name": "Corporate Production Portal",
+    "primaryDomain": "app.example.com",
+    "approvedSubdomains": ["api.example.com", "auth.example.com"],
+    "environment": "PRODUCTION",
+    "riskTier": "CRITICAL",
+    "tags": ["ecommerce", "pci-dss"]
+  }
+  ```
+- **Response 201 Created:**
+  ```json
+  {
+    "success": true,
+    "site": {
+      "siteId": "site-018d5f30-74e1-7cb2-b43a-e9fa651f8b1c",
+      "orgId": "org-enterprise-01",
+      "name": "Corporate Production Portal",
+      "primaryDomain": "app.example.com",
+      "approvedSubdomains": ["api.example.com", "auth.example.com"],
+      "environment": "PRODUCTION",
+      "status": "PENDING_VERIFICATION",
+      "riskTier": "CRITICAL",
+      "verificationToken": "vltx_tok_8f9a2b1c4e",
+      "dnsTxtRecord": {
+        "host": "_veltrix-challenge.app.example.com",
+        "value": "veltrix-verify=org-enterprise-01.vltx_tok_8f9a2b1c4e"
+      },
+      "httpChallenge": {
+        "url": "https://app.example.com/.well-known/veltrix-challenge/vltx_tok_8f9a2b1c4e",
+        "expectedBody": {
+          "veltrixChallengeToken": "vltx_tok_8f9a2b1c4e",
+          "orgId": "org-enterprise-01"
+        }
+      },
+      "createdAt": "2026-11-01T12:00:00.000Z"
+    }
+  }
+  ```
+
+#### 2.9.2 List Websites (`GET /websites`)
+- **Response 200 OK:**
+  ```json
+  {
+    "success": true,
+    "total": 3,
+    "sites": [
+      {
+        "siteId": "site-018d5f30-74e1-7cb2-b43a-e9fa651f8b1c",
+        "primaryDomain": "app.example.com",
+        "status": "VERIFIED",
+        "health": {
+          "telemetryStatus": "HEALTHY",
+          "lastEventReceivedAt": "2026-11-01T12:04:12.000Z",
+          "eventsPerMinute": 42
+        },
+        "verifiedAt": "2026-11-01T10:00:00.000Z",
+        "expiresAt": "2027-01-30T10:00:00.000Z"
+      }
+    ]
+  }
+  ```
+
+#### 2.9.3 Verify Domain Ownership (`POST /websites/:siteId/verify`)
+- **Request Body:**
+  ```json
+  {
+    "method": "DNS_TXT"
+  }
+  ```
+  *(or `{ "method": "HTTP_CHALLENGE" }`)*
+- **Response 200 OK:**
+  ```json
+  {
+    "success": true,
+    "verified": true,
+    "status": "VERIFIED",
+    "verifiedAt": "2026-11-01T12:05:00.000Z",
+    "expiresAt": "2027-01-30T12:05:00.000Z"
+  }
+  ```
+- **Response 400 Bad Request (Challenge Failed):**
+  ```json
+  {
+    "success": false,
+    "error": {
+      "code": "CHALLENGE_VERIFICATION_FAILED",
+      "message": "DNS TXT record '_veltrix-challenge.app.example.com' was not found or did not match the expected token."
+    }
+  }
+  ```
+
+---
+
+### 2.10 Vulnerability Scanning & Findings Management (Module O)
+
+#### 2.10.1 Launch or Schedule Scan (`POST /scans`)
+- **Authentication:** Bearer JWT required (`ORG_ADMIN` or `SUPER_ADMIN`).
+- **Safety Invariants:**
+  - Target asset MUST possess `status === 'VERIFIED'` and `expiresAt > Date.now()`.
+  - If asset is in `GRACE_PERIOD` (7-day renewal notification window), scan launch is strictly blocked with HTTP `403 Forbidden` (`code: 'DOMAIN_VERIFICATION_SUSPENDED'`).
+  - Target URL FQDN must strictly match verified `primaryDomain` or approved subdomains.
+  - Connection-time IP validation strictly enforces prohibition of RFC 1918, loopback, link-local (169.254.169.254), IPv6 loopback (::1), unique-local, link-local, IPv4-mapped IPv6, and unspecified addresses.
+- **Request Body:**
+  ```json
+  {
+    "siteId": "site-018d5f30-74e1-7cb2-b43a-e9fa651f8b1c",
+    "scanType": "SAFE_PASSIVE",
+    "scope": {
+      "targetUrl": "https://app.example.com",
+      "includeSubdomains": true,
+      "maxDepth": 3,
+      "excludedPaths": ["/admin/logout", "/checkout/pay"]
+    },
+    "rateLimitRps": 5
+  }
+  ```
+- **Response 202 Accepted:**
+  ```json
+  {
+    "success": true,
+    "scan": {
+      "scanId": "scan-018d5f31-74e1-7cb2-b43a-e9fa651f8b1d",
+      "orgId": "org-enterprise-01",
+      "siteId": "site-018d5f30-74e1-7cb2-b43a-e9fa651f8b1c",
+      "status": "QUEUED",
+      "scanType": "SAFE_PASSIVE",
+      "targetUrl": "https://app.example.com",
+      "queuedAt": "2026-11-01T12:10:00.000Z"
+    }
+  }
+  ```
+
+#### 2.10.2 Abort Running Scan (`POST /scans/:scanId/abort`)
+- **Target SLO:** The platform targets a **500ms Service Level Objective (SLO)** from operator click to worker socket termination.
+- **Workflow:** Updates scan state to `ABORT_REQUESTED`, signals worker container, drains active HTTP pools, sends `SIGTERM` (5s timeout) followed by `SIGKILL`.
+- **Response 200 OK (Abort Acknowledged):**
+  ```json
+  {
+    "success": true,
+    "status": "ABORTED",
+    "scanId": "scan-018d5f31-74e1-7cb2-b43a-e9fa651f8b1d",
+    "abortedAt": "2026-11-01T12:12:00.512Z",
+    "abortedBy": "user-analyst-01",
+    "completedRequests": 42,
+    "message": "Scan worker acknowledged emergency stop signal and closed active connections."
+  }
+  ```
+- **Response 504 Gateway Timeout (Worker Unresponsive):**
+  If the worker fails to acknowledge cancellation within 10 seconds, the scan transitions to `ABORT_FAILED_TIMED_OUT`, the ECS container task is terminated via AWS API, and an urgent SOC alert is raised.
+  ```json
+  {
+    "success": false,
+    "status": "ABORT_FAILED_TIMED_OUT",
+    "error": {
+      "code": "SCAN_WORKER_UNRESPONSIVE",
+      "message": "Scanner worker did not acknowledge abort signal within 10s. Container task force-terminated."
+    }
+  }
+  ```
+
+#### 2.10.3 List Vulnerability Findings (`GET /findings`)
+- **Query Parameters:** `siteId`, `severity`, `status`, `category`, `limit`, `cursor`.
+- **Response 200 OK:**
+  ```json
+  {
+    "success": true,
+    "total": 4,
+    "findings": [
+      {
+        "findingId": "find-018d5f32-74e1-7cb2-b43a-e9fa651f8b1e",
+        "siteId": "site-018d5f30-74e1-7cb2-b43a-e9fa651f8b1c",
+        "title": "Missing Strict-Transport-Security (HSTS) Header",
+        "category": "HEADERS",
+        "severity": "MEDIUM",
+        "cvssScore": 5.3,
+        "status": "OPEN",
+        "affectedUrl": "https://app.example.com/",
+        "evidence": {
+          "matchedPattern": "Strict-Transport-Security header not present in HTTP response"
+        },
+        "remediation": {
+          "guidance": "Configure the web server or CDN to return Strict-Transport-Security: max-age=31536000; includeSubDomains.",
+          "cweId": "CWE-319",
+          "owaspCategory": "A05:2021-Security Misconfiguration"
+        },
+        "firstDetectedAt": "2026-11-01T12:15:00.000Z"
+      }
+    ]
+  }
+  ```
+
+#### 2.10.4 Update Finding Status (`PATCH /findings/:findingId`)
+- **Request Body:**
+  ```json
+  {
+    "status": "CONFIRMED",
+    "assignedTo": "user-analyst-01",
+    "notes": "Verified by security lead; Jira ticket SEC-104 created."
+  }
+  ```
+- **Response 200 OK:**
+  ```json
+  {
+    "success": true,
+    "finding": {
+      "findingId": "find-018d5f32-74e1-7cb2-b43a-e9fa651f8b1e",
+      "status": "CONFIRMED",
+      "assignedTo": "user-analyst-01"
+    }
+  }
+  ```
+
+---
+
+### 2.11 Security & Compliance Reports
+
+#### 2.11.1 Generate Asset Security Report (`GET /reports/website/:siteId`)
+- **Query Parameters:** `format` (`json` | `markdown`), `timeRange` (e.g. `30d`).
+- **Response 200 OK:** Structured executive report containing attack monitoring totals, blocked injection probes, confirmed vulnerabilities by severity, and asset risk score trajectory.
