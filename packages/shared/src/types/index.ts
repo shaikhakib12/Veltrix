@@ -56,6 +56,7 @@ export interface VerifiedResponseEvidence {
  */
 export interface InternalTrustedEvidenceContext {
   version: 'VELTRIX_EVIDENCE_V2';
+  nonce: string;
   verifiedProvenance: 'TRUSTED_SERVER_COMPONENT' | 'AUTHENTICATED_COLLECTOR';
   verifierIdentity: string;
   verificationTimestamp: string;

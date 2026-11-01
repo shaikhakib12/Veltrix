@@ -250,14 +250,14 @@ export function normalizeWebTelemetry(
   };
 
   if (context?.trustedContext) {
-    if (auth.verifyContext(context.trustedContext, expectedBinding)) {
+    if (auth.verifyAndConsumeContext(context.trustedContext, expectedBinding)) {
       evidenceProvenance = context.trustedContext.verifiedProvenance;
       activeTrustedContext = context.trustedContext;
     } else {
       console.warn('[VELTRIX-SECURITY] Rejected forged, invalid, or replayed trustedContext in WebTelemetryContext');
     }
   } else if (event.trustedEvidenceContext) {
-    if (auth.verifyContext(event.trustedEvidenceContext, expectedBinding)) {
+    if (auth.verifyAndConsumeContext(event.trustedEvidenceContext, expectedBinding)) {
       evidenceProvenance = event.trustedEvidenceContext.verifiedProvenance;
       activeTrustedContext = event.trustedEvidenceContext;
     } else {
