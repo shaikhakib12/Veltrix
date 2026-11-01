@@ -252,12 +252,12 @@ All **9 security audit findings** identified during review have been fully remed
 
 ```
 Test Files  8 passed (8 across monorepo)
-     Tests  286 passed (286) - @veltrix/backend
+     Tests  295 passed (295) - @veltrix/backend
      Tests  8 passed (8)     - @veltrix/sdk-node
-  Total:    294 / 294 passed (100% pass rate)
+  Total:    303 / 303 passed (100% pass rate)
 ```
 
-- All 90 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including Section 9 regression tests, Section 10 trust-boundary tests, Section 11 distributed replay / secrets management tests, Section 12 idempotent retry tests, Section 13 asynchronous secret loading tests, Section 14 production replay registry tests, and Section 15 DynamoDB stream reconstruction tests).
+- All 99 tests in `backend/tests/web-detection-correlation.test.ts` pass cleanly (including Section 9 regression tests, Section 10 trust-boundary tests, Section 11 distributed replay / secrets management tests, Section 12 idempotent retry tests, Section 13 asynchronous secret loading tests, Section 14 production replay registry tests, and Section 15 DynamoDB stream reconstruction tests).
 - Full tenant boundary isolation and API key prohibition regression tests pass.
 - False positive suppression verified across all 5 web attack rules.
 
@@ -296,6 +296,17 @@ Test Files  8 passed (8 across monorepo)
   - Production `initializeDefaultInternalEvidenceAuthority` always instantiates the genuine `SecretLoader` internally and constructs its own genuine `DynamoDBReplayRegistry`.
   - Test-only dependency injection is isolated to `_initializeDefaultInternalEvidenceAuthorityForTesting`, which strictly blocks execution under `NODE_ENV === 'production'`.
   - In production mode, any replay registry that is not an instance of `DynamoDBReplayRegistry` (including arbitrary custom in-memory registries) is strictly rejected with `FATAL_REGISTRY_CONFIG_ERROR`.
+
+---
+
+### 5.6 Finding 6 — Strict Test-Utility Isolation & Production Security Guards
+- **Issue:** Testing functions `_resetInternalEvidenceAuthorityForTesting()` and `clearReplayRegistryForTesting()` were exported without production guards, allowing caller code to mutate the default authority singleton or clear replay registry state in production.
+- **Remediation:**
+  - Added strict production environment checks (`process.env.NODE_ENV === 'production'`) at the entrypoint of `_resetInternalEvidenceAuthorityForTesting()`, `clearReplayRegistryForTesting()`, and `InternalEvidenceAuthority.prototype.clearReplayRegistryForTesting()`, throwing `FATAL_SECURITY_ERROR` before any state mutation can occur.
+  - Verified that rejected calls leave the singleton authority and replay records completely unmutated.
+  - Moved testing utility abstractions into a dedicated test-support module (`backend/src/detection/test-support.ts`) isolated from the production runtime API.
+  - Ensured no production runtime modules import or expose test-only utilities.
+  - Strengthened `SecretLoader` testing utilities (`resetDefaultSecretLoaderForTesting` and `clearCacheForTesting`) with matching `FATAL_SECURITY_ERROR` production guards.
 
 ---
 

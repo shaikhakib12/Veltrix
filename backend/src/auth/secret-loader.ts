@@ -225,6 +225,11 @@ export class SecretLoader {
   }
 
   clearCacheForTesting(): void {
+    if (this.isProduction || process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'FATAL_SECURITY_ERROR: clearCacheForTesting is strictly prohibited in production mode.'
+      );
+    }
     this.cachedSecrets = null;
     this.cacheExpiry = 0;
   }
@@ -240,5 +245,10 @@ export function getDefaultSecretLoader(): SecretLoader {
 }
 
 export function resetDefaultSecretLoaderForTesting(): void {
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'FATAL_SECURITY_ERROR: resetDefaultSecretLoaderForTesting is strictly prohibited in production mode.'
+    );
+  }
   defaultSecretLoader = null;
 }

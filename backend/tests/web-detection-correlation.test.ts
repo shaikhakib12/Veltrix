@@ -29,6 +29,13 @@ import {
   MemoryReplayRegistry,
   EvidenceReplayRegistry,
 } from '../src/detection/evidence-authority.js';
+import {
+  clearReplayRegistryForTesting,
+  resetAuthorityForTesting,
+  clearReplayForTesting,
+  initializeAuthorityForTesting,
+} from '../src/detection/test-support.js';
+import { resetDefaultSecretLoaderForTesting } from '../src/auth/secret-loader.js';
 import { marshall } from '@aws-sdk/util-dynamodb';
 import { SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 import { handleSecurityEventStream, type DynamoDBStreamEvent } from '../src/detection/stream-handler.js';
@@ -3714,6 +3721,251 @@ describe('Phase 7: Website Attack Monitoring, Correlation & Risk Scoring (TASK-7
       const returnedEvent = listRes.body.data.events.find((e: any) => e.eventId === eventId);
       expect(returnedEvent).toBeDefined();
       expect(returnedEvent.trustedEvidenceContext).toBeUndefined();
+    });
+  });
+
+  // 16. Test-Utility Isolation & Production Security Guards (PR #12 Audit Finding)
+  describe('16. Test-Utility Isolation & Production Security Guards (PR #12 Audit Finding)', () => {
+    const originalEnv = process.env;
+    const orgId = 'org-sec-guard-test';
+    const siteId = 'site-sec-guard-01';
+
+    beforeEach(() => {
+      process.env = { ...originalEnv };
+      process.env.NODE_ENV = 'test';
+      delete process.env.VELTRIX_EVIDENCE_SIGNING_KEY;
+      _resetInternalEvidenceAuthorityForTesting(undefined);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      process.env = { ...originalEnv };
+      process.env.NODE_ENV = 'test';
+      _resetInternalEvidenceAuthorityForTesting(undefined);
+    });
+
+    // Test 1: Resetting the authority in production is rejected
+    it('1. resetting the authority in production via _resetInternalEvidenceAuthorityForTesting is strictly rejected', () => {
+      process.env.NODE_ENV = 'production';
+      expect(() => {
+        _resetInternalEvidenceAuthorityForTesting(undefined);
+      }).toThrow(/FATAL_SECURITY_ERROR.*_resetInternalEvidenceAuthorityForTesting is strictly prohibited in production mode/);
+
+      expect(() => {
+        resetAuthorityForTesting(undefined);
+      }).toThrow(/FATAL_SECURITY_ERROR.*_resetInternalEvidenceAuthorityForTesting is strictly prohibited in production mode/);
+    });
+
+    // Test 2: Attempting to replace the authority with a fake authority in production is rejected
+    it('2. attempting to inject or replace the authority singleton in production is strictly rejected', () => {
+      process.env.NODE_ENV = 'production';
+      const fakeAuthority = { fake: true } as any;
+
+      expect(() => {
+        _resetInternalEvidenceAuthorityForTesting(fakeAuthority);
+      }).toThrow(/FATAL_SECURITY_ERROR.*_resetInternalEvidenceAuthorityForTesting is strictly prohibited in production mode/);
+
+      expect(() => {
+        resetAuthorityForTesting(fakeAuthority);
+      }).toThrow(/FATAL_SECURITY_ERROR.*_resetInternalEvidenceAuthorityForTesting is strictly prohibited in production mode/);
+    });
+
+    // Test 3: Clearing replay registry state in production is rejected
+    it('3. clearing replay registry state in production via clearReplayRegistryForTesting is strictly rejected', () => {
+      process.env.NODE_ENV = 'production';
+      expect(() => {
+        clearReplayRegistryForTesting();
+      }).toThrow(/FATAL_SECURITY_ERROR.*clearReplayRegistryForTesting is strictly prohibited in production mode/);
+
+      expect(() => {
+        clearReplayForTesting();
+      }).toThrow(/FATAL_SECURITY_ERROR.*clearReplayRegistryForTesting is strictly prohibited in production mode/);
+    });
+
+    // Test 4: Clearing replay registry state via authority instance in production is rejected
+    it('4. clearing replay registry state via authority instance method in production is strictly rejected', () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      const prodAuthority = new InternalEvidenceAuthority({
+        signingKey: TEST_SIGNING_KEY,
+        strictEnforcement: true,
+      });
+
+      expect(() => {
+        prodAuthority.clearReplayRegistryForTesting();
+      }).toThrow(/FATAL_SECURITY_ERROR.*clearReplayRegistryForTesting is strictly prohibited in production mode/);
+    });
+
+    // Test 5: Rejected calls do not mutate the current authority
+    it('5. rejected calls to reset utilities do not mutate the current authority singleton', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockImplementation(async (cmd: any) => {
+        if ((cmd.input?.SecretId || '').includes('signing-key')) {
+          return { SecretString: JSON.stringify({ signingKey: TEST_SIGNING_KEY }) };
+        }
+        return { SecretString: JSON.stringify({ canaryService: TEST_SERVICE_CREDENTIALS['canary-service:v1'] }) };
+      });
+
+      const genuineAuthority = await initializeDefaultInternalEvidenceAuthority();
+      expect(getDefaultInternalEvidenceAuthority()).toBe(genuineAuthority);
+
+      // Attempt to reset to undefined in production -> fails closed
+      expect(() => {
+        _resetInternalEvidenceAuthorityForTesting(undefined);
+      }).toThrow(/FATAL_SECURITY_ERROR/);
+
+      // Singleton is NOT mutated to undefined
+      expect(getDefaultInternalEvidenceAuthority()).toBe(genuineAuthority);
+
+      // Attempt to overwrite with fake authority -> fails closed
+      const fakeAuthority = { fake: true } as any;
+      expect(() => {
+        resetAuthorityForTesting(fakeAuthority);
+      }).toThrow(/FATAL_SECURITY_ERROR/);
+
+      // Singleton is NOT overwritten
+      expect(getDefaultInternalEvidenceAuthority()).toBe(genuineAuthority);
+    });
+
+    // Test 6: Rejected calls do not delete or modify replay records
+    it('6. rejected calls to clearReplayRegistryForTesting do not delete or modify replay records', async () => {
+      process.env.NODE_ENV = 'test';
+      const authority = new InternalEvidenceAuthority({
+        signingKey: TEST_SIGNING_KEY,
+        serviceCredentials: TEST_SERVICE_CREDENTIALS,
+        strictEnforcement: false,
+      });
+      _resetInternalEvidenceAuthorityForTesting(authority);
+
+      const eventId = '01a19900-0000-7000-8000-000000000801';
+      const ctx = authority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+      });
+
+      // Consume nonce legitimately
+      const firstConsume = authority.verifyAndConsumeContext(ctx, { eventId, orgId, siteId });
+      expect(firstConsume).toBe(true);
+      expect(authority.getReplayRegistry().hasNonceSync!(ctx.nonce)).toBe(true);
+
+      // Verify that replay with different event is rejected
+      const replayAttempt1 = authority.verifyAndConsumeContext(ctx, { eventId: '01a19900-0000-7000-8000-000000000801-diff', orgId, siteId });
+      expect(replayAttempt1).toBe(false);
+
+      // Now simulate production mode and attempt to clear replay state
+      process.env.NODE_ENV = 'production';
+      expect(() => {
+        clearReplayRegistryForTesting();
+      }).toThrow(/FATAL_SECURITY_ERROR/);
+
+      expect(() => {
+        clearReplayForTesting();
+      }).toThrow(/FATAL_SECURITY_ERROR/);
+
+      expect(() => {
+        authority.clearReplayRegistryForTesting();
+      }).toThrow(/FATAL_SECURITY_ERROR/);
+
+      // Switch back to test mode to inspect registry state
+      process.env.NODE_ENV = 'test';
+      // Replay record was NOT deleted: nonce is still present and replaying is rejected
+      expect(authority.getReplayRegistry().hasNonceSync!(ctx.nonce)).toBe(true);
+      const replayAttempt2 = authority.verifyAndConsumeContext(ctx, { eventId: '01a19900-0000-7000-8000-000000000801-diff', orgId, siteId });
+      expect(replayAttempt2).toBe(false);
+    });
+
+    // Test 7: Both utilities still work in isolated test environments
+    it('7. both utilities still work as expected in isolated test environments', () => {
+      process.env.NODE_ENV = 'test';
+
+      const authority = new InternalEvidenceAuthority({
+        signingKey: TEST_SIGNING_KEY,
+        serviceCredentials: TEST_SERVICE_CREDENTIALS,
+      });
+
+      // Reset works in test mode
+      resetAuthorityForTesting(authority);
+      expect(getDefaultInternalEvidenceAuthority()).toBe(authority);
+
+      const eventId = '01a19900-0000-7000-8000-000000000802';
+      const ctx = authority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+      });
+
+      expect(authority.verifyAndConsumeContext(ctx, { eventId, orgId, siteId })).toBe(true);
+      expect(authority.getReplayRegistry().hasNonceSync!(ctx.nonce)).toBe(true);
+
+      // Clear replay works in test mode
+      clearReplayForTesting();
+
+      // After clearing in test mode, nonce was deleted
+      expect(authority.getReplayRegistry().hasNonceSync!(ctx.nonce)).toBe(false);
+
+      // Reset to undefined works in test mode
+      resetAuthorityForTesting(undefined);
+      expect(() => getDefaultInternalEvidenceAuthority()).not.toThrow(); // non-prod creates dev authority
+    });
+
+    // Test 8: Normal production initialization and event verification remain functional
+    it('8. normal production initialization and event verification remain fully functional', async () => {
+      process.env.NODE_ENV = 'production';
+      process.env.DYNAMODB_REPLAY_TABLE = 'Veltrix-EvidenceReplay-prod';
+
+      vi.spyOn(SecretsManagerClient.prototype, 'send').mockImplementation(async (cmd: any) => {
+        if ((cmd.input?.SecretId || '').includes('signing-key')) {
+          return { SecretString: JSON.stringify({ signingKey: TEST_SIGNING_KEY }) };
+        }
+        return { SecretString: JSON.stringify({ canaryService: TEST_SERVICE_CREDENTIALS['canary-service:v1'] }) };
+      });
+
+      const prodAuthority = await initializeDefaultInternalEvidenceAuthority();
+      expect(prodAuthority).toBeDefined();
+      expect(getDefaultInternalEvidenceAuthority()).toBe(prodAuthority);
+
+      const eventId = '01a19900-0000-7000-8000-000000000803';
+      const ctx = prodAuthority.createContext({
+        serviceAuthToken: TEST_SERVICE_CREDENTIALS['canary-service:v1'],
+        provenance: 'TRUSTED_SERVER_COMPONENT',
+        verifierIdentity: 'canary-service:v1',
+        eventId,
+        orgId,
+        siteId,
+        verifiedSignalIdentifiers: ['CANARY_TOKEN_BREACH'],
+      });
+
+      expect(prodAuthority.verifyContext(ctx, { eventId, orgId, siteId })).toBe(true);
+    });
+
+    // Test 9: SecretLoader testing utilities are also strictly guarded in production
+    it('9. SecretLoader testing utilities are also strictly guarded against production execution', () => {
+      process.env.NODE_ENV = 'production';
+
+      expect(() => {
+        resetDefaultSecretLoaderForTesting();
+      }).toThrow(/FATAL_SECURITY_ERROR.*resetDefaultSecretLoaderForTesting is strictly prohibited in production mode/);
+
+      const loader = new SecretLoader({ strictEnforcement: true });
+      expect(() => {
+        loader.clearCacheForTesting();
+      }).toThrow(/FATAL_SECURITY_ERROR.*clearCacheForTesting is strictly prohibited in production mode/);
+
+      // In test mode, both work safely
+      process.env.NODE_ENV = 'test';
+      const testLoader = new SecretLoader({ strictEnforcement: false });
+      expect(() => testLoader.clearCacheForTesting()).not.toThrow();
+      expect(() => resetDefaultSecretLoaderForTesting()).not.toThrow();
     });
   });
 });
