@@ -11,6 +11,8 @@ import type {
   ResponseExecution,
   AuditLog,
   AuditState,
+  WebsiteAsset,
+  Integration,
 } from '@veltrix/shared';
 import type { StorageInterface, EventQueryOptions } from './storage-interface.js';
 import { signCursor, verifyCursor, computeFilterHash } from '../utils/cursor.js';
@@ -30,6 +32,10 @@ export class MemoryStore implements StorageInterface {
 
   private auditLogsByOrg: Map<string, AuditLog[]> = new Map();
   private auditStateByOrg: Map<string, AuditState> = new Map();
+  private websitesByOrg: Map<string, Map<string, WebsiteAsset>> = new Map();
+  private integrationsByOrg: Map<string, Map<string, Integration>> = new Map();
+  private integrationsByApiKeyHash: Map<string, Integration> = new Map();
+
 
   private static readonly GENESIS_HASH = '0'.repeat(64);
 
@@ -599,6 +605,191 @@ export class MemoryStore implements StorageInterface {
     return '{' + parts.join(',') + '}';
   }
 
+
+  // --- Website Asset Inventory (TASK-601, TASK-602) ---
+
+  async saveWebsite(site: WebsiteAsset): Promise<WebsiteAsset> {
+    const orgId = site.orgId;
+    if (!this.websitesByOrg.has(orgId)) {
+      this.websitesByOrg.set(orgId, new Map());
+    }
+    const orgSites = this.websitesByOrg.get(orgId)!;
+    orgSites.set(site.siteId, { ...site });
+    return { ...site };
+  }
+
+  async getWebsites(
+    orgId: string,
+    options?: { status?: string; limit?: number; cursor?: string }
+  ): Promise<{ items: WebsiteAsset[]; nextCursor?: string; total?: number }> {
+    const orgSites = this.websitesByOrg.get(orgId);
+    if (!orgSites) {
+      return { items: [], total: 0 };
+    }
+
+    let items = Array.from(orgSites.values());
+
+    if (options?.status) {
+      items = items.filter((s) => s.status === options.status);
+    }
+
+    // Sort descending by createdAt
+    items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    const total = items.length;
+    const limit = options?.limit || 50;
+
+    let startIndex = 0;
+    if (options?.cursor) {
+      try {
+        const decoded = JSON.parse(Buffer.from(options.cursor, 'base64').toString('utf8'));
+        if (typeof decoded.offset === 'number') {
+          startIndex = decoded.offset;
+        }
+      } catch {
+        // invalid cursor, start from 0
+      }
+    }
+
+    const pageItems = items.slice(startIndex, startIndex + limit);
+    let nextCursor: string | undefined = undefined;
+
+    if (startIndex + limit < items.length) {
+      nextCursor = Buffer.from(JSON.stringify({ offset: startIndex + limit })).toString('base64');
+    }
+
+    return {
+      items: pageItems.map((s) => ({ ...s })),
+      total,
+      nextCursor,
+    };
+  }
+
+  async getWebsiteById(orgId: string, siteId: string): Promise<WebsiteAsset | null> {
+    const orgSites = this.websitesByOrg.get(orgId);
+    if (!orgSites) return null;
+    const site = orgSites.get(siteId);
+    return site ? { ...site } : null;
+  }
+
+  async getWebsiteByDomain(domain: string): Promise<WebsiteAsset | null> {
+    const normalizedDomain = domain.toLowerCase().trim();
+    for (const orgSites of this.websitesByOrg.values()) {
+      for (const site of orgSites.values()) {
+        if (
+          site.primaryDomain.toLowerCase() === normalizedDomain ||
+          site.approvedSubdomains.some((sub) => sub.toLowerCase() === normalizedDomain)
+        ) {
+          return { ...site };
+        }
+      }
+    }
+    return null;
+  }
+
+  async updateWebsite(
+    orgId: string,
+    siteId: string,
+    updates: Partial<WebsiteAsset>
+  ): Promise<WebsiteAsset | null> {
+    const orgSites = this.websitesByOrg.get(orgId);
+    if (!orgSites) return null;
+    const site = orgSites.get(siteId);
+    if (!site) return null;
+
+    const updatedSite: WebsiteAsset = {
+      ...site,
+      ...updates,
+      siteId: site.siteId, // immutable
+      orgId: site.orgId,   // immutable
+      updatedAt: new Date().toISOString(),
+    };
+
+    orgSites.set(siteId, updatedSite);
+    return { ...updatedSite };
+  }
+
+  async deleteWebsite(orgId: string, siteId: string): Promise<boolean> {
+    const orgSites = this.websitesByOrg.get(orgId);
+    if (!orgSites) return false;
+    return orgSites.delete(siteId);
+  }
+
+  // --- Integration Management (TASK-603, TASK-606) ---
+
+  async saveIntegration(integration: Integration): Promise<Integration> {
+    const orgId = integration.orgId;
+    if (!this.integrationsByOrg.has(orgId)) {
+      this.integrationsByOrg.set(orgId, new Map());
+    }
+    const orgIntegrations = this.integrationsByOrg.get(orgId)!;
+    orgIntegrations.set(integration.integrationId, { ...integration });
+    this.integrationsByApiKeyHash.set(integration.apiKeyHash, { ...integration });
+    return { ...integration };
+  }
+
+  async getIntegrations(orgId: string, siteId?: string): Promise<Integration[]> {
+    const orgIntegrations = this.integrationsByOrg.get(orgId);
+    if (!orgIntegrations) return [];
+
+    let items = Array.from(orgIntegrations.values());
+    if (siteId) {
+      items = items.filter((i) => i.siteId === siteId);
+    }
+    items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return items.map((i) => ({ ...i }));
+  }
+
+  async getIntegrationById(orgId: string, integrationId: string): Promise<Integration | null> {
+    const orgIntegrations = this.integrationsByOrg.get(orgId);
+    if (!orgIntegrations) return null;
+    const item = orgIntegrations.get(integrationId);
+    return item ? { ...item } : null;
+  }
+
+  async getIntegrationByApiKeyHash(apiKeyHash: string): Promise<Integration | null> {
+    const item = this.integrationsByApiKeyHash.get(apiKeyHash);
+    return item ? { ...item } : null;
+  }
+
+  async updateIntegration(
+    orgId: string,
+    integrationId: string,
+    updates: Partial<Integration>
+  ): Promise<Integration | null> {
+    const orgIntegrations = this.integrationsByOrg.get(orgId);
+    if (!orgIntegrations) return null;
+    const item = orgIntegrations.get(integrationId);
+    if (!item) return null;
+
+    // If apiKeyHash changed, update the lookup map
+    if (updates.apiKeyHash && updates.apiKeyHash !== item.apiKeyHash) {
+      this.integrationsByApiKeyHash.delete(item.apiKeyHash);
+    }
+
+    const updatedItem: Integration = {
+      ...item,
+      ...updates,
+      integrationId: item.integrationId, // immutable
+      orgId: item.orgId,                 // immutable
+      updatedAt: new Date().toISOString(),
+    };
+
+    orgIntegrations.set(integrationId, updatedItem);
+    this.integrationsByApiKeyHash.set(updatedItem.apiKeyHash, updatedItem);
+    return { ...updatedItem };
+  }
+
+  async deleteIntegration(orgId: string, integrationId: string): Promise<boolean> {
+    const orgIntegrations = this.integrationsByOrg.get(orgId);
+    if (!orgIntegrations) return false;
+    const item = orgIntegrations.get(integrationId);
+    if (item) {
+      this.integrationsByApiKeyHash.delete(item.apiKeyHash);
+    }
+    return orgIntegrations.delete(integrationId);
+  }
+
   async clearAll(): Promise<void> {
     this.eventsByOrg.clear();
     this.detectionsByOrg.clear();
@@ -611,5 +802,8 @@ export class MemoryStore implements StorageInterface {
     this.responseExecutionsByOrg.clear();
     this.auditLogsByOrg.clear();
     this.auditStateByOrg.clear();
+    this.websitesByOrg.clear();
+    this.integrationsByOrg.clear();
+    this.integrationsByApiKeyHash.clear();
   }
 }

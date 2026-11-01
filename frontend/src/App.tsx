@@ -1,31 +1,45 @@
 import { useState, useEffect } from 'react';
 import {
   ShieldAlert,
-  Activity,
   Terminal,
   Cpu,
   Lock,
   Layers,
   CheckCircle2,
-  Info,
+  Globe,
+  Key,
 } from 'lucide-react';
 import { PLATFORM_INFO } from '@veltrix/shared';
+import { WebsiteInventory } from './components/WebsiteInventory';
+import { IntegrationManagement } from './components/IntegrationManagement';
+import { fetchWebsites, fetchIntegrations } from './api';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'overview' | 'modules'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'websites' | 'integrations' | 'modules'>('overview');
   const [backendStatus, setBackendStatus] = useState<'ONLINE' | 'OFFLINE' | 'CHECKING'>('CHECKING');
+  const [websiteCount, setWebsiteCount] = useState<number | null>(null);
+  const [integrationCount, setIntegrationCount] = useState<number | null>(null);
 
   useEffect(() => {
-    // Attempt local backend probe
+    // Probe backend health and fetch high-level asset summary
     fetch('/health')
       .then((res) => {
-        if (res.ok) setBackendStatus('ONLINE');
-        else setBackendStatus('OFFLINE');
+        if (res.ok) {
+          setBackendStatus('ONLINE');
+          fetchWebsites()
+            .then((res) => setWebsiteCount(res.total ?? res.sites.length))
+            .catch(() => setWebsiteCount(null));
+          fetchIntegrations()
+            .then((res) => setIntegrationCount(res.total ?? res.integrations.length))
+            .catch(() => setIntegrationCount(null));
+        } else {
+          setBackendStatus('OFFLINE');
+        }
       })
       .catch(() => {
         setBackendStatus('OFFLINE');
       });
-  }, []);
+  }, [activeTab]);
 
   return (
     <div className="min-h-screen bg-[#0A0F1D] text-slate-100 flex flex-col font-sans">
@@ -42,6 +56,9 @@ export default function App() {
               </span>
               <span className="px-2 py-0.5 text-xs font-semibold rounded bg-cyan-950/80 text-cyan-400 border border-cyan-800/60">
                 v{PLATFORM_INFO.version}
+              </span>
+              <span className="px-2 py-0.5 text-[11px] font-medium rounded bg-emerald-950/80 text-emerald-400 border border-emerald-800/60">
+                Phase 6: Website Assets
               </span>
             </div>
             <p className="text-xs text-slate-400">{PLATFORM_INFO.tagline}</p>
@@ -69,121 +86,166 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6">
-        {/* Sample Data Disclaimer Banner */}
-        <div className="bg-cyan-950/30 border border-cyan-800/50 rounded-lg px-4 py-2.5 flex items-center justify-between text-xs text-cyan-300">
-          <div className="flex items-center space-x-2">
-            <Info className="w-4 h-4 text-cyan-400 shrink-0" />
-            <span>
-              <strong>Phase 2 Architecture Preview:</strong> Metrics below reflect architectural baseline targets. Live dynamic telemetry ingestion connects in Phase 4.
-            </span>
-          </div>
-          <span className="text-[10px] font-mono uppercase bg-cyan-900/60 text-cyan-200 px-2 py-0.5 rounded border border-cyan-700/50">
-            Sample Telemetry
-          </span>
-        </div>
-
-        {/* Hero Banner */}
-        <div className="rounded-xl border border-slate-800 bg-gradient-to-r from-[#0D1527] to-[#111C35] p-6 shadow-xl relative overflow-hidden">
-          <div className="absolute -right-10 -bottom-10 w-64 h-64 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none"></div>
-          <div className="max-w-2xl space-y-3">
-            <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
-              <Cpu className="w-3.5 h-3.5" />
-              <span>Phase 2 Monorepo Foundation Operational</span>
-            </div>
-            <h1 className="text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
-              Autonomous Cyber Threat Detection & Controlled Response
-            </h1>
-            <p className="text-slate-300 text-sm leading-relaxed">
-              VELTRIX normalizes multi-source telemetry, correlates complex multi-stage attack patterns mapped to MITRE ATT&CK®, computes explainable risk scores, and coordinates defensive SOAR playbooks with zero-bypass authorization.
-            </p>
-          </div>
-        </div>
-
-        {/* Status Grid with Explicit Sample Data Badges */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>INGESTION STATUS</span>
-              <Activity className="w-4 h-4 text-cyan-400" />
-            </div>
-            <div className="flex items-baseline space-x-2">
-              <span className="text-2xl font-bold text-white">Active</span>
-              <span className="text-[10px] font-mono text-cyan-400/80 bg-cyan-950/60 px-1.5 py-0.5 rounded border border-cyan-800/40">
-                Sample
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">UUIDv7 deduplication engine loaded</p>
-          </div>
-
-          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>DETECTION ENGINE</span>
-              <Layers className="w-4 h-4 text-blue-400" />
-            </div>
-            <div className="flex items-baseline space-x-2">
-              <span className="text-2xl font-bold text-white">10 Sigma Rules</span>
-              <span className="text-[10px] font-mono text-blue-400/80 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-800/40">
-                Baseline
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">Sliding temporal windows configured</p>
-          </div>
-
-          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>DEFENSIVE SOAR</span>
-              <ShieldAlert className="w-4 h-4 text-amber-400" />
-            </div>
-            <div className="flex items-baseline space-x-2">
-              <span className="text-2xl font-bold text-white">Gated Defense</span>
-              <span className="text-[10px] font-mono text-amber-400/80 bg-amber-950/60 px-1.5 py-0.5 rounded border border-amber-800/40">
-                Spec Target
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">Zero-bypass approval enforcement</p>
-          </div>
-
-          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
-            <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
-              <span>AUDIT LEDGER</span>
-              <Lock className="w-4 h-4 text-emerald-400" />
-            </div>
-            <div className="flex items-baseline space-x-2">
-              <span className="text-2xl font-bold text-white">SHA-256 Intact</span>
-              <span className="text-[10px] font-mono text-emerald-400/80 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">
-                Verified
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">Tamper-evident hash-chained logs</p>
-          </div>
-        </div>
-
-        {/* Architecture Navigation Tabs */}
-        <div className="space-y-4">
-          <div className="flex items-center space-x-2 border-b border-slate-800">
+        {/* Navigation Tabs Bar */}
+        <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+          <div className="flex items-center space-x-1 sm:space-x-2">
             <button
               onClick={() => setActiveTab('overview')}
-              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              className={`flex items-center space-x-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
                 activeTab === 'overview'
-                  ? 'border-cyan-400 text-cyan-400'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
               }`}
             >
-              Architecture Overview
+              <Cpu className="w-4 h-4" />
+              <span>Platform Overview</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('websites')}
+              className={`flex items-center space-x-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+                activeTab === 'websites'
+                  ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+              }`}
+            >
+              <Globe className="w-4 h-4" />
+              <span>Website Assets</span>
+              {websiteCount !== null && (
+                <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-slate-800 text-slate-300 font-mono border border-slate-700">
+                  {websiteCount}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => setActiveTab('integrations')}
+              className={`flex items-center space-x-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
+                activeTab === 'integrations'
+                  ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+              }`}
+            >
+              <Key className="w-4 h-4" />
+              <span>Integrations & Telemetry</span>
+              {integrationCount !== null && (
+                <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-slate-800 text-slate-300 font-mono border border-slate-700">
+                  {integrationCount}
+                </span>
+              )}
             </button>
             <button
               onClick={() => setActiveTab('modules')}
-              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              className={`flex items-center space-x-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
                 activeTab === 'modules'
-                  ? 'border-cyan-400 text-cyan-400'
-                  : 'border-transparent text-slate-400 hover:text-slate-200'
+                  ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
               }`}
             >
-              Workspace Modules (A–L)
+              <CheckCircle2 className="w-4 h-4" />
+              <span>System Modules</span>
             </button>
           </div>
+        </div>
 
-          {activeTab === 'overview' ? (
+        {/* Tab Content Rendering */}
+        {activeTab === 'overview' && (
+          <div className="space-y-6">
+            {/* Phase 6 Operational Banner */}
+            <div className="rounded-xl border border-slate-800 bg-gradient-to-r from-[#0D1527] to-[#111C35] p-6 shadow-xl relative overflow-hidden">
+              <div className="absolute -right-10 -bottom-10 w-64 h-64 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none"></div>
+              <div className="max-w-3xl space-y-3">
+                <div className="inline-flex items-center space-x-2 px-3 py-1 rounded-full text-xs font-medium bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
+                  <Cpu className="w-3.5 h-3.5" />
+                  <span>Phase 6: Website Assets & Integrations Operational</span>
+                </div>
+                <h1 className="text-3xl font-extrabold tracking-tight text-white sm:text-4xl">
+                  Unified Website Security Monitoring & Defense
+                </h1>
+                <p className="text-slate-300 text-sm leading-relaxed">
+                  VELTRIX expands from core SIEM/SOAR threat intelligence into a unified website defense platform. Register enterprise domains, verify ownership cryptographically via DNS TXT or HTTP well-known challenges, and ingest continuous real-time attack telemetry via the Node.js SDK, Express middleware, Nginx/Apache log collectors, or Cloudflare Workers.
+                </p>
+                <div className="flex flex-wrap gap-2 pt-2">
+                  <button
+                    onClick={() => setActiveTab('websites')}
+                    className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold rounded-lg flex items-center space-x-2 transition-colors shadow-lg shadow-cyan-600/20"
+                  >
+                    <Globe className="w-4 h-4" />
+                    <span>Manage Website Inventory</span>
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('integrations')}
+                    className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-semibold rounded-lg border border-slate-700 flex items-center space-x-2 transition-colors"
+                  >
+                    <Key className="w-4 h-4" />
+                    <span>Configure Ingestion Keys</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Status Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
+                <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
+                  <span>WEBSITE ASSETS</span>
+                  <Globe className="w-4 h-4 text-cyan-400" />
+                </div>
+                <div className="flex items-baseline space-x-2">
+                  <span className="text-2xl font-bold text-white">
+                    {websiteCount !== null ? websiteCount : '—'}
+                  </span>
+                  <span className="text-[10px] font-mono text-cyan-400/80 bg-cyan-950/60 px-1.5 py-0.5 rounded border border-cyan-800/40">
+                    Live
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">DNS TXT & HTTP challenge verification</p>
+              </div>
+
+              <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
+                <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
+                  <span>TELEMETRY INTEGRATIONS</span>
+                  <Key className="w-4 h-4 text-emerald-400" />
+                </div>
+                <div className="flex items-baseline space-x-2">
+                  <span className="text-2xl font-bold text-white">
+                    {integrationCount !== null ? integrationCount : '—'}
+                  </span>
+                  <span className="text-[10px] font-mono text-emerald-400/80 bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-800/40">
+                    Active
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">Node SDK, Express, Nginx, Apache, Cloudflare</p>
+              </div>
+
+              <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
+                <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
+                  <span>THREAT DETECTION ENGINE</span>
+                  <Layers className="w-4 h-4 text-blue-400" />
+                </div>
+                <div className="flex items-baseline space-x-2">
+                  <span className="text-2xl font-bold text-white">10 Sigma Rules</span>
+                  <span className="text-[10px] font-mono text-blue-400/80 bg-blue-950/60 px-1.5 py-0.5 rounded border border-blue-800/40">
+                    Operational
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">Sliding temporal windows & web attack signatures</p>
+              </div>
+
+              <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-5 space-y-2 relative">
+                <div className="flex items-center justify-between text-slate-400 text-xs font-medium">
+                  <span>AUDIT & REPUTATION</span>
+                  <Lock className="w-4 h-4 text-purple-400" />
+                </div>
+                <div className="flex items-baseline space-x-2">
+                  <span className="text-2xl font-bold text-white">SHA-256 Intact</span>
+                  <span className="text-[10px] font-mono text-purple-400/80 bg-purple-950/60 px-1.5 py-0.5 rounded border border-purple-800/40">
+                    Verified
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">Tamper-evident hash-chained logs</p>
+              </div>
+            </div>
+
+            {/* Architecture Card */}
             <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-6 space-y-4">
               <h2 className="text-lg font-semibold text-white flex items-center space-x-2">
                 <Terminal className="w-5 h-5 text-cyan-400" />
@@ -192,61 +254,71 @@ export default function App() {
               <p className="text-sm text-slate-300">
                 VELTRIX operates as a unified TypeScript monorepo with strict package boundaries:
               </p>
-              <ul className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2 text-xs">
+              <ul className="grid grid-cols-1 md:grid-cols-4 gap-3 pt-2 text-xs">
                 <li className="bg-slate-900/60 border border-slate-800 rounded p-3 space-y-1">
                   <div className="font-semibold text-cyan-400">@veltrix/shared</div>
-                  <div className="text-slate-400">Shared TypeScript types, Zod schemas, MITRE ATT&CK taxonomy, and HTTP contracts.</div>
+                  <div className="text-slate-400">Shared TypeScript types, Zod schemas, website asset contracts, and API specs.</div>
                 </li>
                 <li className="bg-slate-900/60 border border-slate-800 rounded p-3 space-y-1">
                   <div className="font-semibold text-blue-400">@veltrix/backend</div>
-                  <div className="text-slate-400">Express / Serverless API, Sigma detection engine, correlation pipeline, and MemoryStore.</div>
+                  <div className="text-slate-400">Domain verification service, log parsers, Sigma engine, and DynamoDB/Memory store.</div>
                 </li>
                 <li className="bg-slate-900/60 border border-slate-800 rounded p-3 space-y-1">
-                  <div className="font-semibold text-emerald-400">@veltrix/cli</div>
-                  <div className="text-slate-400">SOC terminal operator console with full authentication, triage, and simulation CLI commands.</div>
+                  <div className="font-semibold text-emerald-400">@veltrix/sdk-node</div>
+                  <div className="text-slate-400">Zero-dependency Express/Node.js telemetry agent with fail-open bounded ring buffer.</div>
+                </li>
+                <li className="bg-slate-900/60 border border-slate-800 rounded p-3 space-y-1">
+                  <div className="font-semibold text-purple-400">@veltrix/cli</div>
+                  <div className="text-slate-400">SOC terminal operator console with full authentication, triage, and asset verification.</div>
                 </li>
               </ul>
             </div>
-          ) : (
-            <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-6 space-y-4">
-              <h2 className="text-lg font-semibold text-white flex items-center space-x-2">
-                <CheckCircle2 className="w-5 h-5 text-emerald-400" />
-                <span>Specification Modules Status (Phase 2 Foundation Ready)</span>
-              </h2>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
-                  <span className="text-cyan-400 font-mono font-bold">Mod A:</span>
-                  <span className="text-slate-300">Authentication & Multi-Tenant RBAC Isolation (Cognito / JWT)</span>
-                </div>
-                <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
-                  <span className="text-cyan-400 font-mono font-bold">Mod B:</span>
-                  <span className="text-slate-300">Event Ingestion API & High-Precision Deduplication</span>
-                </div>
-                <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
-                  <span className="text-cyan-400 font-mono font-bold">Mod C:</span>
-                  <span className="text-slate-300">10 Sigma-Inspired Detection Rules Engine</span>
-                </div>
-                <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
-                  <span className="text-cyan-400 font-mono font-bold">Mod D:</span>
-                  <span className="text-slate-300">Multi-Stage MITRE ATT&CK Attack Correlation</span>
-                </div>
-                <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
-                  <span className="text-cyan-400 font-mono font-bold">Mod E:</span>
-                  <span className="text-slate-300">Explainable Mathematical Risk Scoring ($0 - 100$)</span>
-                </div>
-                <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
-                  <span className="text-cyan-400 font-mono font-bold">Mod H:</span>
-                  <span className="text-slate-300">Defensive SOAR Response with Zero-Bypass Authorization</span>
-                </div>
+          </div>
+        )}
+
+        {activeTab === 'websites' && <WebsiteInventory />}
+
+        {activeTab === 'integrations' && <IntegrationManagement />}
+
+        {activeTab === 'modules' && (
+          <div className="bg-[#0D1527] border border-slate-800 rounded-lg p-6 space-y-4">
+            <h2 className="text-lg font-semibold text-white flex items-center space-x-2">
+              <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+              <span>Specification Modules Status (Phase 6 Website Assets Operational)</span>
+            </h2>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
+                <span className="text-emerald-400 font-mono font-bold">TASK-601:</span>
+                <span className="text-slate-300">Website Asset Data Model & Storage Extension (DynamoDB & In-Memory)</span>
+              </div>
+              <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
+                <span className="text-emerald-400 font-mono font-bold">TASK-602:</span>
+                <span className="text-slate-300">Domain Ownership Verification (DNS TXT & HTTP Well-Known Challenges, 90-Day Expiry)</span>
+              </div>
+              <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
+                <span className="text-emerald-400 font-mono font-bold">TASK-603:</span>
+                <span className="text-slate-300">Website Assets & Integrations REST Routers with RBAC & Tenant Isolation</span>
+              </div>
+              <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
+                <span className="text-emerald-400 font-mono font-bold">TASK-604:</span>
+                <span className="text-slate-300">Node.js SDK & Express Middleware Package (`@veltrix/sdk-node`) with Ring Buffer</span>
+              </div>
+              <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
+                <span className="text-emerald-400 font-mono font-bold">TASK-605:</span>
+                <span className="text-slate-300">Server Log Collectors (Nginx, Apache, Cloudflare) with Streaming Ingestion</span>
+              </div>
+              <div className="p-3 bg-slate-900/60 rounded border border-slate-800 flex items-start space-x-2">
+                <span className="text-emerald-400 font-mono font-bold">TASK-606:</span>
+                <span className="text-slate-300">Comprehensive Automated Test Suite & Integration Health Metrics</span>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </main>
 
       {/* Footer */}
       <footer className="border-t border-slate-800 bg-[#0D1527] py-4 px-6 text-center text-xs text-slate-500">
-        VELTRIX Autonomous Cybersecurity Platform — Competition Ready & Enterprise Scalable
+        VELTRIX Unified Cybersecurity & Website Defense Platform — Beyond Detection. Into Defense.
       </footer>
     </div>
   );

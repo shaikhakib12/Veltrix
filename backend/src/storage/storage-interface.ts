@@ -10,6 +10,8 @@ import type {
   ResponseExecution,
   AuditLog,
   AuditState,
+  WebsiteAsset,
+  Integration,
 } from '@veltrix/shared';
 
 export interface EventQueryOptions {
@@ -118,6 +120,34 @@ export interface StorageInterface {
   verifyAuditChain(
     orgId: string
   ): Promise<{ verified: boolean; length: number; brokenRecordId?: string }>;
+
+
+  // --- Website Asset Inventory (TASK-601, TASK-602) ---
+  saveWebsite(site: WebsiteAsset): Promise<WebsiteAsset>;
+  getWebsites(
+    orgId: string,
+    options?: { status?: string; limit?: number; cursor?: string }
+  ): Promise<{ items: WebsiteAsset[]; nextCursor?: string; total?: number }>;
+  getWebsiteById(orgId: string, siteId: string): Promise<WebsiteAsset | null>;
+  getWebsiteByDomain(domain: string): Promise<WebsiteAsset | null>;
+  updateWebsite(
+    orgId: string,
+    siteId: string,
+    updates: Partial<WebsiteAsset>
+  ): Promise<WebsiteAsset | null>;
+  deleteWebsite(orgId: string, siteId: string): Promise<boolean>;
+
+  // --- Integration Management (TASK-603, TASK-606) ---
+  saveIntegration(integration: Integration): Promise<Integration>;
+  getIntegrations(orgId: string, siteId?: string): Promise<Integration[]>;
+  getIntegrationById(orgId: string, integrationId: string): Promise<Integration | null>;
+  getIntegrationByApiKeyHash(apiKeyHash: string): Promise<Integration | null>;
+  updateIntegration(
+    orgId: string,
+    integrationId: string,
+    updates: Partial<Integration>
+  ): Promise<Integration | null>;
+  deleteIntegration(orgId: string, integrationId: string): Promise<boolean>;
 
   // --- Reset (for test isolation) ---
   clearAll?(): Promise<void>;

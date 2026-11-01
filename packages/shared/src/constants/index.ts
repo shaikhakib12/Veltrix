@@ -40,6 +40,13 @@ export const SUPPORTED_EVENT_TYPES = [
   'system.file.modify',
   'admin.action',
   'recon.account.probe',
+  'web.request.normal',
+  'web.attack.sqli',
+  'web.attack.xss',
+  'web.attack.traversal',
+  'web.attack.bot',
+  'web.attack.api_abuse',
+  'auth.credential_stuffing',
 ] as const;
 
 export const SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
@@ -88,6 +95,15 @@ export const AUDIT_ACTION_TYPES = [
   'USER_LOGIN',
   'USER_SUSPENDED',
   'LEDGER_RESYNCHRONIZATION',
+  'WEBSITE_REGISTERED',
+  'WEBSITE_UPDATED',
+  'WEBSITE_VERIFIED',
+  'WEBSITE_REVOKED',
+  'WEBSITE_DELETED',
+  'INTEGRATION_CREATED',
+  'INTEGRATION_ROTATED',
+  'INTEGRATION_REVOKED',
+  'INTEGRATION_DELETED',
 ] as const;
 
 export const RFC5737_SIMULATED_IP_RANGES = [
@@ -110,3 +126,27 @@ export const MITRE_TACTICS = [
   'Command and Control',
   'Impact',
 ] as const;
+
+export const WEBSITE_ENVIRONMENTS = ['PRODUCTION', 'STAGING', 'DEVELOPMENT'] as const;
+export const WEBSITE_STATUSES = [
+  'PENDING_VERIFICATION',
+  'VERIFIED',
+  'GRACE_PERIOD',
+  'REVOKED',
+  'SUSPENDED',
+] as const;
+export const RISK_TIERS = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const;
+export const VERIFICATION_METHODS = ['DNS_TXT', 'HTTP_CHALLENGE'] as const;
+
+export const INTEGRATION_TYPES = [
+  'SDK_NODE',
+  'EXPRESS',
+  'GENERIC_HTTP',
+  'NGINX',
+  'APACHE',
+  'CLOUDFLARE',
+  'AWS_WAF',
+  'AWS_CLOUDTRAIL',
+] as const;
+
+export const INTEGRATION_STATUSES = ['ACTIVE', 'INACTIVE', 'REVOKED'] as const;

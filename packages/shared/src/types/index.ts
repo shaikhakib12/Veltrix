@@ -7,6 +7,12 @@ import type {
   RESPONSE_EXECUTION_STATUSES,
   USER_ROLES,
   AUDIT_ACTION_TYPES,
+  WEBSITE_ENVIRONMENTS,
+  WEBSITE_STATUSES,
+  RISK_TIERS,
+  VERIFICATION_METHODS,
+  INTEGRATION_TYPES,
+  INTEGRATION_STATUSES,
 } from '../constants/index.js';
 
 export type EventCategory = (typeof EVENT_CATEGORIES)[number];
@@ -289,4 +295,78 @@ export interface EventQueryFilter extends PaginatedQuery {
   sourceIp?: string;
   username?: string;
   sourceSystem?: string;
+}
+
+export type WebsiteEnvironment = (typeof WEBSITE_ENVIRONMENTS)[number];
+export type WebsiteStatus = (typeof WEBSITE_STATUSES)[number];
+export type RiskTier = (typeof RISK_TIERS)[number];
+export type VerificationMethod = (typeof VERIFICATION_METHODS)[number];
+
+export interface WebsiteHealth {
+  telemetryStatus: 'HEALTHY' | 'DEGRADED' | 'INACTIVE';
+  lastEventReceivedAt?: string;
+  eventsPerMinute?: number;
+}
+
+export interface WebsiteAsset {
+  siteId: string;
+  orgId: string;
+  name: string;
+  primaryDomain: string;
+  approvedSubdomains: string[];
+  environment: WebsiteEnvironment;
+  status: WebsiteStatus;
+  riskTier: RiskTier;
+  tags: string[];
+  verificationToken: string;
+  tokenHash?: string;
+  tokenCreatedAt: string;
+  dnsTxtRecord: {
+    host: string;
+    value: string;
+  };
+  httpChallenge: {
+    url: string;
+    expectedBody: {
+      veltrixChallengeToken: string;
+      orgId: string;
+    };
+  };
+  verifiedAt?: string;
+  expiresAt?: string;
+  gracePeriodEndsAt?: string;
+  verificationAttempts?: number;
+  lastVerificationAttemptAt?: string;
+  scanBlocked: boolean;
+  health: WebsiteHealth;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type IntegrationType = (typeof INTEGRATION_TYPES)[number];
+export type IntegrationStatus = (typeof INTEGRATION_STATUSES)[number];
+
+export interface IntegrationHealth {
+  status: 'HEALTHY' | 'DEGRADED' | 'INACTIVE' | 'ERROR';
+  eventsReceived: number;
+  lastError?: string;
+  lastSuccessAt?: string;
+  lastFailedAt?: string;
+}
+
+export interface Integration {
+  integrationId: string;
+  orgId: string;
+  siteId?: string;
+  name: string;
+  type: IntegrationType;
+  status: IntegrationStatus;
+  description?: string;
+  apiKeyPrefix: string;
+  apiKeyHash: string;
+  secretKey?: string;
+  lastSeenAt?: string;
+  health: IntegrationHealth;
+  createdAt: string;
+  updatedAt: string;
 }

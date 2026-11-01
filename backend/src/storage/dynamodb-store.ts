@@ -20,6 +20,8 @@ import type {
   ResponseExecution,
   AuditLog,
   AuditState,
+  WebsiteAsset,
+  Integration,
 } from '@veltrix/shared';
 import type { StorageInterface, EventQueryOptions } from './storage-interface.js';
 import { signCursor, verifyCursor, computeFilterHash } from '../utils/cursor.js';
@@ -34,6 +36,8 @@ export class DynamoDBStore implements StorageInterface {
   private readonly responsesTable: string;
   private readonly auditTable: string;
   private readonly auditStateTable: string;
+  private readonly websitesTable: string;
+  private readonly integrationsTable: string;
 
   private static readonly GENESIS_HASH = '0'.repeat(64);
 
@@ -55,6 +59,8 @@ export class DynamoDBStore implements StorageInterface {
     this.responsesTable = process.env.DYNAMODB_RESPONSES_TABLE || `Veltrix-ResponseExecutions-${env}`;
     this.auditTable = process.env.DYNAMODB_AUDIT_TABLE || `Veltrix-AuditLogs-${env}`;
     this.auditStateTable = process.env.DYNAMODB_AUDIT_STATE_TABLE || `Veltrix-AuditState-${env}`;
+    this.websitesTable = process.env.DYNAMODB_WEBSITES_TABLE || `Veltrix-WebsiteAssets-${env}`;
+    this.integrationsTable = process.env.DYNAMODB_INTEGRATIONS_TABLE || `Veltrix-Integrations-${env}`;
   }
 
   // --- Exponential Backoff Retry Helper ---
@@ -1233,4 +1239,276 @@ export class DynamoDBStore implements StorageInterface {
     );
     return '{' + parts.join(',') + '}';
   }
+
+  // --- Website Asset Inventory (TASK-601, TASK-602) ---
+
+  async saveWebsite(site: WebsiteAsset): Promise<WebsiteAsset> {
+    const item = {
+      PK: `ORG#${site.orgId}`,
+      SK: `SITE#${site.siteId}`,
+      GSI1_PK: `ORG#${site.orgId}#STATUS#${site.status}`,
+      GSI1_SK: site.primaryDomain,
+      GSI2_PK: `DOMAIN#${site.primaryDomain}`,
+      GSI2_SK: `ORG#${site.orgId}`,
+      ...site,
+    };
+
+    await this.executeWithRetry(async () => {
+      await this.docClient.send(
+        new PutCommand({
+          TableName: this.websitesTable,
+          Item: item,
+        })
+      );
+    });
+
+    return { ...site };
+  }
+
+  async getWebsites(
+    orgId: string,
+    options?: { status?: string; limit?: number; cursor?: string }
+  ): Promise<{ items: WebsiteAsset[]; nextCursor?: string; total?: number }> {
+    const limit = options?.limit || 50;
+    const isStatusFiltered = !!options?.status;
+
+    let exclusiveStartKey: Record<string, unknown> | undefined = undefined;
+    if (options?.cursor) {
+      try {
+        exclusiveStartKey = JSON.parse(Buffer.from(options.cursor, 'base64').toString('utf8'));
+      } catch {
+        // ignore invalid cursor
+      }
+    }
+
+    let command: QueryCommand;
+    if (isStatusFiltered) {
+      command = new QueryCommand({
+        TableName: this.websitesTable,
+        IndexName: 'GSI1-StatusDomain',
+        KeyConditionExpression: 'GSI1_PK = :pk',
+        ExpressionAttributeValues: {
+          ':pk': `ORG#${orgId}#STATUS#${options.status}`,
+        },
+        Limit: limit,
+        ExclusiveStartKey: exclusiveStartKey,
+      });
+    } else {
+      command = new QueryCommand({
+        TableName: this.websitesTable,
+        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+        ExpressionAttributeValues: {
+          ':pk': `ORG#${orgId}`,
+          ':skPrefix': 'SITE#',
+        },
+        Limit: limit,
+        ExclusiveStartKey: exclusiveStartKey,
+      });
+    }
+
+    const response = await this.executeWithRetry(() => this.docClient.send(command));
+    const items = (response.Items || []).map((raw) => {
+      const { PK, SK, GSI1_PK, GSI1_SK, GSI2_PK, GSI2_SK, ...site } = raw;
+      return site as WebsiteAsset;
+    });
+
+    let nextCursor: string | undefined = undefined;
+    if (response.LastEvaluatedKey) {
+      nextCursor = Buffer.from(JSON.stringify(response.LastEvaluatedKey)).toString('base64');
+    }
+
+    return {
+      items,
+      total: response.Count || items.length,
+      nextCursor,
+    };
+  }
+
+  async getWebsiteById(orgId: string, siteId: string): Promise<WebsiteAsset | null> {
+    const response = await this.executeWithRetry(() =>
+      this.docClient.send(
+        new GetCommand({
+          TableName: this.websitesTable,
+          Key: {
+            PK: `ORG#${orgId}`,
+            SK: `SITE#${siteId}`,
+          },
+        })
+      )
+    );
+
+    if (!response.Item) return null;
+    const { PK, SK, GSI1_PK, GSI1_SK, GSI2_PK, GSI2_SK, ...site } = response.Item;
+    return site as WebsiteAsset;
+  }
+
+  async getWebsiteByDomain(domain: string): Promise<WebsiteAsset | null> {
+    const normalizedDomain = domain.toLowerCase().trim();
+    const command = new QueryCommand({
+      TableName: this.websitesTable,
+      IndexName: 'GSI2-DomainLookup',
+      KeyConditionExpression: 'GSI2_PK = :pk',
+      ExpressionAttributeValues: {
+        ':pk': `DOMAIN#${normalizedDomain}`,
+      },
+      Limit: 1,
+    });
+
+    const response = await this.executeWithRetry(() => this.docClient.send(command));
+    if (!response.Items || response.Items.length === 0 || !response.Items[0]) return null;
+    const raw = response.Items[0];
+    const { PK, SK, GSI1_PK, GSI1_SK, GSI2_PK, GSI2_SK, ...site } = raw;
+    return site as WebsiteAsset;
+  }
+
+  async updateWebsite(
+    orgId: string,
+    siteId: string,
+    updates: Partial<WebsiteAsset>
+  ): Promise<WebsiteAsset | null> {
+    const existing = await this.getWebsiteById(orgId, siteId);
+    if (!existing) return null;
+
+    const merged: WebsiteAsset = {
+      ...existing,
+      ...updates,
+      siteId: existing.siteId,
+      orgId: existing.orgId,
+      updatedAt: new Date().toISOString(),
+    };
+
+    return this.saveWebsite(merged);
+  }
+
+  async deleteWebsite(orgId: string, siteId: string): Promise<boolean> {
+    await this.executeWithRetry(() =>
+      this.docClient.send(
+        new DeleteCommand({
+          TableName: this.websitesTable,
+          Key: {
+            PK: `ORG#${orgId}`,
+            SK: `SITE#${siteId}`,
+          },
+        })
+      )
+    );
+    return true;
+  }
+
+  // --- Integration Management (TASK-603, TASK-606) ---
+
+  async saveIntegration(integration: Integration): Promise<Integration> {
+    const item = {
+      PK: `ORG#${integration.orgId}`,
+      SK: `INT#${integration.integrationId}`,
+      GSI1_PK: `APIKEY#${integration.apiKeyHash}`,
+      GSI1_SK: `ORG#${integration.orgId}`,
+      ...integration,
+    };
+
+    await this.executeWithRetry(() =>
+      this.docClient.send(
+        new PutCommand({
+          TableName: this.integrationsTable,
+          Item: item,
+        })
+      )
+    );
+
+    return { ...integration };
+  }
+
+  async getIntegrations(orgId: string, siteId?: string): Promise<Integration[]> {
+    const command = new QueryCommand({
+      TableName: this.integrationsTable,
+      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :skPrefix)',
+      ExpressionAttributeValues: {
+        ':pk': `ORG#${orgId}`,
+        ':skPrefix': 'INT#',
+      },
+    });
+
+    const response = await this.executeWithRetry(() => this.docClient.send(command));
+    let items = (response.Items || []).map((raw) => {
+      const { PK, SK, GSI1_PK, GSI1_SK, ...i } = raw;
+      return i as Integration;
+    });
+
+    if (siteId) {
+      items = items.filter((i) => i.siteId === siteId);
+    }
+    items.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return items;
+  }
+
+  async getIntegrationById(orgId: string, integrationId: string): Promise<Integration | null> {
+    const response = await this.executeWithRetry(() =>
+      this.docClient.send(
+        new GetCommand({
+          TableName: this.integrationsTable,
+          Key: {
+            PK: `ORG#${orgId}`,
+            SK: `INT#${integrationId}`,
+          },
+        })
+      )
+    );
+
+    if (!response.Item) return null;
+    const { PK, SK, GSI1_PK, GSI1_SK, ...item } = response.Item;
+    return item as Integration;
+  }
+
+  async getIntegrationByApiKeyHash(apiKeyHash: string): Promise<Integration | null> {
+    const command = new QueryCommand({
+      TableName: this.integrationsTable,
+      IndexName: 'GSI1-ApiKeyLookup',
+      KeyConditionExpression: 'GSI1_PK = :pk',
+      ExpressionAttributeValues: {
+        ':pk': `APIKEY#${apiKeyHash}`,
+      },
+      Limit: 1,
+    });
+
+    const response = await this.executeWithRetry(() => this.docClient.send(command));
+    if (!response.Items || response.Items.length === 0 || !response.Items[0]) return null;
+    const raw = response.Items[0];
+    const { PK, SK, GSI1_PK, GSI1_SK, ...item } = raw;
+    return item as Integration;
+  }
+
+  async updateIntegration(
+    orgId: string,
+    integrationId: string,
+    updates: Partial<Integration>
+  ): Promise<Integration | null> {
+    const existing = await this.getIntegrationById(orgId, integrationId);
+    if (!existing) return null;
+
+    const merged: Integration = {
+      ...existing,
+      ...updates,
+      integrationId: existing.integrationId,
+      orgId: existing.orgId,
+      updatedAt: new Date().toISOString(),
+    };
+
+    return this.saveIntegration(merged);
+  }
+
+  async deleteIntegration(orgId: string, integrationId: string): Promise<boolean> {
+    await this.executeWithRetry(() =>
+      this.docClient.send(
+        new DeleteCommand({
+          TableName: this.integrationsTable,
+          Key: {
+            PK: `ORG#${orgId}`,
+            SK: `INT#${integrationId}`,
+          },
+        })
+      )
+    );
+    return true;
+  }
+
 }
