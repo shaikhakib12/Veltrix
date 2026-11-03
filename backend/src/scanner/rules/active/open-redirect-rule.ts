@@ -94,27 +94,38 @@ export class OpenRedirectRule implements ActiveRuleInterface {
         }
 
         const locationHeader = res.headers['location'] || '';
-        if (!locationHeader) {
+        if (!locationHeader || typeof locationHeader !== 'string') {
           continue;
         }
 
-        // Verify if Location targets the untrusted canary destination
-        const isCanaryMatch =
-          locationHeader.includes(canaryTarget) ||
-          locationHeader.startsWith(`https://${canaryHost}`) ||
-          locationHeader.startsWith(`http://${canaryHost}`) ||
-          locationHeader.startsWith(`//${canaryHost}`);
-
-        // Ensure location is not actually a relative or same-origin redirect
-        let isSameOrigin = false;
+        // Parse both Location and expected canary destination via URL API for exact comparison
+        let locUrl: URL;
+        let expectedCanaryUrl: URL;
         try {
-          const locUrl = new URL(locationHeader, page.url);
-          if (locUrl.hostname.toLowerCase() === parsedUrl.hostname.toLowerCase()) {
-            isSameOrigin = true;
-          }
-        } catch {}
+          locUrl = new URL(locationHeader, page.url);
+          expectedCanaryUrl = new URL(canaryTarget);
+        } catch {
+          // Malformed Location header or destination
+          continue;
+        }
 
-        if (isCanaryMatch && !isSameOrigin) {
+        // 1. Reject same-origin or relative redirects
+        if (locUrl.origin.toLowerCase() === parsedUrl.origin.toLowerCase()) {
+          continue;
+        }
+
+        // 2. Exact match against generated canary destination:
+        // - Scheme must match exact canary scheme (https:)
+        // - Hostname must match exact canary hostname (rejects lookalikes, prefix matches, and subdomains)
+        // - Port must match exact canary port
+        // - Pathname must match exact unique canary pathname (rejects embedded query string parameters)
+        const isExactMatch =
+          locUrl.protocol.toLowerCase() === expectedCanaryUrl.protocol.toLowerCase() &&
+          locUrl.hostname.toLowerCase() === expectedCanaryUrl.hostname.toLowerCase() &&
+          locUrl.port === expectedCanaryUrl.port &&
+          locUrl.pathname === expectedCanaryUrl.pathname;
+
+        if (isExactMatch) {
           findings.push(
             Object.freeze({
               ruleId: this.id,
@@ -122,7 +133,7 @@ export class OpenRedirectRule implements ActiveRuleInterface {
               title: `Unvalidated Open Redirect via Parameter '${param}'`,
               severity: 'MEDIUM',
               confidence: 'CONFIRMED',
-              description: `Parameter '${param}' on ${page.url} accepts untrusted external redirect targets and returned a ${status} redirect pointing to '${locationHeader}'.`,
+              description: `Parameter '${param}' on ${page.url} accepts untrusted external redirect targets and returned an unvalidated ${status} redirect pointing exactly to the canary destination '${locationHeader}'.`,
               remediation:
                 'Validate redirect targets against an explicit allowlist of authorized domains, or restrict redirection to relative paths (e.g. beginning with a single slash "/").',
               url: page.url,
@@ -133,6 +144,10 @@ export class OpenRedirectRule implements ActiveRuleInterface {
                 canaryTarget,
                 redirectStatus: status,
                 locationHeader,
+                verifiedCanaryDestination: {
+                  origin: locUrl.origin,
+                  pathname: locUrl.pathname,
+                },
               }),
             })
           );

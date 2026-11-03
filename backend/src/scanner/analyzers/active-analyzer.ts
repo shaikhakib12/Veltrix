@@ -169,8 +169,10 @@ export class ActiveAnalyzer {
     }
     this.timeoutMs = rawTimeout;
 
-    // Rules initialization
-    if (options.rules && options.rules.length > 0) {
+    // Rules initialization:
+    // If options.rules is explicitly provided (including empty []), respect caller configuration.
+    // If omitted (undefined), defaults to the 4 canonical active rules.
+    if (options.rules !== undefined) {
       this.rules = Object.freeze([...options.rules]);
     } else {
       this.rules = Object.freeze([
@@ -181,7 +183,9 @@ export class ActiveAnalyzer {
       ]);
     }
 
-    if (options.enabledRuleIds && options.enabledRuleIds.length > 0) {
+    // If options.enabledRuleIds is explicitly provided (including empty []), respect caller filter.
+    // If omitted (undefined), all rules remain active.
+    if (options.enabledRuleIds !== undefined) {
       const allowedSet = new Set(options.enabledRuleIds);
       this.rules = Object.freeze(this.rules.filter((r) => allowedSet.has(r.id)));
     }
@@ -218,30 +222,34 @@ export class ActiveAnalyzer {
       readonly headers?: Record<string, string>;
     }
   ): Promise<SafeHttpResponse | null> {
-    // 1. Safety Gate check & budget acquisition
-    this.safetyGate.checkAndAcquireProbeSlot(
-      targetUrl,
-      this.context,
-      options?.method,
-      this.signal
-    );
-
-    // 2. Concurrency limiting via semaphore
-    const release = await this.semaphore.acquire();
     try {
-      const res = await this.client.request(targetUrl, {
-        context: this.context,
-        method: options?.method || 'GET',
-        headers: options?.headers,
-        timeoutMs: this.timeoutMs,
-        signal: this.signal,
-        maxRedirects: 0, // Strict non-redirecting transport for active probe canary observation
-      });
-      return res;
+      // 1. Safety Gate check & budget acquisition
+      this.safetyGate.checkAndAcquireProbeSlot(
+        targetUrl,
+        this.context,
+        options?.method,
+        this.signal
+      );
+
+      // 2. Concurrency limiting via semaphore
+      const release = await this.semaphore.acquire();
+      try {
+        const res = await this.client.request(targetUrl, {
+          context: this.context,
+          method: options?.method || 'GET',
+          headers: options?.headers,
+          timeoutMs: this.timeoutMs,
+          signal: this.signal,
+          maxRedirects: 0, // Strict non-redirecting transport for active probe canary observation
+        });
+        return res;
+      } catch {
+        return null;
+      } finally {
+        release();
+      }
     } catch {
       return null;
-    } finally {
-      release();
     }
   }
 
@@ -261,8 +269,6 @@ export class ActiveAnalyzer {
     const seenFindingKeys = new Set<string>();
 
     const executionContext: ActiveRuleExecutionContext = {
-      client: this.client,
-      context: this.context,
       timeoutMs: this.timeoutMs,
       signal: this.signal,
       dispatchProbe: this.dispatchProbe.bind(this),

@@ -30,6 +30,7 @@ import {
   SafeHttpClient,
   SafeTransportError,
   sanitizeHeaders,
+  type ActiveRuleExecutionContext,
 } from '../../src/scanner/index.js';
 import { createTestScanContext } from './helpers/test-context-helper.js';
 
@@ -174,6 +175,34 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       }).toThrowError(/matches excluded security prefix/i);
     });
 
+    it('strictly blocks active probes against potentially state-altering GET endpoints', async () => {
+      const gate = new ActiveSafetyGate({ enabled: true });
+      const context = await createTestScanContext({ primaryDomain: 'example.com' });
+
+      const dangerousPaths = [
+        'https://example.com/logout',
+        'https://example.com/auth/signout',
+        'https://example.com/user/sign-out',
+        'https://example.com/items/123/delete',
+        'https://example.com/account/destroy',
+        'https://example.com/auth/reset-password',
+        'https://example.com/api/cart/checkout',
+        'https://example.com/subscription/cancel',
+        'https://example.com/posts/delete/456',
+      ];
+
+      for (const url of dangerousPaths) {
+        expect(() => {
+          gate.checkAndAcquireProbeSlot(url, context, 'GET');
+        }).toThrowError(/potentially state-altering or mutating GET route/i);
+      }
+
+      // Safe endpoints should pass through
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/search?q=test', context, 'GET');
+      }).not.toThrow();
+    });
+
     it('enforces aggregate session request budget limit', async () => {
       const maxTotal = 3;
       const gate = new ActiveSafetyGate({ enabled: true, maxTotalRequests: maxTotal });
@@ -231,8 +260,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
 
       let dispatchedUrl = '';
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           dispatchedUrl = url;
@@ -255,22 +282,21 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       const f = findings[0]!;
       expect(f.ruleId).toBe(RULE_ACTIVE_XSS_CANARY);
       expect(f.vulnerabilityType).toBe('CROSS_SITE_SCRIPTING_REFLECTED');
-      expect(f.severity).toBe('HIGH');
-      expect(f.confidence).toBe('CONFIRMED');
+      expect(f.severity).toBe('INFORMATIONAL');
+      expect(f.confidence).toBe('LOW');
+      expect(f.title).toContain('Reflected Parameter Value in HTML Text');
       expect(f.evidence.parameter).toBe('q');
       expect(f.evidence.reflectionContext).toBe('HTML_TEXT');
       expect(dispatchedUrl).toContain('vltxcanary_');
     });
 
-    it('identifies reflection inside HTML attribute context', async () => {
+    it('identifies reflection inside HTML attribute context with LOW severity and LOW confidence', async () => {
       const rule = new XssCanaryRule();
       const page = createMockCrawledPage({
         url: 'https://example.com/profile?name=alice',
       });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           const u = new URL(url);
@@ -290,17 +316,18 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       const findings = await rule.evaluate(page, mockContext);
       expect(findings.length).toBe(1);
       expect(findings[0]?.evidence.reflectionContext).toBe('HTML_ATTRIBUTE');
+      expect(findings[0]?.severity).toBe('LOW');
+      expect(findings[0]?.confidence).toBe('LOW');
+      expect(findings[0]?.title).toContain('HTML Attribute');
     });
 
-    it('identifies reflection inside script block context', async () => {
+    it('identifies reflection inside script block context with MEDIUM severity and MEDIUM confidence', async () => {
       const rule = new XssCanaryRule();
       const page = createMockCrawledPage({
         url: 'https://example.com/app?user=test',
       });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           const u = new URL(url);
@@ -320,6 +347,40 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       const findings = await rule.evaluate(page, mockContext);
       expect(findings.length).toBe(1);
       expect(findings[0]?.evidence.reflectionContext).toBe('SCRIPT_BLOCK');
+      expect(findings[0]?.severity).toBe('MEDIUM');
+      expect(findings[0]?.confidence).toBe('MEDIUM');
+      expect(findings[0]?.title).toContain('Script Context');
+    });
+
+    it('proves ordinary search-term text reflection does NOT generate a CONFIRMED or HIGH XSS finding', async () => {
+      const rule = new XssCanaryRule();
+      const page = createMockCrawledPage({
+        url: 'https://example.com/search?q=normal_search_term',
+      });
+
+      const mockContext = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canary = u.searchParams.get('q') || '';
+          return {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'text/html' },
+            text: `<p>Your search returned 0 results for: ${canary}</p>`,
+            wireBytesReceived: 200,
+            decompressedBytes: 200,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      const findings = await rule.evaluate(page, mockContext);
+      expect(findings.length).toBe(1);
+      expect(findings[0]?.confidence).not.toBe('CONFIRMED');
+      expect(findings[0]?.severity).not.toBe('HIGH');
+      expect(findings[0]?.confidence).toBe('LOW');
+      expect(findings[0]?.severity).toBe('INFORMATIONAL');
     });
 
     it('does NOT flag when canary reflection is properly entity-encoded (&lt;canary&gt;)', async () => {
@@ -329,8 +390,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           const u = new URL(url);
@@ -358,8 +417,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
 
       let capturedProbeUrl = '';
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           capturedProbeUrl = url;
@@ -387,8 +444,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           return {
@@ -421,8 +476,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async () => {
           return {
@@ -447,8 +500,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       const page = createMockCrawledPage({ url: 'https://example.com/users?id=5' });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async () => {
           return {
@@ -477,8 +528,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async () => {
           return {
@@ -509,8 +558,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async () => {
           return {
@@ -535,8 +582,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
 
       const dispatchedUrls: string[] = [];
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           dispatchedUrls.push(url);
@@ -564,8 +609,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
 
       let requestedUrl = '';
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           requestedUrl = url;
@@ -602,8 +645,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       const page = createMockCrawledPage({ url: 'https://example.com/auth?redirect=/home' });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async () => {
           return {
@@ -624,17 +665,136 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
 
     it('does NOT flag same-origin redirection', async () => {
       const rule = new OpenRedirectRule();
-      const page = createMockCrawledPage({ url: 'https://example.com/logout' });
+      const page = createMockCrawledPage({ url: 'https://example.com/auth-return' });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async () => {
           return {
             status: 302,
             statusText: 'Found',
             headers: { 'location': 'https://example.com/login' },
+            text: '',
+            wireBytesReceived: 100,
+            decompressedBytes: 100,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      const findings = await rule.evaluate(page, mockContext);
+      expect(findings.length).toBe(0);
+    });
+
+    it('rejects lookalike hostnames (e.g. vltx-canary.invalid.attacker.com)', async () => {
+      const rule = new OpenRedirectRule();
+      const page = createMockCrawledPage({ url: 'https://example.com/redir?redirect=val' });
+
+      const mockContext = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canaryTarget = u.searchParams.get('redirect') || '';
+          const canaryPath = new URL(canaryTarget).pathname;
+          // Lookalike attacker domain
+          return {
+            status: 302,
+            statusText: 'Found',
+            headers: { 'location': `https://vltx-canary.invalid.attacker.com${canaryPath}` },
+            text: '',
+            wireBytesReceived: 100,
+            decompressedBytes: 100,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      const findings = await rule.evaluate(page, mockContext);
+      expect(findings.length).toBe(0);
+    });
+
+    it('rejects canary destination embedded in another URL query parameter', async () => {
+      const rule = new OpenRedirectRule();
+      const page = createMockCrawledPage({ url: 'https://example.com/redir?redirect=val' });
+
+      const mockContext = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canaryTarget = u.searchParams.get('redirect') || '';
+          // Canary is only a parameter value to a safe third party
+          return {
+            status: 302,
+            statusText: 'Found',
+            headers: { 'location': `https://safe-oauth-provider.com/login?returnUrl=${encodeURIComponent(canaryTarget)}` },
+            text: '',
+            wireBytesReceived: 100,
+            decompressedBytes: 100,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      const findings = await rule.evaluate(page, mockContext);
+      expect(findings.length).toBe(0);
+    });
+
+    it('rejects redirects with different scheme or port from the canary destination', async () => {
+      const rule = new OpenRedirectRule();
+      const page = createMockCrawledPage({ url: 'https://example.com/redir?redirect=val' });
+
+      const mockContextScheme = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canaryTarget = u.searchParams.get('redirect') || '';
+          const p = new URL(canaryTarget);
+          return {
+            status: 302,
+            statusText: 'Found',
+            headers: { 'location': `http://${p.hostname}${p.pathname}` }, // Insecure HTTP scheme
+            text: '',
+            wireBytesReceived: 100,
+            decompressedBytes: 100,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      expect((await rule.evaluate(page, mockContextScheme)).length).toBe(0);
+
+      const mockContextPort = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canaryTarget = u.searchParams.get('redirect') || '';
+          const p = new URL(canaryTarget);
+          return {
+            status: 302,
+            statusText: 'Found',
+            headers: { 'location': `https://${p.hostname}:8443${p.pathname}` }, // Different port
+            text: '',
+            wireBytesReceived: 100,
+            decompressedBytes: 100,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      expect((await rule.evaluate(page, mockContextPort)).length).toBe(0);
+    });
+
+    it('rejects external redirects that do not contain the canary destination', async () => {
+      const rule = new OpenRedirectRule();
+      const page = createMockCrawledPage({ url: 'https://example.com/redir?redirect=val' });
+
+      const mockContext = {
+        timeoutMs: 5000,
+        dispatchProbe: async () => {
+          return {
+            status: 302,
+            statusText: 'Found',
+            headers: { 'location': 'https://google.com/' },
             text: '',
             wireBytesReceived: 100,
             decompressedBytes: 100,
@@ -660,8 +820,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           return {
@@ -691,8 +849,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       const page = createMockCrawledPage({ url: 'https://example.com/docs?path=intro' });
 
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async () => {
           return {
@@ -718,8 +874,6 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
 
       const dispatchedUrls: string[] = [];
       const mockContext = {
-        client: {} as any,
-        context: {} as any,
         timeoutMs: 5000,
         dispatchProbe: async (url: string) => {
           dispatchedUrls.push(url);
@@ -830,10 +984,10 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       const findings = await analyzer.analyze(pages);
       expect(findings.length).toBeGreaterThanOrEqual(2);
 
-      // Verify XSS finding was discovered
+      // Verify XSS finding was discovered (reported with LOW confidence since alphanumeric only)
       const xssFinding = findings.find((f) => f.vulnerabilityType === 'CROSS_SITE_SCRIPTING_REFLECTED');
       expect(xssFinding).toBeDefined();
-      expect(xssFinding?.confidence).toBe('CONFIRMED');
+      expect(xssFinding?.confidence).toBe('LOW');
 
       // Verify SQLi finding was discovered
       const sqliFinding = findings.find((f) => f.vulnerabilityType === 'SQL_INJECTION_SYNTAX_ANOMALY');
@@ -931,6 +1085,114 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       // Does not throw, valid rule completes cleanly
       const findings = await analyzer.analyze(page);
       expect(findings.some((f) => f.ruleId === RULE_ACTIVE_XSS_CANARY)).toBe(true);
+    });
+
+    it('respects explicitly provided empty rules array (rules: []) by registering zero active rules', async () => {
+      const client = new SafeHttpClient({ allowLoopbackForTesting: true });
+      const context = await createTestScanContext({
+        primaryDomain: '127.0.0.1',
+        allowedPorts: [testPort],
+      });
+
+      const analyzer = new ActiveAnalyzer({
+        client,
+        context,
+        enabled: true,
+        rules: [],
+      });
+
+      expect(analyzer.getActiveRuleIds()).toEqual([]);
+      const page = createMockCrawledPage({
+        url: `http://127.0.0.1:${testPort}/search?q=test`,
+      });
+      const findings = await analyzer.analyze(page);
+      expect(findings).toEqual([]);
+      expect(analyzer.getTotalRequestsDispatched()).toBe(0);
+    });
+
+    it('respects explicitly provided empty enabledRuleIds array (enabledRuleIds: []) by running zero rules', async () => {
+      const client = new SafeHttpClient({ allowLoopbackForTesting: true });
+      const context = await createTestScanContext({
+        primaryDomain: '127.0.0.1',
+        allowedPorts: [testPort],
+      });
+
+      const analyzer = new ActiveAnalyzer({
+        client,
+        context,
+        enabled: true,
+        enabledRuleIds: [],
+      });
+
+      expect(analyzer.getActiveRuleIds()).toEqual([]);
+      const page = createMockCrawledPage({
+        url: `http://127.0.0.1:${testPort}/search?q=test`,
+      });
+      const findings = await analyzer.analyze(page);
+      expect(findings).toEqual([]);
+      expect(analyzer.getTotalRequestsDispatched()).toBe(0);
+    });
+
+    it('eliminates client and context capability bypass: ActiveRuleExecutionContext only provides dispatchProbe', async () => {
+      const client = new SafeHttpClient({ allowLoopbackForTesting: true });
+      const context = await createTestScanContext({
+        primaryDomain: '127.0.0.1',
+        allowedPorts: [testPort],
+      });
+
+      let observedContext: any = null;
+      const probeInspectorRule = {
+        id: 'RULE_PROBE_INSPECTOR',
+        name: 'Probe Inspector',
+        description: 'Verifies no transport capabilities are leaked',
+        evaluate: async (_page: CrawledPage, ruleContext: ActiveRuleExecutionContext) => {
+          observedContext = ruleContext;
+          // Verify rule can dispatch probe safely through the safety gate
+          await ruleContext.dispatchProbe(`http://127.0.0.1:${testPort}/search?q=safe_test`);
+          return [];
+        },
+      };
+
+      const analyzer = new ActiveAnalyzer({
+        client,
+        context,
+        enabled: true,
+        rules: [probeInspectorRule as any],
+      });
+
+      const page = createMockCrawledPage({
+        url: `http://127.0.0.1:${testPort}/search?q=test`,
+      });
+
+      await analyzer.analyze(page);
+
+      expect(observedContext).toBeDefined();
+      expect(observedContext.client).toBeUndefined();
+      expect(observedContext.context).toBeUndefined();
+      expect(typeof observedContext.dispatchProbe).toBe('function');
+      expect(typeof observedContext.timeoutMs).toBe('number');
+    });
+
+    it('skips active probing when page URL matches potentially mutating GET routes', async () => {
+      const client = new SafeHttpClient({ allowLoopbackForTesting: true });
+      const context = await createTestScanContext({
+        primaryDomain: '127.0.0.1',
+        allowedPorts: [testPort],
+      });
+
+      const analyzer = new ActiveAnalyzer({
+        client,
+        context,
+        enabled: true,
+      });
+
+      const logoutPage = createMockCrawledPage({
+        url: `http://127.0.0.1:${testPort}/logout?redirect=home`,
+      });
+
+      const findings = await analyzer.analyze(logoutPage);
+      expect(findings.length).toBe(0);
+      expect(analyzer.getTotalRequestsDispatched()).toBe(0);
     });
 
     it('guarantees that passive analyzer still makes ZERO network requests alongside active analyzer', async () => {

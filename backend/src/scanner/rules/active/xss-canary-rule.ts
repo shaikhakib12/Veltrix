@@ -11,6 +11,9 @@
  * - Inspects reflection context (HTML text, attribute, script block).
  * - Distinguishes raw reflection from entity-encoded reflections (&lt;canary&gt;);
  *   properly encoded reflections do NOT produce a vulnerability finding.
+ * - Honesty Mandate: Alphanumeric-only canaries cannot establish confirmed XSS.
+ *   Plain text reflection is reported with INFORMATIONAL/LOW severity and LOW confidence.
+ *   Script block reflection is reported with MEDIUM severity and MEDIUM confidence.
  */
 
 import crypto from 'node:crypto';
@@ -110,14 +113,43 @@ export class XssCanaryRule implements ActiveRuleInterface {
         const snippetEnd = Math.min(body.length, matchIdx + canary.length + 40);
         const snippet = body.slice(snippetStart, snippetEnd).trim();
 
+        // Honest Security Evaluation & Confidence Mapping:
+        // Plain alphanumeric canaries (vltxcanary_<16Hex>) prove parameter reflection,
+        // but cannot establish XSS exploitability without injecting syntax-breaking markup (<, >, ", ').
+        // Plain text reflection is standard web behavior and MUST NOT be reported as CONFIRMED XSS.
+        let severity: 'MEDIUM' | 'LOW' | 'INFORMATIONAL';
+        let confidence: 'MEDIUM' | 'LOW';
+        let title: string;
+        let description: string;
+
+        if (contextType === 'SCRIPT_BLOCK') {
+          // Reflection directly inside an executable script block is a high-risk indicator
+          severity = 'MEDIUM';
+          confidence = 'MEDIUM';
+          title = `Reflected Parameter in Script Context ('${param}')`;
+          description = `An inert alphanumeric canary (${canary}) was reflected inside an executable <script> block on ${page.url}. While this demonstrates reflection into JavaScript context, full XSS exploitability cannot be confirmed without syntax-breaking string delimiters.`;
+        } else if (contextType === 'HTML_ATTRIBUTE') {
+          // Reflection inside an HTML attribute
+          severity = 'LOW';
+          confidence = 'LOW';
+          title = `Reflected Parameter in HTML Attribute ('${param}')`;
+          description = `An inert alphanumeric canary (${canary}) was reflected inside an HTML tag attribute on ${page.url}. Exploitability is unconfirmed without attribute-escaping quotes.`;
+        } else {
+          // Plain HTML text reflection (e.g. search term reflection)
+          severity = 'INFORMATIONAL';
+          confidence = 'LOW';
+          title = `Reflected Parameter Value in HTML Text ('${param}')`;
+          description = `An inert alphanumeric canary (${canary}) was reflected in response body text on ${page.url}. This demonstrates parameter reflection, but does NOT establish XSS exploitability because alphanumeric canaries cannot demonstrate failure to escape HTML markup tags (<, >).`;
+        }
+
         findings.push(
           Object.freeze({
             ruleId: this.id,
             vulnerabilityType: 'CROSS_SITE_SCRIPTING_REFLECTED',
-            title: `Reflected Cross-Site Scripting (XSS) Canary in Parameter '${param}'`,
-            severity: 'HIGH',
-            confidence: 'CONFIRMED',
-            description: `An inert, non-executable alphanumeric canary (${canary}) was reflected verbatim without HTML entity encoding in parameter '${param}' on ${page.url}. Reflection context: ${contextType}.`,
+            title,
+            severity,
+            confidence,
+            description,
             remediation:
               'Apply context-aware output encoding (HTML entity encoding, attribute escaping, or JSON serialization) before rendering user input, and enforce a strong Content-Security-Policy.',
             url: page.url,
@@ -129,6 +161,8 @@ export class XssCanaryRule implements ActiveRuleInterface {
               reflectionContext: contextType,
               responseStatus: res.status,
               responseBodySnippet: snippet.slice(0, 300),
+              limitationNotice:
+                'Alphanumeric canaries demonstrate reflection without executable payload injection; exploitability is not confirmed.',
             }),
           })
         );

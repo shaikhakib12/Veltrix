@@ -24,6 +24,22 @@ import {
   isBlockedInternalPort,
 } from '../transport/types.js';
 
+/**
+ * Known potentially state-altering or destructive path segments often mistakenly
+ * exposed or triggered via HTTP GET requests in web applications.
+ *
+ * Active security probes are strictly blocked from requesting these routes to prevent
+ * accidental session termination, resource deletion, password resets, or transactional side effects.
+ */
+export const POTENTIALLY_MUTATING_GET_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
+  /(?:^|\/)(?:logout|signout|sign-out|log-off|logoff)(?:$|[?#\/])/i,
+  /(?:^|\/)(?:delete|destroy|purge|remove|drop|erase)(?:$|[?#\/])/i,
+  /(?:^|\/)(?:terminate|shutdown|reboot|restart|kill)(?:$|[?#\/])/i,
+  /(?:^|\/)(?:checkout|pay|payment|purchase|transfer|order\/submit)(?:$|[?#\/])/i,
+  /(?:^|\/)(?:reset-password|password-reset|change-password|revoke)(?:$|[?#\/])/i,
+  /(?:^|\/)(?:cancel|unsubscribe|opt-out|optout)(?:$|[?#\/])/i,
+]);
+
 export interface ActiveSafetyGateOptions {
   readonly enabled?: boolean;
   readonly maxTotalRequests?: number;
@@ -227,7 +243,19 @@ export class ActiveSafetyGate {
       }
     }
 
-    // 8. Request Budget checks
+    // 8. Conservative Non-Destructive Endpoint Safeguard
+    // Blocks active probing against application routes commonly used for destructive or state-altering GET actions
+    const isPotentiallyMutatingPath = POTENTIALLY_MUTATING_GET_PATH_PATTERNS.some((pattern) =>
+      pattern.test(pathname)
+    );
+    if (isPotentiallyMutatingPath) {
+      throw new SafeTransportError(
+        'MALFORMED_URL',
+        `Active probe blocked for potentially state-altering or mutating GET route: '${pathname}'. Active probing is restricted on sensitive operational routes to prevent unintended side effects.`
+      );
+    }
+
+    // 9. Request Budget checks
     if (this.totalRequestsDispatched >= this.maxTotalRequests) {
       throw new SafeTransportError(
         'MAX_RESPONSE_SIZE_EXCEEDED',

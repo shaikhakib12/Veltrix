@@ -6,11 +6,7 @@
  */
 
 import type { CrawledPage } from './crawler/types.js';
-import type {
-  SafeHttpResponse,
-  AuthorizedScanScopeContext,
-} from './transport/types.js';
-import type { SafeHttpClient } from './transport/safe-http-client.js';
+import type { SafeHttpResponse } from './transport/types.js';
 
 export type VulnerabilitySeverity =
   | 'CRITICAL'
@@ -64,8 +60,6 @@ export const RULE_PASSIVE_COOKIES = 'RULE_PASSIVE_COOKIES';
 export const RULE_PASSIVE_DISCLOSURE = 'RULE_PASSIVE_DISCLOSURE';
 
 export interface ActiveRuleExecutionContext {
-  readonly client: SafeHttpClient;
-  readonly context: AuthorizedScanScopeContext;
   readonly timeoutMs: number;
   readonly signal?: AbortSignal;
   dispatchProbe(
