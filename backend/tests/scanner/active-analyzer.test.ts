@@ -314,6 +314,56 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       }).toThrowError(/potentially state-altering or mutating GET route/i);
     });
 
+    it('strictly denies all endpoints when allowedEndpointPrefixes is explicitly empty ([])', async () => {
+      const gate = new ActiveSafetyGate({
+        enabled: true,
+        allowedEndpointPrefixes: [], // explicitly empty
+      });
+      const context = await createTestScanContext({ primaryDomain: 'example.com' });
+
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/search', context, 'GET');
+      }).toThrowError(/explicitly empty \(denies all endpoints\)/i);
+
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/', context, 'GET');
+      }).toThrowError(/explicitly empty \(denies all endpoints\)/i);
+      expect(gate.getTotalRequestsDispatched()).toBe(0);
+    });
+
+    it('enforces path-segment boundary matching for allowedEndpointPrefixes', async () => {
+      const gate = new ActiveSafetyGate({
+        enabled: true,
+        allowedEndpointPrefixes: ['/api/v1'],
+      });
+      const context = await createTestScanContext({ primaryDomain: 'example.com' });
+
+      // Valid segment matches
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/api/v1', context, 'GET');
+      }).not.toThrow();
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/api/v1/users', context, 'GET');
+      }).not.toThrow();
+
+      // Lookalike path segments that do not respect segment boundary are blocked
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/api/v1-secret', context, 'GET');
+      }).toThrowError(/not permitted by server-controlled active probe endpoint allowlist/i);
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/api/v10', context, 'GET');
+      }).toThrowError(/not permitted by server-controlled active probe endpoint allowlist/i);
+    });
+
+    it('validates and normalizes allowedEndpointPrefixes upon construction', () => {
+      expect(() => {
+        new ActiveSafetyGate({
+          enabled: true,
+          allowedEndpointPrefixes: ['invalid-no-leading-slash' as any],
+        });
+      }).toThrowError(/must start with '\/'/i);
+    });
+
     it('enforces aggregate session request budget limit', async () => {
       const maxTotal = 3;
       const gate = new ActiveSafetyGate({ enabled: true, maxTotalRequests: maxTotal });
@@ -548,6 +598,60 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       expect(findings[0]?.severity).toBe('LOW');
       expect(findings[0]?.confidence).toBe('LOW');
       expect(findings[0]?.title).toContain('Unquoted Script Context');
+    });
+
+    it('identifies canary contained in regex literals or comments with INFORMATIONAL severity and LOW confidence', async () => {
+      const rule = new XssCanaryRule();
+      const page = createMockCrawledPage({
+        url: 'https://example.com/app?q=test',
+      });
+
+      // Regex literal
+      const mockRegex = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canary = u.searchParams.get('q') || '';
+          return {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'text/html' },
+            text: `<html><head><script>const re = /pattern_${canary}/i;</script></head></html>`,
+            wireBytesReceived: 200,
+            decompressedBytes: 200,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      const fRegex = await rule.evaluate(page, mockRegex);
+      expect(fRegex.length).toBe(1);
+      expect(fRegex[0]?.evidence.reflectionContext).toBe('SCRIPT_STRING_LITERAL');
+      expect(fRegex[0]?.confidence).toBe('LOW');
+      expect(fRegex[0]?.severity).toBe('INFORMATIONAL');
+
+      // Comment
+      const mockComment = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canary = u.searchParams.get('q') || '';
+          return {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'text/html' },
+            text: `<html><head><script>// User query: ${canary}\nconst ok = true;</script></head></html>`,
+            wireBytesReceived: 200,
+            decompressedBytes: 200,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      const fComment = await rule.evaluate(page, mockComment);
+      expect(fComment.length).toBe(1);
+      expect(fComment[0]?.confidence).toBe('LOW');
+      expect(fComment[0]?.severity).toBe('INFORMATIONAL');
     });
 
     it('proves ordinary search-term text reflection does NOT generate a CONFIRMED or HIGH XSS finding', async () => {

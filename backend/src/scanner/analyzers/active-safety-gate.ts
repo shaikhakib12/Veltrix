@@ -144,11 +144,14 @@ export interface ActiveSafetyGateOptions {
   /**
    * Optional server-controlled allowlist of permitted endpoint path prefixes for active probes.
    * If provided and non-empty, only paths whose canonical representation starts with one of these prefixes
-   * are permitted to receive active probes.
+   * along path-segment boundaries are permitted to receive active probes.
    *
-   * Note: This allowlist CANNOT be configured or expanded by client request parameters; it must be
-   * configured by server-side scan orchestrators. Even if a path is allowlisted, it MUST still pass all
-   * scope, excluded-path, and non-destructive route pattern checks.
+   * Security Invariants:
+   * 1. Explicit Empty Deny: If explicitly provided as empty array `[]`, ALL endpoints are denied.
+   * 2. Segment Boundary Matching: Prefix `/api/v1` matches `/api/v1` and `/api/v1/users`, but NOT `/api/v1-secret`.
+   * 3. Server Authorization: Cannot be configured or expanded by client request parameters.
+   * 4. Multi-Layer Enforcement: Even if allowlisted, target must still pass all scope, port, exclusion,
+   *    and non-destructive checks.
    */
   readonly allowedEndpointPrefixes?: readonly string[];
 }
@@ -198,12 +201,18 @@ export class ActiveSafetyGate {
       if (!Array.isArray(options.allowedEndpointPrefixes)) {
         throw new TypeError('allowedEndpointPrefixes must be an array of path prefixes.');
       }
+      const validated: string[] = [];
       for (const prefix of options.allowedEndpointPrefixes) {
-        if (typeof prefix !== 'string' || !prefix.startsWith('/')) {
-          throw new RangeError(`Allowed endpoint prefix must be a non-empty string starting with '/' (received '${prefix}').`);
+        if (typeof prefix !== 'string' || prefix.trim().length === 0) {
+          throw new RangeError("Allowed endpoint prefix must be a non-empty string starting with '/'.");
         }
+        const trimmed = prefix.trim();
+        if (!trimmed.startsWith('/')) {
+          throw new RangeError(`Allowed endpoint prefix must start with '/' (received '${prefix}').`);
+        }
+        validated.push(path.posix.normalize(trimmed));
       }
-      this.allowedEndpointPrefixes = Object.freeze([...options.allowedEndpointPrefixes]);
+      this.allowedEndpointPrefixes = Object.freeze(validated);
     }
   }
 
@@ -219,6 +228,24 @@ export class ActiveSafetyGate {
    */
   public getTotalRequestsDispatched(): number {
     return this.totalRequestsDispatched;
+  }
+
+  /**
+   * Evaluates whether a canonical path matches an allowed prefix along directory/path-segment boundaries.
+   * E.g. prefix '/api/v1' matches '/api/v1' and '/api/v1/users', but NOT '/api/v1-secret' or '/api/v10'.
+   */
+  private isPathSegmentPrefixMatch(canonicalPath: string, prefix: string): boolean {
+    if (prefix === '/' || prefix === '') {
+      return true;
+    }
+    const cleanPrefix = prefix.endsWith('/') ? prefix.slice(0, -1) : prefix;
+    if (canonicalPath === cleanPrefix) {
+      return true;
+    }
+    if (canonicalPath.startsWith(cleanPrefix + '/')) {
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -366,9 +393,15 @@ export class ActiveSafetyGate {
     }
 
     // 8. Server-Controlled Active Probe Endpoint Allowlist (if configured)
-    if (this.allowedEndpointPrefixes && this.allowedEndpointPrefixes.length > 0) {
+    if (this.allowedEndpointPrefixes !== undefined) {
+      if (this.allowedEndpointPrefixes.length === 0) {
+        throw new SafeTransportError(
+          'MALFORMED_URL',
+          'Active probe blocked: server-controlled active probe endpoint allowlist is explicitly empty (denies all endpoints).'
+        );
+      }
       const isAllowedEndpoint = this.allowedEndpointPrefixes.some((prefix) =>
-        canonicalPath.startsWith(prefix)
+        this.isPathSegmentPrefixMatch(canonicalPath, prefix)
       );
       if (!isAllowedEndpoint) {
         throw new SafeTransportError(

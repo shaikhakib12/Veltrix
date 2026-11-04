@@ -223,12 +223,14 @@ export class XssCanaryRule implements ActiveRuleInterface {
 
   /**
    * Evaluates JavaScript script text before a reflection position to determine if the position
-   * falls inside an active quoted string literal or template literal.
+   * falls inside an active quoted string literal, template literal, regex literal, or comment.
    */
   private isInsideScriptString(scriptText: string): boolean {
     let inSingle = false;
     let inDouble = false;
     let inTemplate = false;
+    let inRegex = false;
+    let inRegexClass = false;
     let inLineComment = false;
     let inBlockComment = false;
     let escaped = false;
@@ -257,7 +259,7 @@ export class XssCanaryRule implements ActiveRuleInterface {
         continue;
       }
 
-      if (!inSingle && !inDouble && !inTemplate) {
+      if (!inSingle && !inDouble && !inTemplate && !inRegex) {
         if (ch === '/' && next === '/') {
           inLineComment = true;
           i++; // skip second /
@@ -268,6 +270,33 @@ export class XssCanaryRule implements ActiveRuleInterface {
           i++; // skip *
           continue;
         }
+        if (ch === '/') {
+          let prevChar = '';
+          for (let j = i - 1; j >= 0; j--) {
+            if (!/\s/.test(scriptText[j])) {
+              prevChar = scriptText[j];
+              break;
+            }
+          }
+          if (!prevChar || /[=(:,[!\&|?{};~^+-]/.test(prevChar)) {
+            inRegex = true;
+            inRegexClass = false;
+            continue;
+          }
+        }
+      } else if (inRegex) {
+        if (ch === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (ch === '[') {
+          inRegexClass = true;
+        } else if (ch === ']' && inRegexClass) {
+          inRegexClass = false;
+        } else if (ch === '/' && !inRegexClass) {
+          inRegex = false;
+        }
+        continue;
       }
 
       if (ch === '\\') {
@@ -284,6 +313,6 @@ export class XssCanaryRule implements ActiveRuleInterface {
       }
     }
 
-    return inSingle || inDouble || inTemplate;
+    return inSingle || inDouble || inTemplate || inRegex || inLineComment || inBlockComment;
   }
 }
