@@ -141,6 +141,7 @@ export class ActiveAnalyzer {
       enabled: options.enabled,
       maxTotalRequests: options.maxTotalRequests,
       maxRequestsPerEndpoint: options.maxRequestsPerEndpoint,
+      allowedEndpointPrefixes: options.allowedEndpointPrefixes,
     });
 
     // Validate concurrency

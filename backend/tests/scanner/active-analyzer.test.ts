@@ -30,6 +30,7 @@ import {
   SafeHttpClient,
   SafeTransportError,
   sanitizeHeaders,
+  canonicalizePathForInspection,
   type ActiveRuleExecutionContext,
 } from '../../src/scanner/index.js';
 import { createTestScanContext } from './helpers/test-context-helper.js';
@@ -203,6 +204,116 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       }).not.toThrow();
     });
 
+    it('blocks encoded mutating-route bypasses and normalizes path representations', async () => {
+      const gate = new ActiveSafetyGate({ enabled: true });
+      const context = await createTestScanContext({ primaryDomain: 'example.com' });
+
+      const bypassCandidates = [
+        'https://example.com/%6cogout',             // percent-encoded 'l'
+        'https://example.com/user/%6cogout',        // nested segment percent-encoded 'l'
+        'https://example.com/items/%64elete',       // percent-encoded 'd'
+        'https://example.com/items%2fdelete',       // encoded slash %2f
+        'https://example.com/items%2Fdelete',       // encoded slash %2F
+        'https://example.com/user%5clogout',        // encoded backslash %5c
+        'https://example.com/user%5C%6cogout',      // encoded backslash and 'l'
+        'https://example.com/%256cogout',           // double-encoded %256c -> %6c -> l
+        'https://example.com/items/%2564elete',     // double-encoded %2564 -> %64 -> d
+        'https://example.com/%6Cogout',             // mixed-case percent encoding
+        'https://example.com/%44elete',             // mixed-case percent encoding (%44 = D)
+        'https://example.com///logout',             // redundant slashes
+        'https://example.com/admin/../logout',      // directory traversal to mutating route
+      ];
+
+      for (const url of bypassCandidates) {
+        expect(() => {
+          gate.checkAndAcquireProbeSlot(url, context, 'GET');
+        }).toThrowError(/potentially state-altering or mutating GET route/i);
+      }
+    });
+
+    it('safely rejects malformed percent encodings without sending network requests', async () => {
+      const gate = new ActiveSafetyGate({ enabled: true });
+      const context = await createTestScanContext({ primaryDomain: 'example.com' });
+
+      const malformedUrls = [
+        'https://example.com/%6glogout',  // non-hex character 'g'
+        'https://example.com/%z',         // invalid hex
+        'https://example.com/%E0%A0',     // invalid truncated UTF-8 sequence
+        'https://example.com/path%',      // trailing bare percent
+        'https://example.com/path%2',     // trailing single hex digit
+      ];
+
+      for (const url of malformedUrls) {
+        expect(() => {
+          gate.checkAndAcquireProbeSlot(url, context, 'GET');
+        }).toThrowError(/Malformed percent-encoding/i);
+      }
+      expect(gate.getTotalRequestsDispatched()).toBe(0);
+    });
+
+    it('allows normal safe routes with and without safe percent encodings to pass through', async () => {
+      const gate = new ActiveSafetyGate({ enabled: true });
+      const context = await createTestScanContext({ primaryDomain: 'example.com' });
+
+      const safeUrls = [
+        'https://example.com/search?q=test',
+        'https://example.com/items/123',
+        'https://example.com/docs%20intro',
+        'https://example.com/products/catalog?sort=asc',
+        'https://example.com/api/v1/status',
+      ];
+
+      for (const url of safeUrls) {
+        expect(() => {
+          gate.checkAndAcquireProbeSlot(url, context, 'GET');
+        }).not.toThrow();
+      }
+    });
+
+    it('blocks encoded bypass attempts targeting mandatory excluded security paths', async () => {
+      const gate = new ActiveSafetyGate({ enabled: true });
+      const context = await createTestScanContext({ primaryDomain: 'example.com' });
+
+      const excludedBypasses = [
+        'https://example.com/.%65nv',        // .env with %65
+        'https://example.com/%2eenv',        // .env with %2e
+        'https://example.com/%252eenv',      // double-encoded .env
+        'https://example.com/%2egit/config', // .git with %2e
+      ];
+
+      for (const url of excludedBypasses) {
+        expect(() => {
+          gate.checkAndAcquireProbeSlot(url, context, 'GET');
+        }).toThrowError(/matches excluded security prefix/i);
+      }
+    });
+
+    it('enforces server-controlled active probe endpoint allowlist when configured', async () => {
+      const gate = new ActiveSafetyGate({
+        enabled: true,
+        allowedEndpointPrefixes: ['/api/public/', '/search'],
+      });
+      const context = await createTestScanContext({ primaryDomain: 'example.com' });
+
+      // Allowed endpoints
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/search?q=1', context, 'GET');
+      }).not.toThrow();
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/api/public/items', context, 'GET');
+      }).not.toThrow();
+
+      // Endpoints outside allowlist are blocked
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/admin/dashboard', context, 'GET');
+      }).toThrowError(/not permitted by server-controlled active probe endpoint allowlist/i);
+
+      // Even if under an allowlisted prefix, mutating routes and excluded paths are still blocked
+      expect(() => {
+        gate.checkAndAcquireProbeSlot('https://example.com/api/public/delete', context, 'GET');
+      }).toThrowError(/potentially state-altering or mutating GET route/i);
+    });
+
     it('enforces aggregate session request budget limit', async () => {
       const maxTotal = 3;
       const gate = new ActiveSafetyGate({ enabled: true, maxTotalRequests: maxTotal });
@@ -321,7 +432,7 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
       expect(findings[0]?.title).toContain('HTML Attribute');
     });
 
-    it('identifies reflection inside script block context with MEDIUM severity and MEDIUM confidence', async () => {
+    it('identifies canary safely contained in a quoted JavaScript string with INFORMATIONAL severity and LOW confidence', async () => {
       const rule = new XssCanaryRule();
       const page = createMockCrawledPage({
         url: 'https://example.com/app?user=test',
@@ -346,10 +457,97 @@ describe('Phase 8: Controlled Non-Destructive Active Security Probes (TASK-805)'
 
       const findings = await rule.evaluate(page, mockContext);
       expect(findings.length).toBe(1);
-      expect(findings[0]?.evidence.reflectionContext).toBe('SCRIPT_BLOCK');
-      expect(findings[0]?.severity).toBe('MEDIUM');
-      expect(findings[0]?.confidence).toBe('MEDIUM');
-      expect(findings[0]?.title).toContain('Script Context');
+      expect(findings[0]?.evidence.reflectionContext).toBe('SCRIPT_STRING_LITERAL');
+      expect(findings[0]?.severity).toBe('INFORMATIONAL');
+      expect(findings[0]?.confidence).toBe('LOW');
+      expect(findings[0]?.title).toContain('Script String Literal');
+      expect(findings[0]?.evidence.limitationNotice).toContain('quoted JavaScript string literal');
+    });
+
+    it('identifies canary safely contained in single-quoted and template string JavaScript literals', async () => {
+      const rule = new XssCanaryRule();
+      const page = createMockCrawledPage({
+        url: 'https://example.com/app?q=test',
+      });
+
+      // Single quotes
+      const mockSingle = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canary = u.searchParams.get('q') || '';
+          return {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'text/html' },
+            text: `<html><head><script>const query = '${canary}';</script></head></html>`,
+            wireBytesReceived: 200,
+            decompressedBytes: 200,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      const f1 = await rule.evaluate(page, mockSingle);
+      expect(f1.length).toBe(1);
+      expect(f1[0]?.evidence.reflectionContext).toBe('SCRIPT_STRING_LITERAL');
+      expect(f1[0]?.confidence).toBe('LOW');
+      expect(f1[0]?.severity).toBe('INFORMATIONAL');
+
+      // Template literal
+      const mockTemplate = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canary = u.searchParams.get('q') || '';
+          return {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'text/html' },
+            text: `<html><head><script>const query = \`${canary}\`;</script></head></html>`,
+            wireBytesReceived: 200,
+            decompressedBytes: 200,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      const f2 = await rule.evaluate(page, mockTemplate);
+      expect(f2.length).toBe(1);
+      expect(f2[0]?.evidence.reflectionContext).toBe('SCRIPT_STRING_LITERAL');
+      expect(f2[0]?.confidence).toBe('LOW');
+      expect(f2[0]?.severity).toBe('INFORMATIONAL');
+    });
+
+    it('identifies canary reflected unquoted in script context with LOW severity and LOW confidence', async () => {
+      const rule = new XssCanaryRule();
+      const page = createMockCrawledPage({
+        url: 'https://example.com/app?user=test',
+      });
+
+      const mockContext = {
+        timeoutMs: 5000,
+        dispatchProbe: async (url: string) => {
+          const u = new URL(url);
+          const canary = u.searchParams.get('user') || '';
+          return {
+            status: 200,
+            statusText: 'OK',
+            headers: { 'content-type': 'text/html' },
+            text: `<html><head><script>var currentUser = ${canary};</script></head></html>`,
+            wireBytesReceived: 200,
+            decompressedBytes: 200,
+            redirectHops: 0,
+          };
+        },
+      };
+
+      const findings = await rule.evaluate(page, mockContext);
+      expect(findings.length).toBe(1);
+      expect(findings[0]?.evidence.reflectionContext).toBe('SCRIPT_UNQUOTED');
+      expect(findings[0]?.severity).toBe('LOW');
+      expect(findings[0]?.confidence).toBe('LOW');
+      expect(findings[0]?.title).toContain('Unquoted Script Context');
     });
 
     it('proves ordinary search-term text reflection does NOT generate a CONFIRMED or HIGH XSS finding', async () => {

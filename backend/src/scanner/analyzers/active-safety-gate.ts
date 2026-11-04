@@ -15,8 +15,22 @@
  * - Strictly prohibits mutating HTTP methods (POST, PUT, DELETE, PATCH, etc.).
  * - Enforces aggregate session request budget and per-endpoint request budget.
  * - Any violation fails closed immediately with ZERO network requests.
+ *
+ * SECURITY ARCHITECTURE & LIMITATION DISCLOSURE:
+ * - Pattern-based dangerous-route blocking is an operational defense-in-depth heuristic, NOT
+ *   an absolute guarantee against state-altering or destructive GET endpoints.
+ * - HTTP and REST web applications can theoretically bind arbitrary mutations, state transitions,
+ *   or transactions to GET routes (e.g. /approve?id=123, /confirm, or custom API endpoints) that do
+ *   not match known keyword patterns.
+ * - Route pattern matching mitigates accidental triggering of conventional operational endpoints
+ *   (/logout, /delete, /destroy, /reset-password, /checkout, etc.), but cannot guarantee that all
+ *   unlisted GET requests are safe or idempotent.
+ * - For environments where zero-risk active assessment is required, the architecture supports an
+ *   explicit server-controlled endpoint allowlist (allowedEndpointPrefixes). Client inputs cannot
+ *   expand or self-authorize endpoints.
  */
 
+import path from 'node:path';
 import { isTrustedScopeContext, SERVER_MANDATORY_EXCLUDED_PATHS } from '../transport/context-authority.js';
 import {
   type AuthorizedScanScopeContext,
@@ -25,11 +39,94 @@ import {
 } from '../transport/types.js';
 
 /**
+ * Maximum number of percent-decoding passes to address multi-encoded or double-encoded path representations.
+ */
+const MAX_DECODE_PASSES = 3;
+
+/**
+ * Safely canonicalizes a URL pathname for security pattern matching and route exclusion checks.
+ *
+ * Requirements:
+ * 1. Safe Decoding: Rejects malformed percent-encoding safely (fails closed by throwing SafeTransportError).
+ * 2. Multi-encoding handling: Performs bounded repeated decoding (up to MAX_DECODE_PASSES).
+ * 3. Separator canonicalization: Replaces backslashes (\ and %5C) and encoded slashes (%2F) with forward slashes (/).
+ * 4. Posix normalization: Resolves dot segments (., ..) and collapses consecutive slashes (//) using path.posix.normalize.
+ * 5. Non-destructive: The output of this function is strictly used for security inspection; the outbound URL
+ *    dispatched over the wire is NEVER modified merely for matching purposes.
+ *
+ * @throws SafeTransportError('MALFORMED_URL') if percent-encoding is malformed or invalid UTF-8.
+ */
+export function canonicalizePathForInspection(rawPath: string): string {
+  if (typeof rawPath !== 'string' || rawPath.length === 0) {
+    return '/';
+  }
+
+  let current = rawPath;
+
+  // Bounded repeated decoding to address nested / double-encoded variants (e.g. /%256cogout)
+  for (let pass = 0; pass < MAX_DECODE_PASSES; pass++) {
+    if (!current.includes('%')) {
+      break;
+    }
+
+    let next: string;
+    try {
+      next = decodeURIComponent(current);
+    } catch {
+      throw new SafeTransportError(
+        'MALFORMED_URL',
+        `Malformed percent-encoding detected in probe target path: '${rawPath}'.`
+      );
+    }
+
+    if (next === current) {
+      break;
+    }
+    current = next;
+  }
+
+  // Check if there is still unresolved percent-encoding that would mutate further
+  if (current.includes('%')) {
+    try {
+      const peek = decodeURIComponent(current);
+      if (peek !== current) {
+        throw new SafeTransportError(
+          'MALFORMED_URL',
+          `Excessive nested percent-encoding detected in probe target path: '${rawPath}'.`
+        );
+      }
+    } catch {
+      throw new SafeTransportError(
+        'MALFORMED_URL',
+        `Malformed percent-encoding detected in probe target path: '${rawPath}'.`
+      );
+    }
+  }
+
+  // Canonicalize path separators: Convert backslashes (including literal and decoded %5c) to forward slashes
+  current = current.replace(/\\/g, '/');
+
+  // Normalize path segments (collapse redundant slashes, resolve . and ..)
+  let normalized = path.posix.normalize(current);
+
+  // Ensure leading slash
+  if (!normalized.startsWith('/')) {
+    normalized = `/${normalized}`;
+  }
+
+  return normalized;
+}
+
+/**
  * Known potentially state-altering or destructive path segments often mistakenly
  * exposed or triggered via HTTP GET requests in web applications.
  *
- * Active security probes are strictly blocked from requesting these routes to prevent
- * accidental session termination, resource deletion, password resets, or transactional side effects.
+ * CAUTION - HEURISTIC LIMITATION:
+ * This list represents common sensitive operational routes (/logout, /delete, /reset-password, etc.)
+ * to prevent accidental session termination, resource deletion, or transactional side effects.
+ * However, regex pattern matching is a defense-in-depth heuristic and DOES NOT guarantee that
+ * unlisted GET endpoints are non-destructive. Web applications may execute arbitrary state changes
+ * on custom GET routes.
  */
 export const POTENTIALLY_MUTATING_GET_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /(?:^|\/)(?:logout|signout|sign-out|log-off|logoff)(?:$|[?#\/])/i,
@@ -44,6 +141,16 @@ export interface ActiveSafetyGateOptions {
   readonly enabled?: boolean;
   readonly maxTotalRequests?: number;
   readonly maxRequestsPerEndpoint?: number;
+  /**
+   * Optional server-controlled allowlist of permitted endpoint path prefixes for active probes.
+   * If provided and non-empty, only paths whose canonical representation starts with one of these prefixes
+   * are permitted to receive active probes.
+   *
+   * Note: This allowlist CANNOT be configured or expanded by client request parameters; it must be
+   * configured by server-side scan orchestrators. Even if a path is allowlisted, it MUST still pass all
+   * scope, excluded-path, and non-destructive route pattern checks.
+   */
+  readonly allowedEndpointPrefixes?: readonly string[];
 }
 
 export class ActiveSafetyGate {
@@ -55,6 +162,7 @@ export class ActiveSafetyGate {
   private readonly enabled: boolean;
   private readonly maxTotalRequests: number;
   private readonly maxRequestsPerEndpoint: number;
+  private readonly allowedEndpointPrefixes?: readonly string[];
   private totalRequestsDispatched = 0;
   private readonly endpointRequestCounts = new Map<string, number>();
 
@@ -85,6 +193,18 @@ export class ActiveSafetyGate {
       );
     }
     this.maxRequestsPerEndpoint = rawMaxEndpoint;
+
+    if (options?.allowedEndpointPrefixes !== undefined) {
+      if (!Array.isArray(options.allowedEndpointPrefixes)) {
+        throw new TypeError('allowedEndpointPrefixes must be an array of path prefixes.');
+      }
+      for (const prefix of options.allowedEndpointPrefixes) {
+        if (typeof prefix !== 'string' || !prefix.startsWith('/')) {
+          throw new RangeError(`Allowed endpoint prefix must be a non-empty string starting with '/' (received '${prefix}').`);
+        }
+      }
+      this.allowedEndpointPrefixes = Object.freeze([...options.allowedEndpointPrefixes]);
+    }
   }
 
   /**
@@ -227,35 +347,52 @@ export class ActiveSafetyGate {
       }
     }
 
-    // 7. Excluded Paths check
-    const pathname = parsed.pathname;
+    // 7. Canonical Path Inspection & Excluded Paths check
+    const rawPathname = parsed.pathname;
+    const canonicalPath = canonicalizePathForInspection(rawPathname);
+
     const allExclusions = [
       ...SERVER_MANDATORY_EXCLUDED_PATHS,
       ...(context.excludedPaths || []),
     ];
 
     for (const excluded of allExclusions) {
-      if (pathname.startsWith(excluded)) {
+      if (rawPathname.startsWith(excluded) || canonicalPath.startsWith(excluded)) {
         throw new SafeTransportError(
           'MALFORMED_URL',
-          `Target probe path '${pathname}' matches excluded security prefix '${excluded}'.`
+          `Target probe path '${rawPathname}' (canonical: '${canonicalPath}') matches excluded security prefix '${excluded}'.`
         );
       }
     }
 
-    // 8. Conservative Non-Destructive Endpoint Safeguard
-    // Blocks active probing against application routes commonly used for destructive or state-altering GET actions
-    const isPotentiallyMutatingPath = POTENTIALLY_MUTATING_GET_PATH_PATTERNS.some((pattern) =>
-      pattern.test(pathname)
-    );
+    // 8. Server-Controlled Active Probe Endpoint Allowlist (if configured)
+    if (this.allowedEndpointPrefixes && this.allowedEndpointPrefixes.length > 0) {
+      const isAllowedEndpoint = this.allowedEndpointPrefixes.some((prefix) =>
+        canonicalPath.startsWith(prefix)
+      );
+      if (!isAllowedEndpoint) {
+        throw new SafeTransportError(
+          'MALFORMED_URL',
+          `Active probe blocked: canonical path '${canonicalPath}' is not permitted by server-controlled active probe endpoint allowlist.`
+        );
+      }
+    }
+
+    // 9. Conservative Non-Destructive Endpoint Safeguard
+    // Blocks active probing against application routes commonly used for destructive or state-altering GET actions.
+    // Evaluates both canonicalized and raw path representations to prevent encoding bypasses.
+    const isPotentiallyMutatingPath =
+      POTENTIALLY_MUTATING_GET_PATH_PATTERNS.some((pattern) => pattern.test(canonicalPath)) ||
+      POTENTIALLY_MUTATING_GET_PATH_PATTERNS.some((pattern) => pattern.test(rawPathname));
+
     if (isPotentiallyMutatingPath) {
       throw new SafeTransportError(
         'MALFORMED_URL',
-        `Active probe blocked for potentially state-altering or mutating GET route: '${pathname}'. Active probing is restricted on sensitive operational routes to prevent unintended side effects.`
+        `Active probe blocked for potentially state-altering or mutating GET route: '${rawPathname}' (canonical: '${canonicalPath}'). Active probing is restricted on sensitive operational routes to prevent unintended side effects.`
       );
     }
 
-    // 9. Request Budget checks
+    // 10. Request Budget checks
     if (this.totalRequestsDispatched >= this.maxTotalRequests) {
       throw new SafeTransportError(
         'MAX_RESPONSE_SIZE_EXCEEDED',
