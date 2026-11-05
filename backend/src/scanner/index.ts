@@ -14,3 +14,4 @@ export * from './rules/index.js';
 export * from './analyzers/index.js';
 export * from './scoring/index.js';
 export * from './evidence/index.js';
+export * from './orchestration/index.js';

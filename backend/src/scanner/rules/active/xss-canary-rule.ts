@@ -273,8 +273,9 @@ export class XssCanaryRule implements ActiveRuleInterface {
         if (ch === '/') {
           let prevChar = '';
           for (let j = i - 1; j >= 0; j--) {
-            if (!/\s/.test(scriptText[j])) {
-              prevChar = scriptText[j];
+            const charAtJ = scriptText[j];
+            if (charAtJ !== undefined && !/\s/.test(charAtJ)) {
+              prevChar = charAtJ;
               break;
             }
           }

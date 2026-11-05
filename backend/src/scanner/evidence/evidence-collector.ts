@@ -12,20 +12,20 @@
  */
 
 import crypto from 'node:crypto';
+import type { InternalTrustedEvidenceContext } from '@veltrix/shared';
 import type { ScannerFinding, VulnerabilitySeverity, FindingConfidence } from '../types.js';
+import type { CvssCalculationResult } from '../scoring/cvss-calculator.js';
 import {
   scrubUrl,
   scrubResponseBody,
   generateScrubbedCurl,
   MAX_EVIDENCE_EXCERPT_BYTES,
 } from './secret-scrubber.js';
-import { calculateCvss, type CvssCalculationResult } from '../scoring/cvss-calculator.js';
 import { ScoringEngine, type FindingRiskScore } from '../scoring/scoring-engine.js';
 import {
   InternalEvidenceAuthority,
   getDefaultInternalEvidenceAuthority,
   isInternalEvidenceAuthorityInitialized,
-  type InternalTrustedEvidenceContext,
 } from '../../detection/evidence-authority.js';
 
 export interface AssessmentFindingEvidence {
