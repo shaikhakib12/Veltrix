@@ -191,9 +191,10 @@ export const DetectionSchema = z.object({
 
 export const DetectionQuerySchema = z
   .object({
-    limit: z.coerce.number().int().min(1).max(100).default(50),
+    limit: z.coerce.number().int().min(1).max(500).default(50),
     cursor: z.string().optional(),
     ruleId: z.string().optional(),
+    siteId: z.string().optional(),
     severity: SeveritySchema.optional(),
     status: z.enum(['ACTIVE', 'RESOLVED', 'SUPPRESSED']).optional(),
     startTime: z.string().datetime({ message: 'startTime must be a valid ISO 8601 UTC timestamp' }).optional(),

@@ -13,6 +13,8 @@ import { createDashboardRouter } from './routes/dashboard.js';
 import { createDemoRouter } from './routes/demo.js';
 import { createAuditRouter } from './routes/audit.js';
 import { createResponseRouter } from './routes/response.js';
+import { createScansRouter } from './routes/scans.js';
+import { createFindingsRouter } from './routes/findings.js';
 import { authenticate } from './middleware/auth.js';
 import { enforceTenantIsolation } from './middleware/tenant.js';
 import { requireRole } from './middleware/rbac.js';
@@ -20,18 +22,24 @@ import { requireRole } from './middleware/rbac.js';
 export function createApp() {
   const app = express();
 
-  // Configure CORS origin restriction
+  // Configure CORS origin restriction with support for Vercel edge domains
+  const configuredOrigin = (process.env.FRONTEND_URL || '').replace(/\/$/, '');
   const allowedOrigins = [
-    process.env.FRONTEND_URL || 'http://localhost:5173',
+    configuredOrigin,
+    'http://localhost:5173',
     'http://localhost:3000',
     'http://127.0.0.1:5173',
-  ];
+  ].filter(Boolean);
 
   app.use(
     cors({
       origin: (origin, callback) => {
-        // Allow requests with no origin (e.g. mobile apps, curl, server-to-server)
-        if (!origin || allowedOrigins.includes(origin)) {
+        if (
+          !origin ||
+          allowedOrigins.includes(origin) ||
+          origin.endsWith('.vercel.app') ||
+          allowedOrigins.includes('*')
+        ) {
           callback(null, true);
         } else {
           callback(new Error(`Origin '${origin}' not allowed by CORS policy`));
@@ -99,6 +107,10 @@ export function createApp() {
   // Approval-gated response queue & tamper-evident audit ledger (Phase 10 read/act surface)
   app.use('/api/v1/response', createResponseRouter());
   app.use('/api/v1/audit', createAuditRouter());
+
+  // Authorized Vulnerability Scans & Findings (Phase 8)
+  app.use('/api/v1/scans', createScansRouter());
+  app.use('/api/v1/findings', createFindingsRouter());
 
   // Development-only deterministic demo dataset
   app.use('/api/v1/demo', createDemoRouter());

@@ -500,7 +500,7 @@ describe('Phase 3: Database & Cloud Provider Error Handling (TASK-302)', () => {
       cognitoProvider.login({ email: 'test@example.com', password: 'Password#123' })
     ).rejects.toThrow('COGNITO_NOT_CONFIGURED');
 
-    process.env.COGNITO_CLIENT_ID = oldClientId;
+    if (oldClientId) { process.env.COGNITO_CLIENT_ID = oldClientId; } else { delete process.env.COGNITO_CLIENT_ID; }
   });
 
   it('DynamoDBStore handles duplicate event conditional check failures gracefully', async () => {
@@ -532,5 +532,41 @@ describe('Phase 3: Database & Cloud Provider Error Handling (TASK-302)', () => {
     const result = await store.saveEvent(event);
     expect(result.saved).toBe(false);
     expect(result.isDuplicate).toBe(true);
+  });
+
+  it('demo-login succeeds for ORG_ADMIN even in aws storage mode', async () => {
+    const prevMode = process.env.STORAGE_MODE;
+    process.env.STORAGE_MODE = 'aws';
+    const app = createApp();
+    try {
+      const res = await request(app)
+        .post('/api/v1/auth/demo-login')
+        .send({ role: 'ORG_ADMIN' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.user.role).toBe('ORG_ADMIN');
+      expect(res.body.data.user.email).toBe('admin@cyberdefend.corp');
+      expect(res.body.data.tokens.accessToken).toBeDefined();
+    } finally {
+      process.env.STORAGE_MODE = prevMode;
+    }
+  });
+
+  it('demo-login returns 404 when DISABLE_DEMO_LOGIN is enabled', async () => {
+    const prevFlag = process.env.DISABLE_DEMO_LOGIN;
+    process.env.DISABLE_DEMO_LOGIN = 'true';
+    const app = createApp();
+    try {
+      const res = await request(app)
+        .post('/api/v1/auth/demo-login')
+        .send({ role: 'ORG_ADMIN' });
+
+      expect(res.status).toBe(404);
+      expect(res.body.success).toBe(false);
+      expect(res.body.error.code).toBe('NOT_FOUND');
+    } finally {
+      process.env.DISABLE_DEMO_LOGIN = prevFlag;
+    }
   });
 });

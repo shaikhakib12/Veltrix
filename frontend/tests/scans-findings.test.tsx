@@ -54,7 +54,7 @@ describe('ScansPage Component', () => {
     );
 
     expect(html).toContain('Vulnerability Scans');
-    expect(html).toContain('Awaiting Phase 8 Backend Scan Engine');
+    expect(html).toContain('Phase 8 Backend Scan Engine');
     expect(html).toContain('Launch Scan');
     expect(html).toContain('Scope Verification');
     expect(html).toContain('Target Asset Scope');

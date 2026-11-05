@@ -405,3 +405,68 @@ export async function fetchPlatformStatus() {
     }>
   >('/status', { auth: false });
 }
+
+// --- Domain Verification (Phase 8) -------------------------------------------
+
+export const verifyDomain = verifyDomainOwnership;
+
+export async function fetchScanAuthorization(siteId: string) {
+  const response = await apiRequest<ApiResponse<import('./types').ScanAuthResult>>(
+    `/websites/${siteId}/scan-authorization`
+  );
+  return response.data;
+}
+
+// --- Vulnerability Scans (Phase 8) -------------------------------------------
+
+export async function fetchScans(params?: { siteId?: string; status?: string }) {
+  const response = await apiRequest<ApiResponse<{ items: import('./types').ScanJob[]; total: number }>>(
+    `/scans${buildQuery(params || {})}`
+  );
+  return response.data.items;
+}
+
+export async function createScan(input: import('./types').CreateScanInput) {
+  const response = await apiRequest<ApiResponse<import('./types').ScanJob>>('/scans', {
+    method: 'POST',
+    body: input,
+  });
+  return response.data;
+}
+
+export async function abortScan(scanId: string) {
+  const response = await apiRequest<ApiResponse<import('./types').ScanJob>>(
+    `/scans/${scanId}/abort`,
+    { method: 'POST' }
+  );
+  return response.data;
+}
+
+// --- Vulnerability Findings (Phase 8) ----------------------------------------
+
+export async function fetchFindings(params?: {
+  siteId?: string;
+  severity?: string;
+  confidence?: string;
+}) {
+  const response = await apiRequest<
+    ApiResponse<{ items: import('./types').FindingDetail[]; total: number }>
+  >(`/findings${buildQuery(params || {})}`);
+  return response.data.items;
+}
+
+export async function fetchFinding(findingId: string) {
+  const response = await apiRequest<ApiResponse<import('./types').FindingDetail>>(
+    `/findings/${findingId}`
+  );
+  return response.data;
+}
+
+// --- Website Timeline (Phase 7 & 8) ------------------------------------------
+
+export async function fetchWebsiteTimeline(siteId: string) {
+  const response = await apiRequest<ApiResponse<import('./types').SiteTimeline>>(
+    `/websites/${siteId}/timeline`
+  );
+  return response.data;
+}

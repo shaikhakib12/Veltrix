@@ -204,7 +204,9 @@ export function createAuthRouter(): Router {
    * Disabled in production and in AWS/Cognito mode.
    */
   router.post('/demo-login', async (req: Request, res: Response) => {
-    if (process.env.NODE_ENV === 'production' || process.env.STORAGE_MODE === 'aws') {
+    const hasCognito = Boolean(process.env.COGNITO_CLIENT_ID) && process.env.COGNITO_CLIENT_ID !== 'undefined';
+    const isDemoDisabled = process.env.DISABLE_DEMO_LOGIN === 'true' || (hasCognito && process.env.ENABLE_DEMO_LOGIN !== 'true');
+    if (isDemoDisabled) {
       res.status(404).json({
         success: false,
         error: { code: 'NOT_FOUND', message: 'Demo login is not available in this environment' },

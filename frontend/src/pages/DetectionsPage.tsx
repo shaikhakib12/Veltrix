@@ -140,7 +140,7 @@ export function DetectionsPage() {
     queryKey: ['detections', { severity, ruleId, siteId }],
     queryFn: () =>
       fetchDetections({
-        limit: 150,
+        limit: 100,
         severity: (severity || undefined) as Severity | undefined,
         ruleId: ruleId || undefined,
         siteId: siteId || undefined,

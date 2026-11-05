@@ -104,3 +104,67 @@ export interface DemoSeedResult {
   incidents: number;
   topologyIncident?: string | null;
 }
+
+
+export interface DomainVerifyResult {
+  verified: boolean;
+  status: string;
+  verifiedAt?: string;
+  expiresAt?: string;
+  message: string;
+}
+
+export interface ScanAuthResult {
+  siteId: string;
+  primaryDomain: string;
+  status: string;
+  scanBlocked: boolean;
+  expiresAt?: string;
+  authorized: boolean;
+  code?: string;
+  message?: string;
+}
+
+export interface ScanJob {
+  scanId: string;
+  orgId?: string;
+  siteId: string;
+  targetDomain: string;
+  profile: 'PASSIVE_BASELINE' | 'STANDARD_ACTIVE' | 'FULL_AUDIT';
+  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'ABORTED' | 'FAILED';
+  currentStage: 'DISCOVERY' | 'CRAWL' | 'PASSIVE_EVALUATION' | 'ACTIVE_PROBING' | 'REPORT_GENERATION';
+  progressPercent: number;
+  findingsCount: number;
+  startedAt: string;
+  completedAt?: string;
+  durationSeconds?: number;
+}
+
+export interface CreateScanInput {
+  siteId: string;
+  profile?: 'PASSIVE_BASELINE' | 'STANDARD_ACTIVE' | 'FULL_AUDIT';
+  maxDepth?: number;
+  maxPages?: number;
+}
+
+export interface FindingDetail {
+  findingId: string;
+  orgId?: string;
+  siteId: string;
+  ruleId: string;
+  title: string;
+  vulnType: string;
+  cwe: string;
+  owasp: string;
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFORMATIONAL';
+  confidence: 'CONFIRMED' | 'HIGH' | 'MEDIUM' | 'LOW';
+  status: 'OPEN' | 'IN_REMEDIATION' | 'RESOLVED' | 'FALSE_POSITIVE';
+  targetUri: string;
+  targetParameter?: string;
+  cvssScore: number;
+  evidenceRequest: string;
+  evidenceResponse: string;
+  curlReproduction: string;
+  remediation: string;
+  discoveredAt: string;
+}

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
   Bug,
   Filter,
@@ -10,8 +11,11 @@ import {
   X,
   ShieldCheck,
   FileCode,
+  RefreshCw,
+  Sparkles,
 } from 'lucide-react';
-import type { VulnerabilityFindingSummary } from '@veltrix/shared';
+import { fetchFindings } from '../lib/api/endpoints';
+import type { FindingDetail } from '../lib/api/types';
 import {
   Card,
   Button,
@@ -20,30 +24,23 @@ import {
   EmptyState,
 } from '../components/ui/primitives';
 
-export interface FindingDetail extends VulnerabilityFindingSummary {
-  title: string;
-  cwe: string;
-  owasp: string;
-  evidenceRequest: string;
-  evidenceResponse: string;
-  curlReproduction: string;
-  remediation: string;
-  discoveredAt: string;
-}
+export { type FindingDetail };
 
-const DEFAULT_FINDINGS: FindingDetail[] = [
+const DEFAULT_FALLBACK_FINDINGS: FindingDetail[] = [
   {
     findingId: 'fnd-sqli-101',
     siteId: 'site-shop-01',
+    ruleId: 'RULE_ACTIVE_SQLI_ANOMALY',
     title: 'Unauthenticated SQL Injection in Authentication Endpoint',
     vulnType: 'SQL_INJECTION',
     cwe: 'CWE-89: SQL Injection',
     owasp: 'A03:2021-Injection',
+    severity: 'CRITICAL',
+    confidence: 'CONFIRMED',
+    status: 'OPEN',
     targetUri: '/api/v1/auth/login',
     targetParameter: 'username',
     cvssScore: 9.8,
-    severity: 'CRITICAL',
-    status: 'OPEN',
     evidenceRequest: `POST /api/v1/auth/login HTTP/1.1\nHost: shop.veltrix.io\nContent-Type: application/json\n\n{"username": "admin' OR 1=1 --", "password": "x"}`,
     evidenceResponse: `HTTP/1.1 200 OK\nContent-Type: application/json\n\n{"token": "eyJhbGciOi...", "role": "ADMIN", "bypassed": true}`,
     curlReproduction: `curl -s -X POST https://shop.veltrix.io/api/v1/auth/login \\\n  -H "Content-Type: application/json" \\\n  -d '{"username": "admin\\' OR 1=1 --", "password": "x"}'`,
@@ -53,37 +50,40 @@ const DEFAULT_FINDINGS: FindingDetail[] = [
   {
     findingId: 'fnd-xss-102',
     siteId: 'site-shop-01',
-    title: 'Reflected Cross-Site Scripting (XSS) in Product Search',
+    ruleId: 'RULE_ACTIVE_XSS_CANARY',
+    title: 'Reflected Cross-Site Scripting (XSS) via Canary Probe',
     vulnType: 'CROSS_SITE_SCRIPTING',
     cwe: 'CWE-79: Improper Neutralization of Input During Web Page Generation',
     owasp: 'A03:2021-Injection',
-    targetUri: '/products/search?q=<script>alert(1)</script>',
+    severity: 'HIGH',
+    confidence: 'CONFIRMED',
+    status: 'IN_REMEDIATION',
+    targetUri: '/products/search?q=vxcanary7a8b9c',
     targetParameter: 'q',
     cvssScore: 7.5,
-    severity: 'HIGH',
-    status: 'IN_REMEDIATION',
-    evidenceRequest: `GET /products/search?q=%3Cscript%3Ealert(1)%3C/script%3E HTTP/1.1\nHost: shop.veltrix.io`,
-    evidenceResponse: `HTTP/1.1 200 OK\nContent-Type: text/html\n\n<div class="search-term"><script>alert(1)</script></div>`,
-    curlReproduction: `curl -s "https://shop.veltrix.io/products/search?q=%3Cscript%3Ealert(1)%3C/script%3E"`,
-    remediation: 'Encode output contextually using HTML entity encoding before rendering user-controlled inputs into the DOM.',
+    evidenceRequest: `GET /products/search?q=vxcanary7a8b9c HTTP/1.1\nHost: shop.veltrix.io`,
+    evidenceResponse: `HTTP/1.1 200 OK\nContent-Type: text/html\n\n<div class="search-term"><span>vxcanary7a8b9c</span></div>`,
+    curlReproduction: `curl -s "https://shop.veltrix.io/products/search?q=vxcanary7a8b9c"`,
+    remediation: 'Contextually encode all user-controlled inputs with HTML entity encoding before rendering into DOM contexts.',
     discoveredAt: new Date(Date.now() - 1000 * 60 * 240).toISOString(),
   },
   {
-    findingId: 'fnd-ssrf-103',
+    findingId: 'fnd-tls-103',
     siteId: 'site-shop-01',
-    title: 'Blind SSRF via Webhook Notification Dispatcher',
-    vulnType: 'SSRF_ATTEMPT',
-    cwe: 'CWE-918: Server-Side Request Forgery',
-    owasp: 'A10:2021-Server-Side Request Forgery',
-    targetUri: '/api/v1/integrations/webhook-test',
-    targetParameter: 'callbackUrl',
-    cvssScore: 8.6,
-    severity: 'HIGH',
-    status: 'CONFIRMED',
-    evidenceRequest: `POST /api/v1/integrations/webhook-test HTTP/1.1\nHost: shop.veltrix.io\n\n{"callbackUrl": "http://169.254.169.254/latest/meta-data/"}`,
-    evidenceResponse: `HTTP/1.1 200 OK\n\n{"dispatched": true, "responseLength": 412}`,
-    curlReproduction: `curl -s -X POST https://shop.veltrix.io/api/v1/integrations/webhook-test -d '{"callbackUrl": "http://169.254.169.254/"}'`,
-    remediation: 'Implement an IP allowlist and block requests to internal RFC1918, RFC3927 (link-local), and loopback IP spaces.',
+    ruleId: 'RULE_PASSIVE_TLS',
+    title: 'TLS Certificate Expiring within 14 Days',
+    vulnType: 'INSECURE_TLS',
+    cwe: 'CWE-295: Improper Certificate Validation',
+    owasp: 'A02:2021-Cryptographic Failures',
+    severity: 'MEDIUM',
+    confidence: 'HIGH',
+    status: 'OPEN',
+    targetUri: 'https://shop.veltrix.io',
+    cvssScore: 5.3,
+    evidenceRequest: `TLS Handshake ClientHello -> shop.veltrix.io:443`,
+    evidenceResponse: `ServerCertificate: valid_to="2026-11-18T00:00:00Z" (Days remaining: 14)`,
+    curlReproduction: `curl -Iv https://shop.veltrix.io 2>&1 | grep "expire date"`,
+    remediation: 'Renew and deploy updated TLS certificate from trusted ACME / CA provider before expiration.',
     discoveredAt: new Date(Date.now() - 1000 * 60 * 360).toISOString(),
   },
 ];
@@ -91,9 +91,20 @@ const DEFAULT_FINDINGS: FindingDetail[] = [
 export function FindingsPage() {
   const [severityFilter, setSeverityFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  const [findings, setFindings] = useState<FindingDetail[]>(DEFAULT_FINDINGS);
   const [selectedFinding, setSelectedFinding] = useState<FindingDetail | null>(null);
   const [copied, setCopied] = useState(false);
+  const [statusOverrides, setStatusOverrides] = useState<Record<string, string>>({});
+
+  const { data: rawFindings = DEFAULT_FALLBACK_FINDINGS, refetch } = useQuery<FindingDetail[]>({
+    queryKey: ['findings', severityFilter],
+    queryFn: () => fetchFindings(severityFilter !== 'ALL' ? { severity: severityFilter } : undefined),
+    initialData: DEFAULT_FALLBACK_FINDINGS,
+  });
+
+  const findings = rawFindings.map((f) => ({
+    ...f,
+    status: (statusOverrides[f.findingId] || f.status) as FindingDetail['status'],
+  }));
 
   const filtered = findings.filter((f) => {
     if (severityFilter !== 'ALL' && f.severity !== severityFilter) return false;
@@ -102,8 +113,9 @@ export function FindingsPage() {
       const matchTitle = f.title.toLowerCase().includes(q);
       const matchType = f.vulnType.toLowerCase().includes(q);
       const matchUri = f.targetUri.toLowerCase().includes(q);
-      const matchCwe = f.cwe.toLowerCase().includes(q);
-      if (!matchTitle && !matchType && !matchUri && !matchCwe) return false;
+      const matchCwe = (f.cwe || '').toLowerCase().includes(q);
+      const matchRule = (f.ruleId || '').toLowerCase().includes(q);
+      if (!matchTitle && !matchType && !matchUri && !matchCwe && !matchRule) return false;
     }
     return true;
   });
@@ -118,12 +130,10 @@ export function FindingsPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleStatusChange = (findingId: string, newStatus: any) => {
-    setFindings((prev) =>
-      prev.map((f) => (f.findingId === findingId ? { ...f, status: newStatus } : f))
-    );
+  const handleStatusChange = (findingId: string, newStatus: string) => {
+    setStatusOverrides((prev) => ({ ...prev, [findingId]: newStatus }));
     if (selectedFinding?.findingId === findingId) {
-      setSelectedFinding((prev) => (prev ? { ...prev, status: newStatus } : null));
+      setSelectedFinding((prev) => (prev ? { ...prev, status: newStatus as any } : null));
     }
   };
 
@@ -141,6 +151,9 @@ export function FindingsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button variant="secondary" size="sm" icon={RefreshCw} onClick={() => refetch()}>
+            Refresh
+          </Button>
           <Button variant="secondary" size="sm" icon={Filter} onClick={() => alert('Exporting findings ledger CSV...')}>
             Export CSV
           </Button>
@@ -152,7 +165,7 @@ export function FindingsPage() {
         <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-cyan-400" />
         <div className="text-xs">
           <span className="font-semibold text-cyan-300">Phase 8 Vulnerability Catalog Ready:</span>{' '}
-          Findings generated during deep scans and correlation engine triage will be aggregated here with CVE ratings and reproduction steps.
+          Findings generated during deep scans, passive analysis, and active probes are aggregated here with CWE ratings, confidence markers, and reproduction cURL commands.
         </div>
       </div>
 
@@ -183,11 +196,10 @@ export function FindingsPage() {
             <button
               key={sev}
               onClick={() => setSeverityFilter(sev)}
-              className={`rounded-lg px-3 py-1 text-xs font-semibold border transition ${
-                severityFilter === sev
+              className={`rounded-lg px-3 py-1 text-xs font-semibold border transition ${severityFilter === sev
                   ? 'bg-cyan-500/10 border-cyan-500 text-cyan-300'
                   : 'bg-slate-900 border-slate-800 text-slate-400 hover:border-slate-700'
-              }`}
+                }`}
             >
               {sev}
             </button>
@@ -223,9 +235,10 @@ export function FindingsPage() {
                 <tr>
                   <th className="px-4 py-3">Severity</th>
                   <th className="px-4 py-3">CVSS</th>
-                  <th className="px-4 py-3">Vulnerability Flaw</th>
+                  <th className="px-4 py-3">Vulnerability Flaw & Rule</th>
+                  <th className="px-4 py-3">CWE Mapping</th>
                   <th className="px-4 py-3">Target Endpoint</th>
-                  <th className="px-4 py-3">Status</th>
+                  <th className="px-4 py-3">Confidence & Status</th>
                   <th className="px-4 py-3 text-right">Actions</th>
                 </tr>
               </thead>
@@ -244,23 +257,41 @@ export function FindingsPage() {
                     </td>
                     <td className="px-4 py-3 font-sans">
                       <div className="font-semibold text-white">{f.title}</div>
-                      <div className="text-[11px] font-mono text-cyan-400 mt-0.5">{f.vulnType}</div>
+                      <div className="flex items-center gap-2 mt-1">
+                        <span className="text-[11px] font-mono text-cyan-400">{f.vulnType}</span>
+                        {f.ruleId && (
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                            {f.ruleId}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 font-mono text-slate-400 text-[11px]">
+                      {f.cwe || 'N/A'}
                     </td>
                     <td className="px-4 py-3 font-mono text-slate-300">
                       {f.targetUri}
                     </td>
                     <td className="px-4 py-3 font-sans">
-                      <Badge
-                        tone={
-                          f.status === 'RESOLVED'
-                            ? 'success'
-                            : f.status === 'IN_REMEDIATION'
-                            ? 'medium'
-                            : 'critical'
-                        }
-                      >
-                        {f.status}
-                      </Badge>
+                      <div className="flex flex-col gap-1">
+                        {f.confidence && (
+                          <span className="inline-flex items-center gap-1 font-mono text-[10px] px-1.5 py-0.5 rounded bg-purple-500/10 text-purple-300 border border-purple-500/20 w-fit">
+                            <Sparkles className="h-2.5 w-2.5" />
+                            {f.confidence}
+                          </span>
+                        )}
+                        <Badge
+                          tone={
+                            f.status === 'RESOLVED'
+                              ? 'success'
+                              : f.status === 'IN_REMEDIATION'
+                                ? 'medium'
+                                : 'critical'
+                          }
+                        >
+                          {f.status}
+                        </Badge>
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right font-sans">
                       <button
@@ -295,6 +326,16 @@ export function FindingsPage() {
                   <span className="font-mono text-xs text-slate-400">
                     {selectedFinding.findingId}
                   </span>
+                  {selectedFinding.ruleId && (
+                    <span className="font-mono text-xs px-2 py-0.5 rounded bg-slate-800 text-cyan-300 border border-slate-700">
+                      {selectedFinding.ruleId}
+                    </span>
+                  )}
+                  {selectedFinding.confidence && (
+                    <span className="font-mono text-xs px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                      {selectedFinding.confidence}
+                    </span>
+                  )}
                 </div>
                 <h2 className="text-base font-bold text-white mt-1.5">{selectedFinding.title}</h2>
                 <div className="flex items-center gap-2 text-xs text-slate-400 mt-1 font-mono">

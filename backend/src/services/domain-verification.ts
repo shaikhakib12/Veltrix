@@ -3,30 +3,38 @@
  * Re-exports unified Domain Ownership Verification modules for backward compatibility and integration.
  */
 
-export {
+export type {
   DnsResolverInterface,
-  DefaultDnsResolver,
-  DnsVerifier,
   DnsVerificationResult,
 } from '../scanner/verification/dns-verifier.js';
-
 export {
+  DefaultDnsResolver,
+  DnsVerifier,
+} from '../scanner/verification/dns-verifier.js';
+
+export type {
   HttpFetcherInterface,
+  HttpVerificationResult,
+} from '../scanner/verification/http-verifier.js';
+export {
   DefaultHttpFetcher,
   HttpVerifier,
-  HttpVerificationResult,
   isProhibitedIpv4,
   isProhibitedIp,
 } from '../scanner/verification/http-verifier.js';
 
-export {
-  MetaVerifier,
+export type {
   MetaVerificationResult,
 } from '../scanner/verification/meta-verifier.js';
+export {
+  MetaVerifier,
+} from '../scanner/verification/meta-verifier.js';
 
+export type {
+  VerificationResult,
+  ScanAuthorizationCheckResult,
+} from '../scanner/verification/verifier.js';
 export {
   DomainOwnershipVerifier,
   DomainOwnershipVerifier as DomainVerificationService,
-  VerificationResult,
-  ScanAuthorizationCheckResult,
 } from '../scanner/verification/verifier.js';

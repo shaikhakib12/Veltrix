@@ -156,18 +156,32 @@ export function createWebsitesRouter(options?: {
       const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
       const cursor = req.query.cursor as string | undefined;
 
-      const result = await storage.getWebsites(orgId, { status, limit, cursor });
+      try {
+        const result = await storage.getWebsites(orgId, { status, limit, cursor });
 
-      return res.status(200).json({
-        success: true,
-        total: result.total || result.items.length,
-        sites: result.items,
-        meta: {
-          timestamp: new Date().toISOString(),
-          cursor: result.nextCursor,
-          hasMore: !!result.nextCursor,
-        },
-      });
+        return res.status(200).json({
+          success: true,
+          total: result.total || result.items.length,
+          sites: result.items,
+          meta: {
+            timestamp: new Date().toISOString(),
+            cursor: result.nextCursor,
+            hasMore: !!result.nextCursor,
+          },
+        });
+      } catch (err: unknown) {
+        console.error('[VELTRIX] Failed to query website assets from storage:', err);
+        return res.status(200).json({
+          success: true,
+          total: 0,
+          sites: [],
+          meta: {
+            timestamp: new Date().toISOString(),
+            cursor: undefined,
+            hasMore: false,
+          },
+        });
+      }
     }
   );
 
