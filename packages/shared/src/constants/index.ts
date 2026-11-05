@@ -174,3 +174,38 @@ export const WEB_ATTACK_TYPES = [
 ] as const;
 
 export const RISK_BANDS = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const;
+
+export const SCAN_PROFILES = [
+  'PASSIVE_BASELINE',
+  'STANDARD_ACTIVE',
+  'DEEP_ASSESSMENT',
+  'FULL_AUDIT',
+] as const;
+
+export const SCAN_STATUSES = [
+  'QUEUED',
+  'RUNNING',
+  'COMPLETED',
+  'ABORTED',
+  'FAILED',
+] as const;
+
+export const SCAN_STAGES = [
+  'DISCOVERY',
+  'CRAWL',
+  'PASSIVE_CHECKS',
+  'ACTIVE_CHECKS',
+  'FUZZ_INJECTION',
+  'VERIFY_EVIDENCE',
+  'SCORING',
+  'REPORT_GENERATION',
+] as const;
+
+export const FINDING_STATUSES = [
+  'OPEN',
+  'IN_REMEDIATION',
+  'RESOLVED',
+  'FALSE_POSITIVE',
+  'ACCEPTED_RISK',
+] as const;
+
