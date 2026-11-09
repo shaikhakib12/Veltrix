@@ -20,7 +20,7 @@ Modern Security Operations Centers (SOC) face crippling alert fatigue, uncoordin
 4. **Explainable Risk Scoring:** Calculates deterministic normalized scores ($0 - 100$) with transparent factor breakdowns.
 5. **Controlled Defensive SOAR:** Orchestrates approval-gated containment actions (`BLOCK_IP`, `SUSPEND_USER`, `REVOKE_SESSION`, `STEP_UP_AUTH`) with zero-bypass authorization and instant rollback.
 6. **Cryptographic Audit Ledger:** Maintains an append-only, SHA-256 hash-chained ledger serialized via SQS FIFO for tamper-evident compliance.
-
+ 
 ---
 
 ## 2. Monorepo Structure
